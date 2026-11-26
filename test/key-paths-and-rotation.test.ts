@@ -90,6 +90,8 @@ async function runRotate(opts: {
       String(opts.httpPort),
       "--admin-pass",
       "throwaway-admin-pass-not-a-secret",
+      "--admin-user",
+      "admin",
       "--keys-dir",
       opts.keysDir,
     ]);
@@ -317,6 +319,45 @@ describe("agent rotate-key (real command, POSIX)", () => {
     return pair.seed;
   }
 
+  it("rotates without hard links and preserves occupied backups", async () => {
+    const oldSeed = seedCurrentKey();
+    const legacy = `${privPath}.bak`;
+    const earlier = `${privPath}.bak.2020-01-01T00-00-00-000Z`;
+    writeFileSync(legacy, "legacy");
+    writeFileSync(earlier, "earlier");
+    const link = spyOn(fs, "linkSync").mockImplementation(() => {
+      throw Object.assign(new Error("hard links unavailable"), { code: "ENOTSUP" });
+    });
+    restoreFixture = () => link.mockRestore();
+
+    const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
+
+    expect(result.code).toBe(0);
+    expect(link).not.toHaveBeenCalled();
+    const backups = backupsOf(keysDir, id).filter(path => path !== earlier);
+    expect(backups).toHaveLength(1);
+    expect(readFileSync(backups[0]).equals(oldSeed)).toBe(true);
+    expect(modeOf(backups[0])).toBe(0o600);
+    expect(readFileSync(legacy, "utf8")).toBe("legacy");
+    expect(readFileSync(earlier, "utf8")).toBe("earlier");
+    expect(publicKeyOfSeed(readFileSync(privPath))).toBe(storedPublicKey);
+    expect(Number(statSync(privPath).ino)).toBe(stagedInode);
+    expect(updateBodies).toHaveLength(1);
+    expect(stagedOf(keysDir)).toEqual([]);
+  });
+
+  it("refuses a backup that fails the read-back check before sending an update", async () => {
+    const oldSeed = seedCurrentKey();
+    setAgentKeyFileTestHooks({ writeSeedFile: (fd, bytes) => fs.writeSync(fd, Buffer.alloc(bytes.length)) });
+
+    await expect(runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port }))
+      .rejects.toThrow("does not match the current key");
+
+    expect(readFileSync(privPath).equals(oldSeed)).toBe(true);
+    expect(backupsOf(keysDir, id)).toEqual([]);
+    expect(requestCount).toBe(0);
+  });
+
   it("(a) an existing 0644 key rotates to 0600: the new key and backup are created 0600; the warning prints", async () => {
     const oldSeed = seedCurrentKey(0o644);
     const observedModes: number[] = [];
@@ -514,7 +555,7 @@ describe("agent rotate-key (real command, POSIX)", () => {
       const oldSeed = seedCurrentKey();
       const sentinel = join(tmpDir, "sentinel");
       writeFileSync(sentinel, "keep");
-      opsMode = "update-500";
+      opsMode = recovery === "move" ? "transport-failure" : "update-500";
       const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
       expect(result.code).toBe(1);
       const staged = stagedOf(keysDir);
@@ -542,6 +583,7 @@ describe("agent rotate-key (real command, POSIX)", () => {
       expect(shell.status).toBe(0);
       expect(existsSync(staged[0])).toBe(false);
       expect(readFileSync(privPath).equals(recovery === "move" ? seed : oldSeed)).toBe(true);
+      expect(publicKeyOfSeed(readFileSync(privPath))).toBe(storedPublicKey);
       expect(modeOf(privPath)).toBe(0o600);
       expect(readdirSync(keysDir).sort()).toEqual(entriesBefore);
       expect(readFileSync(sentinel, "utf8")).toBe("keep");

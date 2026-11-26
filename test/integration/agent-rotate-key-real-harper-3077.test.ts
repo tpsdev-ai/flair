@@ -85,6 +85,8 @@ async function runRotate(): Promise<{ code: number; stdout: string; stderr: stri
       new URL(harper.httpURL).port,
       "--admin-pass",
       harper.admin.password,
+      "--admin-user",
+      harper.admin.username,
       "--keys-dir",
       keysDir,
     ]);

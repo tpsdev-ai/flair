@@ -39,7 +39,7 @@ import { encodeRecordId } from "../lib/record-id-path.js";
 import { resolveLocalDeleteInstance } from "../lib/local-delete-instance.js";
 import {
   AgentKeyFileRefusal,
-  createAgentKeyFile,
+  createAgentKeyBackup,
   ensureAgentKeysDir,
   readAgentKeyForRotation,
   readOrCreateAgentKey,
@@ -124,10 +124,13 @@ export function removeAgentKeyFiles(agentId: string, keysDir: string): { removed
     if (real !== join(root, name)) continue; // unexpected canonical target; skip
     try { unlinkSync(real); removed.push(real); } catch { /* best effort */ }
   }
-  // Rotation keeps each backup under a timestamped name, `<key>.bak.<stamp>`.
+  // Rotation retains timestamped backups and staged replacement keys.
   let backups: string[] = [];
   try {
-    backups = readdirSync(keysDir).filter((name) => name.startsWith(`${agentId}.key.bak.`));
+    backups = readdirSync(keysDir).filter((name) =>
+      name.startsWith(`${agentId}.key.bak.`) ||
+      (name.startsWith(`.${agentId}.key.tmp-`) && /^[0-9a-f]{16}$/.test(name.slice(`.${agentId}.key.tmp-`.length))),
+    );
   } catch { /* keys directory resolution failed */ }
   for (const name of backups) {
     let real: string;
@@ -752,7 +755,7 @@ export function register(program: Command): void {
       if (current) {
         backupPrivPath = `${currentPrivPath}.bak.${rotationBackupStamp()}`;
         try {
-          createAgentKeyFile(backupPrivPath, current.bytes);
+          createAgentKeyBackup(backupPrivPath, current.bytes);
         } catch (err) {
           if ((err as NodeJS.ErrnoException)?.code === "EEXIST") {
             console.error(`Error: backup path ${backupPrivPath} already exists; move it aside and run again.`);

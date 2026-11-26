@@ -11,7 +11,7 @@
  *     narrower); an existing directory owned by the current user is tightened
  *     to 0700 when it has group or world bits, with one notice line; a symlink,
  *     a non-directory, or a directory owned by another user is refused.
- *   - a new key is written to a unique temp file in the keys directory
+ *   - provisioning writes a new key to a unique temp file in the keys directory
  *     (O_CREAT|O_EXCL|O_NOFOLLOW, mode 0600), fsynced, then published with a
  *     hard link at the final path, so an occupied path is never overwritten.
  *   - an existing key is checked on the OPENED DESCRIPTOR: a regular file,
@@ -35,6 +35,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   renameSync,
   unlinkSync,
   writeSync,
@@ -346,6 +347,39 @@ export function createAgentKeyFile(privateKeyPath: string, data: string | Uint8A
     unlinkSync(tempPath);
   } catch {
     /* the published key is complete; a leftover temp file is mode 0600 */
+  }
+}
+
+export function createAgentKeyBackup(privateKeyPath: string, data: Uint8Array): void {
+  const bytes = Buffer.from(data);
+  // Exclusive creation preserves occupied backups without requiring hard links.
+  const fd = openSync(privateKeyPath, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | NOFOLLOW, 0o600);
+  try {
+    fchmodSync(fd, 0o600);
+    testHooks?.beforeFirstWrite?.(fd);
+    const writer = testHooks?.writeSeedFile ?? ((target: number, value: Buffer) => writeSync(target, value));
+    let offset = 0;
+    while (offset < bytes.length) {
+      const written = writer(fd, bytes.subarray(offset));
+      if (written <= 0) throw new Error(`short write to backup ${privateKeyPath}`);
+      offset += written;
+    }
+    fsyncSync(fd);
+    const reread = Buffer.alloc(bytes.length);
+    offset = 0;
+    while (offset < reread.length) {
+      const count = readSync(fd, reread, offset, reread.length - offset, offset);
+      if (count === 0) throw new Error(`short read from backup ${privateKeyPath}`);
+      offset += count;
+    }
+    if (fstatSync(fd).size !== bytes.length || !reread.equals(bytes)) {
+      throw new Error(`backup ${privateKeyPath} does not match the current key`);
+    }
+  } catch (error) {
+    try { unlinkSync(privateKeyPath); } catch { /* best effort */ }
+    throw error;
+  } finally {
+    closeSync(fd);
   }
 }
 
