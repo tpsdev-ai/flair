@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=149 options=704
+# commands=149 options=705
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -1827,6 +1827,9 @@ flair reembed
     --port <port>
       description: Harper HTTP port
       attr: port
+    --ops-port <port>
+      description: Harper operations API port
+      attr: opsPort
     --batch-size <n>
       description: Records per batch
       attr: batchSize
@@ -5305,17 +5308,18 @@ Usage: flair reembed [options]
 Re-generate embeddings for memories with stale or missing model tags
 
 Options:
-  --agent <id>      Agent ID to re-embed memories for (defaults to all agents
-                    with stale rows)
-  --stale-only      Only re-embed memories with mismatched model tag
-  --dry-run         Show count without modifying
-  --port <port>     Harper HTTP port
-  --batch-size <n>  Records per batch (default: "50")
-  --delay-ms <ms>   Delay between batches (ms) (default: "100")
-  -h, --help        display help for command
+  --agent <id>       Agent ID to re-embed memories for (defaults to all agents
+                     with stale rows)
+  --stale-only       Only re-embed memories with mismatched model tag
+  --dry-run          Show count without modifying
+  --port <port>      Harper HTTP port
+  --ops-port <port>  Harper operations API port
+  --batch-size <n>   Records per batch (default: "50")
+  --delay-ms <ms>    Delay between batches (ms) (default: "100")
+  -h, --help         display help for command
 
 Global Options:
-  -v, --version     output the version number
+  -v, --version      output the version number
 
 ----- flair test -----
 Usage: flair test [options]

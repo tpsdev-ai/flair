@@ -273,7 +273,7 @@ afterAll(async () => {
   if (logDir) rmSync(logDir, { recursive: true, force: true });
 }, HARPER_STOP_BUDGET_MS);
 
-type FetchEntry = { method: string; host: string; path: string };
+type FetchEntry = { method: string; host: string; path: string; adminAuthorization: boolean };
 type Run = { code: number | null; stdout: string; stderr: string; fetches: FetchEntry[] };
 
 async function runReembed(
@@ -325,7 +325,7 @@ test("a pair bound by the instance's configuration proceeds and the all-agent ru
   expect(code, stderr.slice(0, 800)).toBe(0);
   expect(stdout).toContain("✅ Re-embedding complete: 7 updated, 0 errors");
   expect(stdout).not.toContain("❌");
-  expect(stdout).not.toContain("row(s) not updated");
+  expect(stdout).not.toContain("row(s) update unconfirmed");
 }, 240_000);
 
 test("a named pair that configuration does not bind refuses with no Authorization header sent to that HTTP port", async () => {
@@ -411,7 +411,7 @@ test("a refused write in the all-agent path exits 1 and names the count and reas
   });
   expect(code, stderr.slice(0, 800)).toBe(1);
   expect(stdout).toContain("❌ Re-embedding complete: 6 updated, 1 errors");
-  expect(stdout).toContain("1 row(s) not updated: HTTP 500");
+  expect(stdout).toContain("1 row(s) update unconfirmed: HTTP 500");
   expect(stdout).not.toContain("✅ Re-embedding complete");
 }, 240_000);
 
@@ -421,7 +421,7 @@ test("a refused write in the single-agent path exits 1 and names the count and r
   });
   expect(code, stderr.slice(0, 800)).toBe(1);
   expect(stdout).toContain("❌ Re-embedding complete: 1 updated, 1 errors");
-  expect(stdout).toContain("1 row(s) not updated: HTTP 500");
+  expect(stdout).toContain("1 row(s) update unconfirmed: HTTP 500");
   expect(stdout).not.toContain("✅ Re-embedding complete");
 }, 240_000);
 
@@ -437,10 +437,10 @@ test("the summary reports each distinct failure reason once with its row count",
   });
   expect(code, stderr.slice(0, 800)).toBe(1);
   expect(stdout).toContain("❌ Re-embedding complete: 4 updated, 3 errors");
-  const reasonLines = stdout.split("\n").map((line) => line.trim()).filter((line) => line.includes("row(s) not updated:"));
+  const reasonLines = stdout.split("\n").map((line) => line.trim()).filter((line) => line.includes("row(s) update unconfirmed:"));
   expect(reasonLines).toHaveLength(2);
-  expect(reasonLines.filter((line) => line.startsWith("❌ 2 row(s) not updated: HTTP 500"))).toHaveLength(1);
-  expect(reasonLines.filter((line) => line.startsWith("❌ 1 row(s) not updated: HTTP 503"))).toHaveLength(1);
+  expect(reasonLines.filter((line) => line.startsWith("❌ 2 row(s) update unconfirmed: HTTP 500"))).toHaveLength(1);
+  expect(reasonLines.filter((line) => line.startsWith("❌ 1 row(s) update unconfirmed: HTTP 503"))).toHaveLength(1);
   expect(stdout).not.toContain("✅ Re-embedding complete");
 }, 240_000);
 
@@ -453,7 +453,7 @@ test("a stored model string with a newline renders as one failure reason line", 
     },
   });
   expect(code, stderr.slice(0, 800)).toBe(1);
-  const reasonLines = stdout.split("\n").filter((line) => line.includes("row(s) not updated:"));
+  const reasonLines = stdout.split("\n").filter((line) => line.includes("row(s) update unconfirmed:"));
   expect(reasonLines).toHaveLength(1);
   expect(reasonLines[0]).toContain("stored embeddingModel is wrong\\nmodel");
 }, 240_000);
@@ -467,7 +467,7 @@ test("a stored model string with a carriage return renders as one escaped failur
     },
   });
   expect(code, stderr.slice(0, 800)).toBe(1);
-  const reasonLines = stdout.split("\n").filter((line) => line.includes("row(s) not updated:"));
+  const reasonLines = stdout.split("\n").filter((line) => line.includes("row(s) update unconfirmed:"));
   expect(reasonLines).toHaveLength(1);
   expect(reasonLines[0]).toContain("stored embeddingModel is wrong\\rmodel");
 }, 240_000);
@@ -481,7 +481,7 @@ test("a stored model string with another C0 control character renders as one esc
     },
   });
   expect(code, stderr.slice(0, 800)).toBe(1);
-  const reasonLines = stdout.split("\n").filter((line) => line.includes("row(s) not updated:"));
+  const reasonLines = stdout.split("\n").filter((line) => line.includes("row(s) update unconfirmed:"));
   expect(reasonLines).toHaveLength(1);
   expect(reasonLines[0]).toContain("stored embeddingModel is wrong\\x07model");
 }, 240_000);
@@ -491,7 +491,7 @@ test("a thrown error message with a newline renders as one escaped failure entry
     env: { FLAIR_TEST_THROW_PATCH_JSON: JSON.stringify({ [rowPath(A_ROWS[0])]: "boom\nline two" }) },
   });
   expect(code, stderr.slice(0, 800)).toBe(1);
-  const reasonLines = stdout.split("\n").filter((line) => line.includes("row(s) not updated:"));
+  const reasonLines = stdout.split("\n").filter((line) => line.includes("row(s) update unconfirmed:"));
   expect(reasonLines).toHaveLength(1);
   expect(reasonLines[0]).toContain("PATCH failed: boom\\nline two");
 }, 240_000);
@@ -502,7 +502,7 @@ test("a successful PATCH whose readback fails exits non-zero and does not count 
   });
   expect(code, stderr.slice(0, 800)).toBe(1);
   expect(stdout).toContain("❌ Re-embedding complete: 1 updated, 1 errors");
-  expect(stdout).toContain("1 row(s) not updated: stored model read failed: HTTP 500");
+  expect(stdout).toContain("1 row(s) update unconfirmed: stored model read failed: HTTP 500");
   expect(stdout).not.toContain("✅ Re-embedding complete");
   expect((await rowState(A_ROWS[0])).embeddingModel).toBe(getModelId());
 }, 240_000);
@@ -513,7 +513,7 @@ test("a successful all-agent PATCH whose ops readback fails exits non-zero and d
   });
   expect(code, stderr.slice(0, 800)).toBe(1);
   expect(stdout).toContain("❌ Re-embedding complete: 6 updated, 1 errors");
-  expect(stdout).toContain("1 row(s) not updated: stored model read failed: HTTP 500");
+  expect(stdout).toContain("1 row(s) update unconfirmed: stored model read failed: HTTP 500");
   expect(stdout).not.toContain("✅ Re-embedding complete");
   expect(fetches.filter((entry) => entry.method === "PATCH").map((entry) => entry.path)).toContain(rowPath(REFUSED_ROW));
 }, 240_000);
@@ -525,7 +525,7 @@ test("a malformed 2xx readback is a failed read with its reason, not a missing s
     },
   });
   expect(allAgent.code, allAgent.stderr.slice(0, 800)).toBe(1);
-  expect(allAgent.stdout).toContain("row(s) not updated: stored model read failed: search_by_id answered an object, not a row array");
+  expect(allAgent.stdout).toContain("row(s) update unconfirmed: stored model read failed: search_by_id answered an object, not a row array");
   expect(allAgent.stdout).not.toContain("stored embeddingModel is missing");
 
   const signed = await runReembed(["reembed", "--agent", AGENT_A], homeOnlyA, false, {
@@ -534,7 +534,7 @@ test("a malformed 2xx readback is a failed read with its reason, not a missing s
     },
   });
   expect(signed.code, signed.stderr.slice(0, 800)).toBe(1);
-  expect(signed.stdout).toContain(`row(s) not updated: stored model read failed: GET /Memory/${A_ROWS[0]} answered an array, not a record`);
+  expect(signed.stdout).toContain(`row(s) update unconfirmed: stored model read failed: GET /Memory/${A_ROWS[0]} answered an array, not a record`);
   expect(signed.stdout).not.toContain("stored embeddingModel is missing");
 }, 300_000);
 
@@ -604,10 +604,11 @@ test("an agent id with a newline renders as one failure entry line", async () =>
   });
   const { code, stdout, stderr } = await runReembed(["reembed", "--agent", NEWLINE_AGENT], homeNewline, true);
   expect(code, stderr.slice(0, 800)).toBe(1);
-  const entry = stdout.split("\n").find((line) => line.includes("row(s) not updated:"));
+  const entry = stdout.split("\n").find((line) => line.includes("row(s) update unconfirmed:"));
   expect(entry).toBeDefined();
-  expect(entry).toContain(`--agent ${NEWLINE_AGENT.replace(/\n/g, "\\n")}`);
-  expect(entry).toContain("after fixing the cause");
+  expect(entry).toContain("same agent ID");
+  expect(entry).toContain(`--port ${realHttpPort()} --ops-port ${realOpsPort()}`);
+  expect(entry).not.toContain("`flair reembed");
 }, 240_000);
 
 test("the seeded rows are current after the runs (the re-embeds the assertions relied on)", async () => {
@@ -615,3 +616,56 @@ test("the seeded rows are current after the runs (the re-embeds the assertions r
     expect((await rowState(id)).embeddingModel, id).toBe(getModelId());
   }
 }, 60_000);
+
+
+test("ckLY an explicit CLI port pair reaches the real Harper write path", async () => {
+  const { code, stderr, fetches } = await runReembed(["reembed", "--ops-port", String(realOpsPort())], homeAllKeys, true, {
+    env: { FLAIR_OPS_PORT: "" },
+  });
+  expect(code, stderr.slice(0, 800)).toBe(0);
+  expect(patchPaths(fetches)).toContain(rowPath(REFUSED_ROW));
+}, 240_000);
+
+test("ckMA distinct newline and backslash stamps produce separate reason counts", async () => {
+  const { code, stdout, stderr } = await runReembed(["reembed", "--agent", AGENT_A], homeAllKeys, true, {
+    env: { FLAIR_TEST_REWRITE_OPS_READBACK_JSON: JSON.stringify({
+      [A_ROWS[0]]: JSON.stringify([{ id: A_ROWS[0], embeddingModel: "old\nmodel" }]),
+      [A_ROWS[1]]: JSON.stringify([{ id: A_ROWS[1], embeddingModel: "old\\nmodel" }]),
+    }) },
+  });
+  expect(code, stderr.slice(0, 800)).toBe(1);
+  const reasons = stdout.split("\n").filter(line => line.includes("row(s) update unconfirmed:"));
+  expect(reasons).toHaveLength(2);
+  expect(reasons[0]).toContain("1 row(s) update unconfirmed: stored embeddingModel is old\\nmodel");
+  expect(reasons[1]).toContain("1 row(s) update unconfirmed: stored embeddingModel is old\\\\nmodel");
+}, 240_000);
+
+test("ckME a fresh stale row commits despite a failed readback and reports update unconfirmed", async () => {
+  const id = "r3o-unconfirmed-fresh";
+  await op({ operation: "insert", database: "flair", table: "Memory", records: [memoryRow(id, AGENT_A, "private")] });
+  try {
+    expect((await rowState(id)).embeddingModel).toBe("old-model");
+    const { code, stdout, stderr, fetches } = await runReembed(["reembed", "--agent", AGENT_A], homeOnlyA, false, {
+      env: { FLAIR_TEST_REFUSE_GET_JSON: JSON.stringify({ [rowPath(id)]: 500 }) },
+    });
+    expect(code, stderr.slice(0, 800)).toBe(1);
+    expect(patchPaths(fetches)).toContain(rowPath(id));
+    expect((await rowState(id)).embeddingModel).toBe(getModelId());
+    expect(stdout).toContain("Re-embedding complete: 2 updated, 1 errors");
+    expect(stdout).toContain("update unconfirmed: stored model read failed: HTTP 500");
+    expect(stdout).not.toContain("not updated");
+  } finally {
+    await op({ operation: "delete", database: "flair", table: "Memory", ids: [id] });
+  }
+}, 240_000);
+
+test("ckMU dry-run reads real Harper with an unavailable listener table and no HTTP admin auth", async () => {
+  const { code, stdout, stderr, fetches } = await runReembed(["reembed", "--dry-run"], homeMissingC, true, {
+    env: { FLAIR_TEST_PAIR_OS_READS_UNAVAILABLE: "1" },
+  });
+  expect(code, stderr.slice(0, 800)).toBe(0);
+  expect(stdout).toContain("Read ");
+  expect(stdout).toContain("Memories to re-embed:");
+  expect(patchPaths(fetches)).toEqual([]);
+  expect(fetches.filter(entry => entry.host === harperHttpHost() && entry.adminAuthorization)).toEqual([]);
+}, 240_000);

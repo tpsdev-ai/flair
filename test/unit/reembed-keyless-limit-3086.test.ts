@@ -25,6 +25,7 @@ const patched: string[] = [];
 
 const realFetch = globalThis.fetch;
 const realExit = process.exit;
+const realExitCode = process.exitCode ?? 0;
 const realLog = console.log;
 const realError = console.error;
 
@@ -32,6 +33,7 @@ afterEach(() => {
   setInstancePairOsReadsForTests(null);
   globalThis.fetch = realFetch;
   process.exit = realExit;
+  process.exitCode = realExitCode;
   console.log = realLog;
   console.error = realError;
 });
@@ -44,6 +46,7 @@ function rows(count: number): Record<string, unknown>[] {
 
 async function run(seed: Record<string, unknown>[], dryRun = true): Promise<{ exitCode: number | null; logs: string[] }> {
   patched.length = 0;
+  process.exitCode = 0;
   globalThis.fetch = (async (url: unknown, init: unknown) => {
     const href = String(url);
     if (href.endsWith("/Health")) {
@@ -96,6 +99,8 @@ async function run(seed: Record<string, unknown>[], dryRun = true): Promise<{ ex
     if (saved.pass === undefined) delete process.env.FLAIR_ADMIN_PASS; else process.env.FLAIR_ADMIN_PASS = saved.pass;
     if (saved.hdb === undefined) delete process.env.HDB_ADMIN_PASSWORD; else process.env.HDB_ADMIN_PASSWORD = saved.hdb;
   }
+  exitCode ??= process.exitCode ? Number(process.exitCode) : null;
+  process.exitCode = realExitCode;
   return { exitCode, logs };
 }
 
@@ -116,7 +121,8 @@ test("one row below the limit prints no notice and returns normally", async () =
 
 test("without --dry-run the limit still processes its candidate, prints the notice once and exits 1", async () => {
   const current = getModelId();
-  const seed = rows(KEYLESS_SEARCH_LIMIT).map((row) => ({ ...row, embeddingModel: current }));
+  const seed: Record<string, unknown>[] = rows(KEYLESS_SEARCH_LIMIT).map((row) => ({ ...row, embeddingModel: current }));
+  seed[0] = { ...seed[0], agentId: "agent-b" };
   seed[seed.length - 1] = { ...seed[seed.length - 1], embeddingModel: "model-1" };
   const { exitCode, logs } = await run(seed, false);
   expect(patched).toEqual([`m-${KEYLESS_SEARCH_LIMIT - 1}`]);
@@ -125,7 +131,17 @@ test("without --dry-run the limit still processes its candidate, prints the noti
   expect(notices[0]).toContain(String(KEYLESS_SEARCH_LIMIT));
   expect(notices[0]).toContain("FLAIR_ADMIN_PASS");
   expect(exitCode).toBe(1);
+  expect(logs.join("\n")).not.toContain("✅");
 }, 30_000);
+
+test("a capped foreign listing has no up-to-date success marker", async () => {
+  const seed: Record<string, unknown>[] = rows(KEYLESS_SEARCH_LIMIT).map(row => ({ ...row, agentId: "agent-b" }));
+  const { exitCode, logs } = await run(seed, false);
+  expect(exitCode).toBe(1);
+  expect(patched).toEqual([]);
+  expect(logs.join("\n")).toContain(`Read ${KEYLESS_SEARCH_LIMIT} memories`);
+  expect(logs.join("\n")).not.toContain("✅");
+}, 10_000);
 
 for (const scenario of ["missing HTTP", "missing ops", "missing both", "unavailable listener table", "different proven pair", "override-named different proven pair", "derived target with no configured pair"] as const) {
   test(`the ${scenario} refusal prints its corresponding remedy`, async () => {

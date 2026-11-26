@@ -302,7 +302,7 @@ describe("flair#2296: flair reembed", () => {
     expect(r.out).toContain(`✅ Agent ${agentB.id}: 1 updated, 0 errors`);
     expect(r.out).toContain(`✅ Agent ${unregistered.id}: 1 updated, 0 errors`);
     expect(r.out).toContain("✅ Re-embedding complete: 3 updated, 0 errors");
-    expect(r.out).not.toContain("row(s) not updated");
+    expect(r.out).not.toContain("row(s) update unconfirmed");
     for (const row of before.values()) await expectOnlyEmbeddingChanged(row);
     for (const row of noAgentRow.values()) await expectOnlyEmbeddingChanged(row);
   }, 240_000);

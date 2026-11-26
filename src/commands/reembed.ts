@@ -382,7 +382,7 @@ function describeJsonShape(value: unknown): string {
  * reason across output lines and break the per-reason summary.
  */
 function oneLine(text: string): string {
-  return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, (ch) => {
+  return text.replace(/\\/g, "\\\\").replace(/[\u0000-\u001f\u007f-\u009f]/g, (ch) => {
     if (ch === "\n") return "\\n";
     if (ch === "\r") return "\\r";
     if (ch === "\t") return "\\t";
@@ -392,7 +392,16 @@ function oneLine(text: string): string {
 
 /** One line per distinct failure reason, with the rows that share it (flair#3128). */
 function failureReasonLines(reasons: Map<string, number>, remedy: string): string[] {
-  return [...reasons].map(([reason, count]) => `  ❌ ${count} row(s) not updated: ${reason} — ${remedy}`);
+  return [...reasons].map(([reason, count]) => `  ❌ ${count} row(s) update unconfirmed: ${reason} — ${remedy}`);
+}
+
+function retryRemedy(agentId: string | undefined, httpPort: string | number, opsPort: string | number): string {
+  const ports = `--port ${httpPort} --ops-port ${opsPort}`;
+  if (agentId && /[\u0000-\u001f\u007f-\u009f]/.test(agentId)) {
+    return `fix the cause, then re-run with the same agent ID and ${ports}`;
+  }
+  const agent = agentId ? ` --agent '${agentId.replace(/'/g, "'\\''")}'` : "";
+  return `re-run \`flair reembed${agent} ${ports}\` after fixing the cause`;
 }
 
 /**
@@ -575,6 +584,7 @@ program
   .option("--stale-only", "Only re-embed memories with mismatched model tag")
   .option("--dry-run", "Show count without modifying")
   .option("--port <port>", "Harper HTTP port")
+  .option("--ops-port <port>", "Harper operations API port")
   .option("--batch-size <n>", "Records per batch", "50")
   .option("--delay-ms <ms>", "Delay between batches (ms)", "100")
   .action(async (opts) => {
@@ -598,8 +608,10 @@ program
     // single-agent PATCH is signed, so its HTTP port stays `resolveHttpPort`.
     let target: ReturnType<ReembedCli["resolveAgentHomeTarget"]> | null = null;
     let baseUrl: string;
+    let agentPorts: { http: number; ops: number } | null = null;
     if (agentId) {
-      baseUrl = `http://127.0.0.1:${resolveHttpPort(opts)}`;
+      agentPorts = { http: resolveHttpPort(opts), ops: resolveOpsPort(opts) };
+      baseUrl = `http://127.0.0.1:${agentPorts.http}`;
     } else {
       try {
         target = resolveAgentHomeTarget(opts);
@@ -610,13 +622,14 @@ program
         process.exit(1);
       }
       baseUrl = `http://127.0.0.1:${target.httpPort}`;
-      // flair#3135: prove the pair before ANY request to the HTTP port, so the
-      // administrator credential reaches that port only after the proof.
-      const source = target.pairBound ? "configured" : bothTargetPortsNamed(opts) ? "named" : "derived";
-      const pairRefusal = await reembedTargetPairRefusal(target, resolveAdminUser(undefined), adminPassEnv!, source);
-      if (pairRefusal) {
-        console.error(pairRefusal);
-        process.exit(1);
+      // Prove the pair before a write run contacts HTTP with the administrator credential.
+      if (!dryRun) {
+        const source = target.pairBound ? "configured" : bothTargetPortsNamed(opts) ? "named" : "derived";
+        const pairRefusal = await reembedTargetPairRefusal(target, resolveAdminUser(undefined), adminPassEnv!, source);
+        if (pairRefusal) {
+          console.error(pairRefusal);
+          process.exit(1);
+        }
       }
     }
 
@@ -774,8 +787,8 @@ program
       console.log(
         `\n\n${failed ? "❌" : "✅"} Re-embedding complete: ${totalProcessed} updated, ${totalErrors} errors`,
       );
-      for (const line of failureReasonLines(errorsByReason, "re-run `flair reembed` after fixing the cause")) console.log(line);
-      if (failed) process.exit(1);
+      for (const line of failureReasonLines(errorsByReason, retryRemedy(undefined, target!.httpPort, opsPort))) console.log(line);
+      if (failed) process.exitCode = 1;
       return;
     }
 
@@ -799,7 +812,7 @@ program
     // else a signed GET as this agent.
     let readStoredModel: StoredModelReader = agentStoredModelReader(baseUrl, agentId, privPath);
     if (adminPassSingle) {
-      const opsPort = resolveOpsPort(opts);
+      const opsPort = agentPorts!.ops;
       const opsAuth = `Basic ${Buffer.from(`${resolveAdminUser(undefined)}:${adminPassSingle}`).toString("base64")}`;
       readStoredModel = opsStoredModelReader(opsPort, opsAuth);
       try {
@@ -856,10 +869,10 @@ program
     if (skipped > 0) console.log(`Skipped (up-to-date): ${skipped}`);
 
     if (dryRun || total === 0) {
-      if (total === 0) console.log("\n✅ All memories are up-to-date!");
+      if (total === 0 && !keylessTruncated) console.log("\n✅ All memories are up-to-date!");
       if (keylessTruncated) {
         console.log(keylessTruncationNotice(keylessListed));
-        process.exit(1);
+        process.exitCode = 1;
       }
       return;
     }
@@ -891,11 +904,11 @@ program
       if (i + batchSize < candidates.length) await new Promise(r => setTimeout(r, delayMs));
     }
 
-    const failed = errors > 0;
+    const failed = errors > 0 || keylessTruncated;
     console.log(`\n\n${failed ? "❌" : "✅"} Re-embedding complete: ${processed} updated, ${errors} errors`);
-    for (const line of failureReasonLines(errorsByReason, `re-run \`flair reembed --agent ${oneLine(agentId)}\` after fixing the cause`)) console.log(line);
+    for (const line of failureReasonLines(errorsByReason, retryRemedy(agentId, agentPorts!.http, agentPorts!.ops))) console.log(line);
     if (keylessTruncated) console.log(keylessTruncationNotice(keylessListed));
-    if (failed || keylessTruncated) process.exit(1);
+    if (failed) process.exitCode = 1;
   });
 
 }

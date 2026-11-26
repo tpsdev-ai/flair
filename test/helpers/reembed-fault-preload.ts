@@ -6,7 +6,7 @@
  *
  * Every input is an env var, so one preload serves every case:
  *   - FLAIR_TEST_FETCH_LOG names a file; each call appends one JSON line
- *     `{ method, host, path }` (host is `hostname:port`).
+ *     `{ method, host, path, adminAuthorization }` (host is `hostname:port`).
  *   - FLAIR_TEST_FETCH_EVENTS names a file; each call appends one JSON line
  *     `{ seq, method, path, request, response }` with the response parsed.
  *   - FLAIR_TEST_PAIR_OS_READS_UNAVAILABLE=1 stubs the OS listener table to
@@ -63,7 +63,7 @@ globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestIni
   const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
   const url = new URL(raw);
   const method = init?.method ?? (input instanceof Request ? input.method : "GET");
-  if (logPath) appendFileSync(logPath, `${JSON.stringify({ method, host: `${url.hostname}:${url.port}`, path: url.pathname })}\n`);
+  if (logPath) appendFileSync(logPath, `${JSON.stringify({ method, host: `${url.hostname}:${url.port}`, path: url.pathname, adminAuthorization: new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)).get("Authorization")?.startsWith("Basic ") ?? false })}\n`);
 
   let body: { operation?: unknown; ids?: unknown } | undefined;
   if (typeof init?.body === "string") {
