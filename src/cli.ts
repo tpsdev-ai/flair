@@ -4119,7 +4119,7 @@ export async function callOpsApi(
     let target = "the configured ops target";
     try {
       const parsed = new URL(opsUrl);
-      target = `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+      target = `${parsed.protocol}//${parsed.host}`;
     } catch {}
     let category = "no response";
     const seen = new Set<unknown>();

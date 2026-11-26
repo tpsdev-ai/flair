@@ -541,10 +541,10 @@ describe("callOpsApi fixed no-response descriptions (#3144)", () => {
     throw new Error("expected a request failure");
   }
 
-  test("reports the target scheme, host, port and path with a fixed no-response category", async () => {
+  test("reports the target scheme, host and port with a fixed no-response category", async () => {
     const password = "ops-p@ss:3144";
     const credentials = `ops-user:${password}`;
-    const target = `https://ops-user:${encodeURIComponent(password)}@127.0.0.1:19925/ops?token=query-3144#fragment-3144`;
+    const target = `https://ops-user:${encodeURIComponent(password)}@127.0.0.1:19925/ops/path-secret-3144?token=query-3144#fragment-3144`;
     const failure = new Error(`${target} ${credentials} ${password}`);
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () => { throw failure; }) as unknown as typeof fetch;
@@ -557,7 +557,8 @@ describe("callOpsApi fixed no-response descriptions (#3144)", () => {
         expect(message).not.toContain("ops-user");
         expect(message).not.toContain("query-3144");
         expect(message).not.toContain("fragment-3144");
-        expect(message).toContain("https://127.0.0.1:19925/ops (no response)");
+        expect(message).not.toContain("path-secret-3144");
+        expect(message).toContain("https://127.0.0.1:19925 (no response)");
       }
     } finally {
       globalThis.fetch = originalFetch;
@@ -571,7 +572,7 @@ describe("callOpsApi fixed no-response descriptions (#3144)", () => {
     const error = await rejectedRequest(`http://127.0.0.1:${port}/ops`);
     expect(error.cause).toBeUndefined();
     expect(error.message).toBe(
-      `ops API request got no response from http://127.0.0.1:${port}/ops (connection refused). ` +
+      `ops API request got no response from http://127.0.0.1:${port} (connection refused). ` +
       "Set --ops-target or FLAIR_OPS_TARGET to override.",
     );
     expect(error.toString()).toBe(`Error: ${error.message}`);
