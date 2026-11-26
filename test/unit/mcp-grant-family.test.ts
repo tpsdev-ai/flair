@@ -16,7 +16,7 @@
  *   - no key material ever reaches stdout/console output
  */
 import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, existsSync, fstatSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, existsSync, fstatSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { Command } from "commander";
 import nacl from "tweetnacl";
 import { register } from "../../src/commands/mcp.ts";
@@ -464,6 +464,27 @@ describe("grantMcpClient — key files", () => {
       if (failUnlink) expect(message).toContain(path);
     }
     expect(message).toContain(failUnlink ? "could not remove key file(s)" : "removed the key paths that still named this call's files when checked");
+  });
+
+  test("a cleanup check that fails with an error other than ENOENT names the path and leaves it", async () => {
+    const privPath = join(keysDir, "check-fail.key");
+    const pubPath = join(keysDir, "check-fail.pub");
+    let message = "";
+    try {
+      await grantMcpClient(
+        { name: "check-fail", keysDir, manifestPath, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "fixture" },
+        {
+          fetchImpl: mockOpsFetch({ failInsert: true }).fetchImpl,
+          lstatKeyFile: (path) => {
+            if (path === privPath) throw Object.assign(new Error("denied"), { code: "EACCES" });
+            return lstatSync(path);
+          },
+        },
+      );
+    } catch (error) { message = (error as Error).message; }
+    expect(message).toContain(`${privPath} (not removed: could not check it (EACCES))`);
+    expect(existsSync(privPath)).toBe(true);
+    expect(existsSync(pubPath)).toBe(false);
   });
 
   test("tightens a widened existing keys directory to owner-only on POSIX", async () => {
