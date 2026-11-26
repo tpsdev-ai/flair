@@ -4005,6 +4005,25 @@ async function assertSingleInstanceRowAfterWrite(endpoint: OpsEndpoint, expected
 // tarball with .env baked in, deploys via ops API, waits for restart, and
 // creates the super_user admin account.
 
+/**
+ * Request-body fields that carry a credential. The bodies `callOpsApi` sends
+ * hold a password only on `add_user`/`alter_user`; a non-2xx response can echo
+ * the submitted body, so each submitted value is replaced before the error is
+ * thrown (issue #3144).
+ */
+const OPS_API_CREDENTIAL_BODY_FIELDS = ["password"] as const;
+
+function redactOpsApiErrorBody(text: string, body: Record<string, unknown>): string {
+  let redacted = text;
+  for (const field of OPS_API_CREDENTIAL_BODY_FIELDS) {
+    const value = body[field];
+    if (typeof value === "string" && value.length > 0) {
+      redacted = redacted.split(value).join("[redacted]");
+    }
+  }
+  return redacted;
+}
+
 export async function callOpsApi(
   opsUrl: string,
   body: Record<string, unknown>,
@@ -4031,7 +4050,7 @@ export async function callOpsApi(
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`Ops API call failed (${res.status}): ${text}`);
+    throw new Error(`Ops API call failed (${res.status}): ${redactOpsApiErrorBody(text, body)}`);
   }
   return res.json();
 }

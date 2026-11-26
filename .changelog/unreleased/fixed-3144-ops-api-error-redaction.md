@@ -1,0 +1,1 @@
+- **Ops API error messages no longer include a password submitted in the request.** A failed `add_user` or `alter_user` call that echoed the request body back now shows `[redacted]` in place of the submitted value.
