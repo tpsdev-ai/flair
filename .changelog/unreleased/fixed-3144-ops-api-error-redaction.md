@@ -1,1 +1,1 @@
-- **Non-2xx ops API responses now carry the HTTP status, the operation and a fixed description for known refusal categories; Harper's response text is never included.** Unrecognized refusals are reported as withheld; network errors keep their separate path.
+- **Errors thrown for non-2xx ops API responses carry the HTTP status, operation and a fixed refusal description; Harper's response text is never included.** Unrecognized refusals are reported as withheld; network errors keep their separate path.

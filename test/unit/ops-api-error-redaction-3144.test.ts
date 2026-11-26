@@ -12,7 +12,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { gunzipSync } from "node:zlib";
-import { buildDeployTarball, callOpsApi, provisionFabric } from "../../src/cli.js";
+import { buildDeployTarball, callOpsApi, OpsApiError, provisionFabric } from "../../src/cli.js";
 
 const USER = "cluster-admin";
 const PASS = "cluster-secret-3144";
@@ -43,11 +43,13 @@ type Mode =
 
 let server: ReturnType<typeof Bun.serve>;
 let mode: Mode;
+let statusOverride: number | undefined;
 /** The last credential the stub actually received, for the assertions. */
 let received: { password?: string; authorization?: string; payload?: string };
 
 beforeEach(() => {
   mode = "unclassified";
+  statusOverride = undefined;
   received = {};
   server = Bun.serve({
     port: 0,
@@ -135,7 +137,7 @@ beforeEach(() => {
         default:
           payload = { error: "some unclassified refusal" };
       }
-      return new Response(JSON.stringify(payload), { status, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify(payload), { status: statusOverride ?? status, headers: { "content-type": "application/json" } });
     },
   });
 });
@@ -217,6 +219,31 @@ describe("callOpsApi fixed error descriptions (#3144)", () => {
     expect(message).toContain("authentication failed");
     expect(message).toContain("list_users");
     expect(message).not.toContain("withheld");
+  });
+
+  test.each([
+    { refusal: "authentication-failed" as const, status: 403 },
+    { refusal: "not-permitted" as const, status: 401 },
+    { refusal: "already-exists" as const, status: 400 },
+  ])("withholds $refusal with status $status", async ({ refusal, status }) => {
+    mode = refusal;
+    statusOverride = status;
+    const error = await thrownError(addUserBody());
+
+    expect(error).toBeInstanceOf(OpsApiError);
+    expect((error as OpsApiError).category).toBeNull();
+    expectStatusAndOperation(error.message, status);
+    expect(error.message).toContain("the ops API refused the request (details withheld)");
+  });
+
+  test("withholds a 409 duplicate answering list_users", async () => {
+    mode = "already-exists";
+    const error = await thrownError({ ...addUserBody(), operation: "list_users" });
+
+    expect(error).toBeInstanceOf(OpsApiError);
+    expect((error as OpsApiError).category).toBeNull();
+    expectStatusAndOperation(error.message, 409, "list_users");
+    expect(error.message).toContain("the ops API refused the request (details withheld)");
   });
 
   test("reports an unclassified refusal with the withheld description", async () => {
@@ -482,6 +509,16 @@ describe("callOpsApi fixed error descriptions (#3144)", () => {
 
     expect(run.calls).toEqual(["list_users", "deploy_component", "add_user"]);
     expect(run.message).toContain("the operation is not permitted for this role");
+  });
+
+  test("does not alter a password after a duplicate with status 400", async () => {
+    const run = await provisionAgainst(() => new Response(
+      JSON.stringify({ error: "User admin already exists" }),
+      { status: 400, headers: { "content-type": "application/json" } },
+    ));
+
+    expect(run.calls).toEqual(["list_users", "deploy_component", "add_user"]);
+    expect(run.message).toContain("the ops API refused the request (details withheld)");
   });
 
   test("does not alter a password after a duplicate naming another user", async () => {
