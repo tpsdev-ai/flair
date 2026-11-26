@@ -1,1 +1,1 @@
-- **Ops API errors now report the HTTP status and the operation, and add Harper's own error string only when it contains no submitted credential.** A non-JSON body, a body with no string `error`/`message`, or one that matches a submitted value is reported as withheld.
+- **Ops API errors now carry the HTTP status, the operation and a fixed description for known refusal categories; Harper's response text is never included.** Unrecognized refusals are reported as withheld.

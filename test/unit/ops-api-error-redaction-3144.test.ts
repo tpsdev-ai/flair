@@ -1,12 +1,16 @@
 /**
- * A non-2xx ops API response is used as an error message only from a parsed JSON
- * body's `error`/`message` string, and only when that string carries no value the
- * call submitted as a credential (issue #3144). Each stub below BUILDS its answer
- * from the request it actually received, so the echo is the real submitted value.
- * Every echo case also checks the thrown message against decoding attempts.
+ * A non-2xx ops API response is classified internally and reported as a fixed,
+ * code-defined description; Harper's response text is never echoed (issue
+ * #3144). Each stub below BUILDS its answer from the request it actually
+ * received, so the echo is the real submitted value. Every echo case checks
+ * the thrown message directly and after decoding attempts.
  */
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { callOpsApi } from "../../src/cli.js";
+import { chdir } from "node:process";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { callOpsApi, provisionFabric } from "../../src/cli.js";
 
 const USER = "cluster-admin";
 const PASS = "cluster-secret-3144";
@@ -15,13 +19,18 @@ const PASSWORD = 'pa"ss\\word-3144\nend';
 const OPERATION = "add_user";
 
 type Mode =
+  | "already-exists"
+  | "not-permitted"
+  | "authentication-failed"
+  | "unclassified"
   | "error-echoes-password"
   | "error-echoes-base64-password"
   | "error-echoes-urlencoded-password"
-  | "error-echoes-auth-header"
+  | "error-echoes-lowercase-urlencoded-password"
+  | "error-echoes-json-escaped-password"
+  | "error-echoes-basic-password"
   | "error-echoes-deploy-payload"
   | "error-echoes-body-under-other-field"
-  | "safe-harper-error"
   | "non-json-body";
 
 let server: ReturnType<typeof Bun.serve>;
@@ -30,12 +39,16 @@ let mode: Mode;
 let received: { password?: string; authorization?: string; payload?: string };
 
 beforeEach(() => {
-  mode = "safe-harper-error";
+  mode = "unclassified";
   received = {};
   server = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
     async fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === "/FederationPair") {
+        return new Response(JSON.stringify({ error: "instanceId and publicKey required" }), { status: 400 });
+      }
       const authorization = req.headers.get("authorization") ?? "";
       const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
       received = {
@@ -43,32 +56,54 @@ beforeEach(() => {
         authorization,
         payload: typeof body.payload === "string" ? body.payload : undefined,
       };
-      let payload: Record<string, unknown>;
+      const password = received.password ?? "";
+      const lowercaseEscape = (value: string) =>
+        encodeURIComponent(value).replace(/%[0-9A-F]{2}/g, (escape) => escape.toLowerCase());
+      let payload: unknown;
+      let status = 400;
       switch (mode) {
+        case "already-exists":
+          status = 409;
+          payload = { error: `User admin already exists` };
+          break;
+        case "not-permitted":
+          status = 403;
+          payload = { error: "This operation is not authorized due to role restrictions and/or invalid database items" };
+          break;
+        case "authentication-failed":
+          status = 401;
+          payload = { error: "Login failed" };
+          break;
         case "error-echoes-password":
-          payload = { error: `invalid password: ${received.password}` };
+          payload = { error: `invalid password: ${password}` };
           break;
         case "error-echoes-base64-password":
-          payload = { error: `invalid password: ${Buffer.from(received.password ?? "").toString("base64")}` };
+          payload = { error: `invalid password: ${Buffer.from(password).toString("base64")}` };
           break;
         case "error-echoes-urlencoded-password":
-          payload = { error: `invalid password: ${encodeURIComponent(received.password ?? "")}` };
+          payload = { error: `invalid password: ${encodeURIComponent(password)}` };
           break;
-        case "error-echoes-auth-header":
-          payload = { error: `bad credentials: ${authorization}` };
+        case "error-echoes-lowercase-urlencoded-password":
+          payload = { error: `invalid password: ${lowercaseEscape(password)}` };
+          break;
+        case "error-echoes-json-escaped-password":
+          payload = { error: `invalid password: ${JSON.stringify(password).slice(1, -1)}` };
+          break;
+        case "error-echoes-basic-password":
+          payload = { error: `rejected credential: ${authorization} ${password}` };
           break;
         case "error-echoes-deploy-payload":
-          payload = { error: `deploy rejected: ${(received.payload ?? "").slice(0, 80)}` };
+          payload = { error: `deploy rejected: ${(received.payload ?? "").slice(0, 120)}` };
           break;
         case "error-echoes-body-under-other-field":
-          payload = { error: "rejected", received: body };
+          payload = { error: "refused", received: body };
           break;
         case "non-json-body":
-          return new Response(`invalid password: ${received.password}`, { status: 400 });
+          return new Response(`invalid password: ${password}`, { status: 400 });
         default:
-          payload = { error: "Unknown operation: frobnicate" };
+          payload = { error: "some unclassified refusal" };
       }
-      return new Response(JSON.stringify(payload), { status: 400, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify(payload), { status, headers: { "content-type": "application/json" } });
     },
   });
 });
@@ -85,21 +120,23 @@ const addUserBody = () => ({
   active: true,
 });
 
-async function thrownMessage(body: Record<string, unknown>, user = USER, pass = PASS): Promise<string> {
+async function thrownError(body: Record<string, unknown>, user = USER, pass = PASS): Promise<Error> {
   try {
     await callOpsApi(`http://127.0.0.1:${server.port}`, body, user, pass);
   } catch (err: unknown) {
-    return err instanceof Error ? err.message : String(err);
+    return err instanceof Error ? err : new Error(String(err));
   }
   throw new Error("callOpsApi resolved; expected a non-2xx throw");
 }
 
 /** Can `secret` be read out of `message`, directly or through a decode? */
 function leaked(message: string, secret: string): boolean {
+  const uppercaseEscape = encodeURIComponent(secret);
   const forms = [
     secret,
     JSON.stringify(secret).slice(1, -1),
-    encodeURIComponent(secret),
+    uppercaseEscape,
+    uppercaseEscape.replace(/%[0-9A-F]{2}/g, (escape) => escape.toLowerCase()),
     Buffer.from(secret).toString("base64"),
   ];
   if (forms.some((form) => form.length > 0 && message.includes(form))) return true;
@@ -114,87 +151,177 @@ function leaked(message: string, secret: string): boolean {
   return false;
 }
 
-function expectStatusAndOperation(message: string, operation = OPERATION): void {
-  expect(message).toContain("(400)");
+function expectStatusAndOperation(message: string, status = 400, operation = OPERATION): void {
+  expect(message).toContain(`(${status})`);
   expect(message).toContain(operation);
 }
 
-describe("callOpsApi error allowlist (#3144)", () => {
-  test("withholds a password echoed raw (quote, backslash, newline)", async () => {
+describe("callOpsApi fixed error descriptions (#3144)", () => {
+  test("maps an existing user to the fixed already-exists description", async () => {
+    mode = "already-exists";
+    const message = (await thrownError({ operation: "add_user", username: "admin", password: "x" })).message;
+
+    expectStatusAndOperation(message, 409);
+    expect(message).toContain("the user already exists");
+    expect(message).not.toContain("User admin");
+    expect(message).not.toContain("withheld");
+  });
+
+  test("maps a role refusal to the fixed not-permitted description", async () => {
+    mode = "not-permitted";
+    const message = (await thrownError({ operation: "deploy_component", project: "flair" })).message;
+
+    expect(message).toContain("(403)");
+    expect(message).toContain("the operation is not permitted for this role");
+    expect(message).toContain("deploy_component");
+    expect(message).not.toContain("withheld");
+  });
+
+  test("maps a login refusal to the fixed authentication-failed description", async () => {
+    mode = "authentication-failed";
+    const message = (await thrownError({ operation: "list_users" })).message;
+
+    expect(message).toContain("(401)");
+    expect(message).toContain("authentication failed");
+    expect(message).toContain("list_users");
+    expect(message).not.toContain("withheld");
+  });
+
+  test("reports an unclassified refusal with the withheld description", async () => {
+    mode = "unclassified";
+    const message = (await thrownError(addUserBody())).message;
+
+    expectStatusAndOperation(message);
+    expect(message).toContain("the ops API refused the request (details withheld)");
+    expect(message).not.toContain("some unclassified refusal");
+  });
+
+  test("never echoes a password sent raw", async () => {
     mode = "error-echoes-password";
-    const message = await thrownMessage(addUserBody());
+    const message = (await thrownError(addUserBody())).message;
 
     expect(received.password).toBe(PASSWORD);
-    expectStatusAndOperation(message);
     expect(leaked(message, PASSWORD)).toBe(false);
     expect(message).toContain("withheld");
   });
 
-  test("withholds a password echoed as base64", async () => {
+  test("never echoes a password sent as base64", async () => {
     mode = "error-echoes-base64-password";
-    const message = await thrownMessage(addUserBody());
+    const message = (await thrownError(addUserBody())).message;
 
-    expectStatusAndOperation(message);
     expect(leaked(message, PASSWORD)).toBe(false);
     expect(message).toContain("withheld");
   });
 
-  test("withholds a password echoed URL-encoded", async () => {
+  test("never echoes a password sent as an uppercase URL escape", async () => {
     mode = "error-echoes-urlencoded-password";
-    const message = await thrownMessage(addUserBody());
+    const message = (await thrownError(addUserBody())).message;
 
-    expectStatusAndOperation(message);
     expect(leaked(message, PASSWORD)).toBe(false);
     expect(message).toContain("withheld");
   });
 
-  test("withholds an echo of the Authorization header", async () => {
-    mode = "error-echoes-auth-header";
-    const message = await thrownMessage({ operation: "list_users" });
+  test("never echoes a password sent as a lowercase URL escape", async () => {
+    mode = "error-echoes-lowercase-urlencoded-password";
+    const message = (await thrownError(addUserBody())).message;
+
+    expect(leaked(message, PASSWORD)).toBe(false);
+    expect(message).toContain("withheld");
+  });
+
+  test("never echoes a password sent as a JSON escape", async () => {
+    mode = "error-echoes-json-escaped-password";
+    const message = (await thrownError(addUserBody())).message;
+
+    expect(leaked(message, PASSWORD)).toBe(false);
+    expect(message).toContain("withheld");
+  });
+
+  test("never echoes the Basic password alone or its header", async () => {
+    mode = "error-echoes-basic-password";
+    const message = (await thrownError({ operation: "list_users" })).message;
 
     expect(received.authorization).toBe(`Basic ${Buffer.from(`${USER}:${PASS}`).toString("base64")}`);
-    expectStatusAndOperation(message, "list_users");
     expect(leaked(message, PASS)).toBe(false);
     expect(leaked(message, `${USER}:${PASS}`)).toBe(false);
     expect(message).toContain("withheld");
   });
 
-  test("keeps an echo of the deploy payload, which submits no credential field", async () => {
+  test("never echoes a deploy payload that carries a real .env credential", async () => {
     mode = "error-echoes-deploy-payload";
-    const payload = Buffer.from("tarball-bytes-3144").toString("base64");
-    const message = await thrownMessage({ operation: "deploy_component", project: "flair", payload, restart: "rolling" });
+    const envCredential = "deploy-env-credential-3144";
+    const payload = Buffer.from(`FLAIR_AGENT_SECRET=${envCredential}\n`).toString("base64");
+    const message = (await thrownError({ operation: "deploy_component", project: "flair", payload, restart: "rolling" })).message;
 
     expect(received.payload).toBe(payload);
-    expectStatusAndOperation(message, "deploy_component");
-    expect(leaked(message, PASS)).toBe(false);
-    expect(leaked(message, `${USER}:${PASS}`)).toBe(false);
-    expect(message).toContain("deploy rejected");
+    expect(leaked(message, envCredential)).toBe(false);
+    // The base64 payload itself must not survive either.
+    expect(leaked(message, payload)).toBe(false);
+    expect(message).toContain("withheld");
   });
 
-  test("keeps a safe Harper error string", async () => {
-    mode = "safe-harper-error";
-    const message = await thrownMessage(addUserBody());
-
-    expectStatusAndOperation(message);
-    expect(message).toContain("Unknown operation: frobnicate");
-  });
-
-  test("withholds a non-JSON body", async () => {
+  test("never echoes a non-JSON body", async () => {
     mode = "non-json-body";
-    const message = await thrownMessage(addUserBody());
+    const message = (await thrownError(addUserBody())).message;
 
-    expectStatusAndOperation(message);
     expect(leaked(message, PASSWORD)).toBe(false);
     expect(message).toContain("withheld");
   });
 
-  test("includes only the error field, never the echoed body under another field", async () => {
+  test("ignores an echoed body under another field", async () => {
     mode = "error-echoes-body-under-other-field";
-    const message = await thrownMessage(addUserBody());
+    const message = (await thrownError(addUserBody())).message;
 
-    expectStatusAndOperation(message);
-    expect(message).toContain("rejected");
+    expect(message).toContain("withheld");
     expect(leaked(message, PASSWORD)).toBe(false);
     expect(leaked(message, PASS)).toBe(false);
+  });
+
+  test("drives the alter_user fallback from the classification, not the message text", async () => {
+    const root = mkdtempSync(join(tmpdir(), "flair-unit-3144-"));
+    const originalCwd = process.cwd();
+    const calls: string[] = [];
+    server.stop(true);
+    server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      async fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === "/FederationPair") {
+          return new Response(JSON.stringify({ error: "instanceId and publicKey required" }), { status: 400 });
+        }
+        const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+        calls.push(String(body.operation));
+        switch (body.operation) {
+          case "list_users":
+            return new Response(JSON.stringify([
+              { username: USER, role: { permission: { super_user: false } } },
+            ]), { status: 200 });
+          case "deploy_component":
+            return new Response(JSON.stringify({ ok: true }), { status: 200 });
+          case "add_user":
+            return new Response(JSON.stringify({ error: "User admin already exists" }), { status: 409 });
+          case "alter_user":
+            return new Response(JSON.stringify({ ok: true }), { status: 200 });
+          default:
+            return new Response(JSON.stringify({ error: "unknown" }), { status: 400 });
+        }
+      },
+    });
+    try {
+      writeFileSync(join(root, "package.json"), "{}");
+      writeFileSync(join(root, "config.yaml"), "restart: rolling\n");
+      mkdirSync(join(root, "dist"));
+      mkdirSync(join(root, "schemas"));
+      for (const name of ["LICENSE", "README.md", "SECURITY.md"]) writeFileSync(join(root, name), "fixture\n");
+      chdir(root);
+      const origin = `http://127.0.0.1:${server.port}`;
+      const principal = await provisionFabric(origin, origin, USER, PASS, "flair-admin-3144");
+      expect(principal).toEqual({ username: "admin", password: "flair-admin-3144", created: true });
+      expect(calls).toEqual(["list_users", "deploy_component", "add_user", "alter_user"]);
+    } finally {
+      chdir(originalCwd);
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

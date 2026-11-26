@@ -4006,54 +4006,67 @@ async function assertSingleInstanceRowAfterWrite(endpoint: OpsEndpoint, expected
 // creates the super_user admin account.
 
 /**
- * Request-body fields that carry a credential. The bodies `callOpsApi` sends
- * hold a credential value on `add_user` and `alter_user` only; `deploy_component`
- * submits a base64 tarball (src/component-env.ts) and no credential field.
- *
- * A non-2xx response is used as an error message only from a parsed JSON body's
- * `error` (or `message`) string, and only when that string carries none of the
- * values this call submitted, in any of these forms: raw, JSON-string-escaped,
- * URL-encoded, base64, and the full Basic credential `user:password` with its
- * base64. Anything else withholds the text (issue #3144).
+ * Categories of ops API refusal that callers act on. `callOpsApi` classifies
+ * Harper's response text internally and throws a fixed, code-defined
+ * description for the category; the response text itself never reaches the
+ * message, in any encoding (issue #3144).
  */
-const OPS_API_CREDENTIAL_BODY_FIELDS = ["password"] as const;
+export type OpsApiErrorCategory = "already-exists" | "not-permitted" | "authentication-failed";
 
-/** Every form in which this call's submitted credentials could appear in a response. */
-function submittedOpsApiSecretForms(user: string, pass: string, body: Record<string, unknown>): string[] {
-  const values: string[] = [];
-  for (const field of OPS_API_CREDENTIAL_BODY_FIELDS) {
-    const value = body[field];
-    if (typeof value === "string" && value.length > 0) values.push(value);
+const OPS_API_ERROR_DESCRIPTIONS: Record<OpsApiErrorCategory, string> = {
+  "already-exists": "the user already exists",
+  "not-permitted": "the operation is not permitted for this role",
+  "authentication-failed": "authentication failed",
+};
+
+const OPS_API_REFUSAL_DESCRIPTION = "the ops API refused the request (details withheld)";
+
+/**
+ * Harper's spellings for each category. These strings are read here, for
+ * classification only, and are never copied into a message.
+ */
+const OPS_API_ERROR_PATTERNS: ReadonlyArray<readonly [OpsApiErrorCategory, RegExp]> = [
+  ["already-exists", /\balready exists\b/i],
+  ["not-permitted", /not permitted|not authorized|restricted to .?super_user.? roles|permission denied|forbidden/i],
+  ["authentication-failed", /login failed|invalid credentials|authentication failed|bad credentials/i],
+];
+
+/** A non-2xx ops API response, reduced to a category and a fixed description. */
+export class OpsApiError extends Error {
+  readonly status: number;
+  readonly operation: string;
+  readonly category: OpsApiErrorCategory | null;
+
+  constructor(status: number, operation: string, category: OpsApiErrorCategory | null) {
+    super(
+      `Ops API call failed (${status}) for '${operation}': ` +
+        (category === null ? OPS_API_REFUSAL_DESCRIPTION : OPS_API_ERROR_DESCRIPTIONS[category]),
+    );
+    this.name = "OpsApiError";
+    this.status = status;
+    this.operation = operation;
+    this.category = category;
   }
-  // The Basic authorization header carries `user:password`.
-  if (pass.length > 0) {
-    values.push(pass);
-    if (user.length > 0) values.push(`${user}:${pass}`);
-  }
-  const forms = new Set<string>();
-  for (const value of values) {
-    forms.add(value);
-    forms.add(JSON.stringify(value).slice(1, -1));
-    forms.add(encodeURIComponent(value));
-    forms.add(Buffer.from(value).toString("base64"));
-  }
-  return [...forms].filter((form) => form.length > 0);
 }
 
-/** Harper's own error string, when the body is JSON with one and it carries no submitted credential. */
-function opsApiErrorText(text: string, user: string, pass: string, body: Record<string, unknown>): string | null {
-  let parsed: unknown;
+function classifyOpsApiError(text: string): OpsApiErrorCategory | null {
+  // Classify Harper's `error`/`message` when the body is JSON; otherwise the raw
+  // text is all there is to read. The candidate is never returned or printed.
+  let candidate = text;
   try {
-    parsed = JSON.parse(text);
+    const parsed: unknown = JSON.parse(text);
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      const record = parsed as Record<string, unknown>;
+      const value = typeof record.error === "string" ? record.error : record.message;
+      if (typeof value === "string" && value.length > 0) candidate = value;
+    }
   } catch {
-    return null;
+    /* not JSON: classify the raw text */
   }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
-  const record = parsed as Record<string, unknown>;
-  const value = typeof record.error === "string" ? record.error : record.message;
-  if (typeof value !== "string" || value.length === 0) return null;
-  const secrets = submittedOpsApiSecretForms(user, pass, body);
-  return secrets.some((secret) => value.includes(secret)) ? null : value;
+  for (const [category, pattern] of OPS_API_ERROR_PATTERNS) {
+    if (pattern.test(candidate)) return category;
+  }
+  return null;
 }
 
 export async function callOpsApi(
@@ -4083,9 +4096,7 @@ export async function callOpsApi(
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     const operation = typeof body.operation === "string" ? body.operation : "unknown";
-    const detail = opsApiErrorText(text, user, pass, body) ??
-      "the response text was withheld because it could contain a submitted credential";
-    throw new Error(`Ops API call failed (${res.status}) for '${operation}': ${detail}`);
+    throw new OpsApiError(res.status, operation, classifyOpsApiError(text));
   }
   return res.json();
 }
@@ -4323,9 +4334,10 @@ export async function provisionFabric(
       }, clusterAdminUser, clusterAdminPass);
       console.log("User 'admin' created ✓");
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("already exists") || msg.includes("duplicate")) {
-        // Idempotent: fall back to alter_user
+      // Idempotent fallback, decided by the classification rather than by the
+      // printed message text.
+      if (err instanceof OpsApiError && err.category === "already-exists") {
+        // Fall back to alter_user
         console.log("User 'admin' already exists — updating password...");
         await callOpsApi(opsTarget, {
           operation: "alter_user",
