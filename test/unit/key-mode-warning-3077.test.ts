@@ -2,7 +2,9 @@
  * key-mode-warning-3077.test.ts — flair#3077 slice D.
  *
  * `flair doctor` and `flair status` warn when an agent key file is wider than
- * owner-only: the path, its octal mode and the exact remedy `chmod 600 <path>`.
+ * owner-only in the standard `resolveKeyPath` locations: the path, its octal
+ * mode and the exact remedy `chmod 600 <path>`. Explicit key paths (such as
+ * `--key`) are outside this scan.
  * A group bit alone (0640) is enough. A symlinked key is reported as not
  * checked and its target is not read for a mode. Neither command changes a
  * key file's bytes or mode.
@@ -26,7 +28,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { childOverranDeadline } from "../helpers/child-deadline.js";
-import { keyModeFindings, scanKeyDir } from "../../src/lib/key-dir.js";
+import { agentKeyLocations, scanAgentKeyModes } from "../../src/lib/key-dir.js";
+import { resolveKeyPath } from "../../src/lib/auth-resolve.js";
+import { isValidAgentId } from "../../src/lib/agent-id-rule.js";
+import { withHome } from "../../src/lib/home.js";
 
 const CLI = join(__dirname, "..", "..", "src", "cli.ts");
 // The child's own deadline and the per-case budget above it are written inline
@@ -318,6 +323,31 @@ test.skipIf(POSIX_ONLY)("a wide key in the legacy directory is warned by doctor 
   }
 }, 60_000);
 
+test.skipIf(POSIX_ONLY)("overlapping legacy and environment directories keep the legacy filename pattern", async () => {
+  const home = makeHome("overlapping-legacy");
+  const legacyKeys = join(home, ".tps", "secrets", "flair");
+  mkdirSync(legacyKeys, { recursive: true });
+  const id = "a".repeat(60);
+  expect(isValidAgentId(id)).toBe(true);
+  expect(isValidAgentId(`${id}-priv`)).toBe(false);
+  const key = join(legacyKeys, `${id}-priv.key`);
+  writeFileSync(key, "seed-overlapping-3077");
+  chmodSync(key, 0o644);
+  const previousKeyDir = process.env.FLAIR_KEY_DIR;
+  try {
+    process.env.FLAIR_KEY_DIR = legacyKeys;
+    expect(withHome(home, () => resolveKeyPath(id))).toBe(key);
+  } finally {
+    if (previousKeyDir === undefined) delete process.env.FLAIR_KEY_DIR;
+    else process.env.FLAIR_KEY_DIR = previousKeyDir;
+  }
+  for (const args of [["doctor"], ["status", "--url", url]]) {
+    const { output } = await runCli(args, home, false, { FLAIR_KEY_DIR: legacyKeys });
+    expect(output).toContain(`agent key file ${key} has mode 0644`);
+    expect(output).toContain(`chmod 600 ${key}`);
+  }
+}, 60_000);
+
 test.skipIf(POSIX_ONLY)("a key reached through FLAIR_KEY_DIR and the default directory is reported once", async () => {
   const home = makeHome("dedupe");
   const keys = join(home, ".flair", "keys");
@@ -329,13 +359,23 @@ test.skipIf(POSIX_ONLY)("a key reached through FLAIR_KEY_DIR and the default dir
 }, 60_000);
 
 describe("the mode scan reads no key contents", () => {
-  test.skipIf(POSIX_ONLY)("keyModeFindings lstats a wide key without opening or reading it", () => {
+  test.skipIf(POSIX_ONLY)("scanAgentKeyModes lstats keys in its standard locations without opening or reading them", () => {
     const home = makeHome("no-read");
     const key = writeKey(home, "agent-a", 0o644);
-    const keysDir = join(home, ".flair", "keys");
+    const envKeys = join(home, "env-keys");
+    const legacyKeys = join(home, ".tps", "secrets", "flair");
+    mkdirSync(envKeys);
+    mkdirSync(legacyKeys, { recursive: true });
+    const envKey = join(envKeys, "agent-env.key");
+    const legacyKey = join(legacyKeys, "agent-legacy-priv.key");
+    for (const path of [envKey, legacyKey]) {
+      writeFileSync(path, "seed-no-read-3077");
+      chmodSync(path, 0o644);
+    }
+    const keyPaths = [envKey, key, legacyKey];
     const touched: string[] = [];
     const guard = (name: string, original: (...args: any[]) => any) => (...args: any[]) => {
-      if (String(args[0]) === key) {
+      if (keyPaths.includes(String(args[0]))) {
         touched.push(name);
         throw new Error(`${name} touched a key file`);
       }
@@ -347,10 +387,17 @@ describe("the mode scan reads no key contents", () => {
     spyOn(fs.promises, "readFile").mockImplementation(guard("promises.readFile", fs.promises.readFile));
     spyOn(fs.promises, "open").mockImplementation(guard("promises.open", fs.promises.open));
 
-    const scan = scanKeyDir(keysDir);
-    expect(scan.state).toBe("ok");
-    if (scan.state !== "ok") return;
-    expect(keyModeFindings(keysDir, scan.entries)).toEqual([{ kind: "wide", path: key, mode: "0644" }]);
+    const previousKeyDir = process.env.FLAIR_KEY_DIR;
+    try {
+      process.env.FLAIR_KEY_DIR = envKeys;
+      const scan = withHome(home, () => scanAgentKeyModes());
+      expect(withHome(home, () => agentKeyLocations()).map(({ dir }) => dir)).toEqual([envKeys, join(home, ".flair", "keys"), legacyKeys]);
+      expect(scan.unreadable).toEqual([]);
+      expect(scan.findings).toEqual(keyPaths.map((path) => ({ kind: "wide", path, mode: "0644" })));
+    } finally {
+      if (previousKeyDir === undefined) delete process.env.FLAIR_KEY_DIR;
+      else process.env.FLAIR_KEY_DIR = previousKeyDir;
+    }
     expect(touched).toEqual([]);
   });
 });

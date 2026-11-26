@@ -155,10 +155,11 @@ bits is refused with `chmod 600 <path>`, while rotation reports it. A successful
 rotation replaces the file; a failed update leaves it. `flair doctor` warns
 about an existing agent key file with group or world bits, and `flair status`
 warns about it for a local target; both name the path, its mode and
-`chmod 600 <path>`, and neither changes the file. The check covers the
-locations signing reads: `$FLAIR_KEY_DIR/<agentId>.key` when that variable is
+`chmod 600 <path>`, and neither changes the file. The check covers the standard
+`resolveKeyPath` locations: `$FLAIR_KEY_DIR/<agentId>.key` when that variable is
 set, `~/.flair/keys/<agentId>.key`, and the legacy
-`~/.tps/secrets/flair/<agentId>-priv.key`. A symlinked agent key is
+`~/.tps/secrets/flair/<agentId>-priv.key`; explicit key paths (such as `--key`)
+are outside this scan. A symlinked agent key is
 reported as not checked. On Windows mode bits
 do not establish owner-only.
 

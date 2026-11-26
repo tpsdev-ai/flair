@@ -127,7 +127,7 @@ function canonicalDir(dir: string): string {
   }
 }
 
-/** The mode scan over every location signing reads from. A path reached
+/** The mode scan over the standard `resolveKeyPath` locations. A path reached
  *  through two locations (e.g. `FLAIR_KEY_DIR` pointing at the default
  *  directory) is reported once. */
 export function scanAgentKeyModes(
@@ -136,15 +136,16 @@ export function scanAgentKeyModes(
   const findings: KeyModeFinding[] = [];
   const unreadable: Array<{ dir: string; code: string }> = [];
   const seenPaths = new Set<string>();
-  const seenDirs = new Set<string>();
+  const seenUnreadable = new Set<string>();
   for (const location of locations) {
     const dirKey = canonicalDir(location.dir);
-    if (seenDirs.has(dirKey)) continue;
-    seenDirs.add(dirKey);
     const scan = scanKeyDir(location.dir);
     if (scan.state === "unreadable") {
       const code = (scan.error as NodeJS.ErrnoException | undefined)?.code;
-      if (code !== "ENOENT") unreadable.push({ dir: location.dir, code: code ?? "error" });
+      if (code !== "ENOENT" && !seenUnreadable.has(dirKey)) {
+        seenUnreadable.add(dirKey);
+        unreadable.push({ dir: location.dir, code: code ?? "error" });
+      }
       continue;
     }
     const names = scan.entries.map((e) => e.name).filter((name) =>

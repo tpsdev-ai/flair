@@ -1026,7 +1026,7 @@ program
     }
 
     // Agent key files must be owner-only on POSIX (flair#3077). Read-only:
-    // this never changes a file. It covers every location signing reads from,
+    // this never changes a file. It covers the standard `resolveKeyPath` locations,
     // not only the default keys directory.
     if (!keyModesUnsupported()) {
       const modeScan = scanAgentKeyModes();
