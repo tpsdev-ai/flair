@@ -5,8 +5,8 @@
  * Prune retains its entry classification; mode checks use the Agent ID rule
  * because signing can read a .key without a .pub sibling.
  */
-import { existsSync, lstatSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, lstatSync, readdirSync, realpathSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { isValidAgentId } from "./agent-id-rule.js";
 import { resolveHome } from "./home.js";
 
@@ -44,11 +44,58 @@ export type KeyModeFinding =
   | { kind: "wide"; path: string; mode: string }
   | { kind: "not-checked"; path: string; reason: string };
 
+/** A directory the CLI signs from, and the filename it looks for there. */
+export interface KeyLocation {
+  dir: string;
+  /** Between the agent id and `.key` (e.g. `-priv` for the legacy path). */
+  suffix: string;
+}
+
+/** The ordered locations `resolveKeyPath` tries for an agent id. Read at CALL
+ *  time, so `FLAIR_KEY_DIR` set later in the process is seen. */
+export function agentKeyLocations(): KeyLocation[] {
+  const home = resolveHome();
+  const locations: KeyLocation[] = [];
+  if (process.env.FLAIR_KEY_DIR) {
+    locations.push({ dir: process.env.FLAIR_KEY_DIR, suffix: ".key" });
+  }
+  locations.push({ dir: join(home, ".flair", "keys"), suffix: ".key" });
+  locations.push({ dir: join(home, ".tps", "secrets", "flair"), suffix: "-priv.key" });
+  return locations;
+}
+
+/** The path signing reads for `agentId` in `location`. */
+export function keyPathIn(location: KeyLocation, agentId: string): string {
+  return join(location.dir, `${agentId}${location.suffix}`);
+}
+
 const KEY_SUFFIX = ".key";
 
 function errorCode(error: unknown): string {
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
   return typeof code === "string" ? code : "lstat failed";
+}
+
+/** lstat one key path and report a wide or uncheckable file. No content is read
+ *  and no file is changed; entry symlinks are not followed. */
+function keyModeFindingForPath(path: string): KeyModeFinding | null {
+  let stats;
+  try {
+    stats = lstatSync(path);
+  } catch (error) {
+    return { kind: "not-checked", path, reason: errorCode(error) };
+  }
+  if (!stats.isFile()) {
+    return {
+      kind: "not-checked",
+      path,
+      reason: stats.isSymbolicLink() ? "symbolic link" : "not a regular file",
+    };
+  }
+  if (stats.mode & 0o077) {
+    return { kind: "wide", path, mode: (stats.mode & 0o777).toString(8).padStart(4, "0") };
+  }
+  return null;
 }
 
 /** After the directory read, lstat each valid-id .key, including directories.
@@ -60,34 +107,72 @@ export function keyModeFindings(keysDir: string, entries: KeyDirEntry[]): KeyMod
   ).sort();
   const findings: KeyModeFinding[] = [];
   for (const name of names) {
-    const path = join(keysDir, name);
-    let stats;
-    try {
-      stats = lstatSync(path);
-    } catch (error) {
-      findings.push({ kind: "not-checked", path, reason: errorCode(error) });
-      continue;
-    }
-    if (!stats.isFile()) {
-      findings.push({
-        kind: "not-checked",
-        path,
-        reason: stats.isSymbolicLink() ? "symbolic link" : "not a regular file",
-      });
-      continue;
-    }
-    if (stats.mode & 0o077) {
-      findings.push({ kind: "wide", path, mode: (stats.mode & 0o777).toString(8).padStart(4, "0") });
-    }
+    const finding = keyModeFindingForPath(join(keysDir, name));
+    if (finding) findings.push(finding);
   }
   return findings;
 }
 
+export interface KeyModeScanResult {
+  findings: KeyModeFinding[];
+  /** Locations that exist but could not be read; an absent one is silent. */
+  unreadable: Array<{ dir: string; code: string }>;
+}
+
+function canonicalDir(dir: string): string {
+  try {
+    return realpathSync(dir);
+  } catch {
+    return resolve(dir);
+  }
+}
+
+/** The mode scan over every location signing reads from. A path reached
+ *  through two locations (e.g. `FLAIR_KEY_DIR` pointing at the default
+ *  directory) is reported once. */
+export function scanAgentKeyModes(
+  locations: KeyLocation[] = agentKeyLocations(),
+): KeyModeScanResult {
+  const findings: KeyModeFinding[] = [];
+  const unreadable: Array<{ dir: string; code: string }> = [];
+  const seenPaths = new Set<string>();
+  const seenDirs = new Set<string>();
+  for (const location of locations) {
+    const dirKey = canonicalDir(location.dir);
+    if (seenDirs.has(dirKey)) continue;
+    seenDirs.add(dirKey);
+    const scan = scanKeyDir(location.dir);
+    if (scan.state === "unreadable") {
+      const code = (scan.error as NodeJS.ErrnoException | undefined)?.code;
+      if (code !== "ENOENT") unreadable.push({ dir: location.dir, code: code ?? "error" });
+      continue;
+    }
+    const names = scan.entries.map((e) => e.name).filter((name) =>
+      name.endsWith(location.suffix) && isValidAgentId(name.slice(0, -location.suffix.length)),
+    ).sort();
+    for (const name of names) {
+      const path = join(location.dir, name);
+      const pathKey = join(dirKey, name);
+      if (seenPaths.has(pathKey)) continue;
+      seenPaths.add(pathKey);
+      const finding = keyModeFindingForPath(path);
+      if (finding) findings.push(finding);
+    }
+  }
+  return { findings, unreadable };
+}
+
+/** POSIX single-quoting for a path used in a command an operator will run. */
+function shellQuotePath(path: string): string {
+  if (/^[A-Za-z0-9._\-/]+$/.test(path)) return path;
+  return `'${path.replace(/'/g, `'\\''`)}'`;
+}
+
 /** The one rendering of a finding, so doctor and status cannot word it
- *  differently. `chmod 600 <path>` is the exact remedy. */
+ *  differently. The `chmod` remedy shell-quotes the path. */
 export function formatKeyModeFinding(finding: KeyModeFinding): string {
   if (finding.kind === "wide") {
-    return `agent key file ${finding.path} has mode ${finding.mode}, wider than owner-only — fix: chmod 600 ${finding.path}`;
+    return `agent key file ${finding.path} has mode ${finding.mode}, wider than owner-only — fix: chmod 600 ${shellQuotePath(finding.path)}`;
   }
   return `agent key file ${finding.path} not checked (${finding.reason})`;
 }

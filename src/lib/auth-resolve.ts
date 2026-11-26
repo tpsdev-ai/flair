@@ -75,7 +75,7 @@ import { Option, type Command } from "commander";
 import { createPrivateKey, randomUUID, sign as nodeCryptoSign } from "node:crypto";
 import type { SigningIdentitySource } from "./signing-identity.js";
 import { resolveHome } from "./home.js";
-import { defaultKeysDir } from "./key-dir.js";
+import { agentKeyLocations, defaultKeysDir, keyPathIn } from "./key-dir.js";
 import { isConnectPhaseFailure } from "./connect-phase.js";
 
 export { isConnectPhaseFailure, REFUSED_CODES } from "./connect-phase.js";
@@ -1115,12 +1115,11 @@ export function resolveLocalAdminPass(
 
 /** Find the agent's private key file from standard locations. */
 export function resolveKeyPath(agentId: string): string | null {
-  const candidates = [
-    process.env.FLAIR_KEY_DIR ? join(process.env.FLAIR_KEY_DIR, `${agentId}.key`) : null,
-    join(resolveHome(), ".flair", "keys", `${agentId}.key`),
-    join(resolveHome(), ".tps", "secrets", "flair", `${agentId}-priv.key`),
-  ].filter(Boolean) as string[];
-  return candidates.find((p) => existsSync(p)) ?? null;
+  for (const location of agentKeyLocations()) {
+    const path = keyPathIn(location, agentId);
+    if (existsSync(path)) return path;
+  }
+  return null;
 }
 
 /**

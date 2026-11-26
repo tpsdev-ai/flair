@@ -9,7 +9,7 @@
 import { Command } from "commander";
 import { resolveAdminUser } from "../lib/auth-resolve.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
-import { defaultKeysDir, formatKeyModeFinding, keyModeFindings, keyModesUnsupported, KEY_MODES_UNSUPPORTED_MESSAGE, scanKeyDir } from "../lib/key-dir.js";
+import { agentKeyLocations, formatKeyModeFinding, keyModesUnsupported, KEY_MODES_UNSUPPORTED_MESSAGE, type KeyLocation, scanAgentKeyModes } from "../lib/key-dir.js";
 import { escapeTerminalText } from "../lib/terminal-text.js";
 import * as render from "../render.js";
 import { checkVersion, formatVersionNudge, FLAIR_PKG_NAME } from "../version-check.js";
@@ -168,20 +168,19 @@ export function localOpsApiWarnings(
  */
 export function localKeyModeWarnings(
   baseUrl: string,
-  keysDir: string = defaultKeysDir(),
+  locations: KeyLocation[] = agentKeyLocations(),
 ): Array<{ level: string; message: string }> {
   if (!isLocalhostUrl(baseUrl)) return [];
   if (keyModesUnsupported()) return [{ level: "info", message: KEY_MODES_UNSUPPORTED_MESSAGE }];
-  const scan = scanKeyDir(keysDir);
-  if (scan.state === "unreadable") {
-    const code = (scan.error as NodeJS.ErrnoException | undefined)?.code;
-    if (code === "ENOENT") return [];
-    return [{ level: "warn", message: `agent key directory ${keysDir} could not be read (${code ?? "error"}) — key file modes not checked` }];
-  }
-  return keyModeFindings(keysDir, scan.entries).map((finding) => ({
+  const scan = scanAgentKeyModes(locations);
+  const warnings: Array<{ level: string; message: string }> = scan.unreadable.map(({ dir, code }) => ({
     level: "warn",
-    message: formatKeyModeFinding(finding),
+    message: `agent key directory ${dir} could not be read (${code}) — key file modes not checked`,
   }));
+  for (const finding of scan.findings) {
+    warnings.push({ level: "warn", message: formatKeyModeFinding(finding) });
+  }
+  return warnings;
 }
 
 function federationPeerCountParts(peers: {

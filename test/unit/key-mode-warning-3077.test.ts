@@ -9,8 +9,9 @@
  *
  * Cases run the source CLI on a throwaway HOME with fixture health responses.
  */
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { spawn } from "node:child_process";
+import { afterAll, afterEach, beforeAll, describe, expect, mock, spyOn, test } from "bun:test";
+import { spawn, spawnSync } from "node:child_process";
+import * as fs from "node:fs";
 import {
   chmodSync,
   mkdirSync,
@@ -25,6 +26,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { childOverranDeadline } from "../helpers/child-deadline.js";
+import { keyModeFindings, scanKeyDir } from "../../src/lib/key-dir.js";
 
 const CLI = join(__dirname, "..", "..", "src", "cli.ts");
 // The child's own deadline and the per-case budget above it are written inline
@@ -48,7 +50,12 @@ function writeKey(home: string, id: string, mode: number): string {
 }
 
 /** Async on purpose: the mock instance answers on this process's event loop. */
-function runCli(args: string[], home: string, windows = false): Promise<{ output: string; status: number | null }> {
+function runCli(
+  args: string[],
+  home: string,
+  windows = false,
+  extraEnv: Record<string, string> = {},
+): Promise<{ output: string; status: number | null }> {
   const preload = join(home, "health-fixture.cjs");
   writeFileSync(preload, `${windows ? 'Object.defineProperty(process, "platform", { value: "win32" });' : ""}
     globalThis.fetch = async (input) => {
@@ -63,7 +70,7 @@ function runCli(args: string[], home: string, windows = false): Promise<{ output
   `);
   const startedAt = Date.now();
   const child = spawn("bun", ["--preload", preload, CLI, ...args], {
-    env: { HOME: home, USERPROFILE: home, PATH: process.env.PATH ?? "", TERM: "dumb", TMPDIR: tmpdir() },
+    env: { HOME: home, USERPROFILE: home, PATH: process.env.PATH ?? "", TERM: "dumb", TMPDIR: tmpdir(), ...extraEnv },
     timeout: 30_000,
     killSignal: "SIGTERM",
     stdio: ["ignore", "pipe", "pipe"],
@@ -98,6 +105,10 @@ beforeAll(() => {
 
 afterAll(() => {
   rmSync(scratch, { recursive: true, force: true });
+});
+
+afterEach(() => {
+  mock.restore();
 });
 
 describe("agent key file modes are reported by doctor and status", () => {
@@ -225,7 +236,7 @@ test.skipIf(POSIX_ONLY)("doctor issue count increases by its mode findings", asy
   expect(count(after.output) - count(before.output)).toBe(4);
 }, 60_000);
 
-test.skipIf(POSIX_ONLY)("unreadable keys directory is named by doctor and status", async () => {
+test.skipIf(POSIX_ONLY)("a non-directory keys path is named by doctor and status", async () => {
   const home = makeHome("not-directory");
   const keys = join(home, ".flair", "keys");
   rmSync(keys, { recursive: true });
@@ -280,3 +291,107 @@ test.skipIf(POSIX_ONLY)("key directories are not checked and a symlinked keys di
   }
   expect(readFileSync(key, "utf8")).toBe("seed-agent-a-3077");
 }, 120_000);
+
+test.skipIf(POSIX_ONLY)("a wide key in FLAIR_KEY_DIR is warned by doctor and status", async () => {
+  const home = makeHome("env-dir");
+  const envKeys = join(scratch, "env-keys");
+  mkdirSync(envKeys);
+  const key = join(envKeys, "agent-a.key");
+  writeFileSync(key, "seed-agent-a-3077");
+  chmodSync(key, 0o644);
+  for (const args of [["doctor"], ["status", "--url", url]]) {
+    const { output } = await runCli(args, home, false, { FLAIR_KEY_DIR: envKeys });
+    expect(output).toContain(`agent key file ${key} has mode 0644`);
+  }
+}, 60_000);
+
+test.skipIf(POSIX_ONLY)("a wide key in the legacy directory is warned by doctor and status", async () => {
+  const home = makeHome("legacy-dir");
+  const legacyKeys = join(home, ".tps", "secrets", "flair");
+  mkdirSync(legacyKeys, { recursive: true });
+  const key = join(legacyKeys, "agent-a-priv.key");
+  writeFileSync(key, "seed-agent-a-3077");
+  chmodSync(key, 0o644);
+  for (const args of [["doctor"], ["status", "--url", url]]) {
+    const { output } = await runCli(args, home);
+    expect(output).toContain(`agent key file ${key} has mode 0644`);
+  }
+}, 60_000);
+
+test.skipIf(POSIX_ONLY)("a key reached through FLAIR_KEY_DIR and the default directory is reported once", async () => {
+  const home = makeHome("dedupe");
+  const keys = join(home, ".flair", "keys");
+  const key = writeKey(home, "agent-a", 0o644);
+  for (const args of [["doctor"], ["status", "--url", url]]) {
+    const { output } = await runCli(args, home, false, { FLAIR_KEY_DIR: keys });
+    expect(output.split(`agent key file ${key} has mode 0644`)).toHaveLength(2);
+  }
+}, 60_000);
+
+describe("the mode scan reads no key contents", () => {
+  test.skipIf(POSIX_ONLY)("keyModeFindings lstats a wide key without opening or reading it", () => {
+    const home = makeHome("no-read");
+    const key = writeKey(home, "agent-a", 0o644);
+    const keysDir = join(home, ".flair", "keys");
+    const touched: string[] = [];
+    const guard = (name: string, original: (...args: any[]) => any) => (...args: any[]) => {
+      if (String(args[0]) === key) {
+        touched.push(name);
+        throw new Error(`${name} touched a key file`);
+      }
+      return original(...args);
+    };
+    spyOn(fs, "readFileSync").mockImplementation(guard("readFileSync", fs.readFileSync));
+    spyOn(fs, "openSync").mockImplementation(guard("openSync", fs.openSync));
+    spyOn(fs, "createReadStream").mockImplementation(guard("createReadStream", fs.createReadStream));
+    spyOn(fs.promises, "readFile").mockImplementation(guard("promises.readFile", fs.promises.readFile));
+    spyOn(fs.promises, "open").mockImplementation(guard("promises.open", fs.promises.open));
+
+    const scan = scanKeyDir(keysDir);
+    expect(scan.state).toBe("ok");
+    if (scan.state !== "ok") return;
+    expect(keyModeFindings(keysDir, scan.entries)).toEqual([{ kind: "wide", path: key, mode: "0644" }]);
+    expect(touched).toEqual([]);
+  });
+});
+
+test.skipIf(POSIX_ONLY)("doctor and status never print key contents", async () => {
+  const home = makeHome("no-read-output");
+  const key = join(home, ".flair", "keys", "agent-a.key");
+  writeFileSync(key, "SENTINEL-CONTENT-3077");
+  chmodSync(key, 0o644);
+  for (const args of [["doctor"], ["status", "--url", url]]) {
+    const { output } = await runCli(args, home);
+    expect(output).toContain(`agent key file ${key} has mode 0644`);
+    expect(output).not.toContain("SENTINEL-CONTENT-3077");
+  }
+}, 60_000);
+
+test.skipIf(POSIX_ONLY)("the printed chmod remedy runs for a path with a space and a quote", async () => {
+  const home = join(scratch, "home with space");
+  mkdirSync(join(home, ".flair", "keys"), { recursive: true });
+  const envKeys = join(home, "keys'quoted");
+  mkdirSync(envKeys);
+  const key = join(envKeys, "agent-a.key");
+  writeFileSync(key, "seed-agent-a-3077");
+  chmodSync(key, 0o644);
+  const { output } = await runCli(["status", "--url", url], home, false, { FLAIR_KEY_DIR: envKeys });
+  expect(output).toContain(`agent key file ${key} has mode 0644`);
+  const match = output.match(/chmod 600 [^\n]*/);
+  expect(match).not.toBeNull();
+  const command = match![0].replace(/\u001b\[[0-9;]*m/g, "").trim();
+  expect(command).not.toBe(`chmod 600 ${key}`);
+  const remedy = spawnSync("sh", ["-c", 'eval "$FLAIR_KEY_MODE_REMEDY_3077"'], {
+    cwd: scratch,
+    encoding: "utf8",
+    timeout: 10_000,
+    env: {
+      ...process.env,
+      FLAIR_KEY_MODE_REMEDY_3077: command,
+      FLAIR_TEST_ALLOW_BUN_HARPER: "Exercise the printed key-mode chmod remedy through the POSIX shell",
+    },
+  });
+  expect(remedy.stderr).toBe("");
+  expect(remedy.status).toBe(0);
+  expect(statSync(key).mode & 0o777).toBe(0o600);
+}, 60_000);

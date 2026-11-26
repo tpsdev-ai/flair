@@ -31,7 +31,7 @@ import { describeEmbedGpuDoctorFinding } from "../lib/embed-gpu-doctor.js";
 import { describeEmbeddingSpaceDoctorFinding } from "../lib/embedding-space-doctor.js";
 import { adminPassDesyncFinding, detectPersistedAdminUser } from "../lib/init-admin-pass.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
-import { formatKeyModeFinding, keyModeFindings, keyModesUnsupported, KEY_MODES_UNSUPPORTED_MESSAGE, scanKeyDir } from "../lib/key-dir.js";
+import { formatKeyModeFinding, keyModesUnsupported, KEY_MODES_UNSUPPORTED_MESSAGE, scanAgentKeyModes, scanKeyDir } from "../lib/key-dir.js";
 import {
   instanceIdentityLines,
   probeInstanceIdentity,
@@ -965,6 +965,7 @@ program
 
     // 2. Keys directory
     const keysDir = defaultKeysDir();
+    let keysDirUnreadable = false;
     if (keyModesUnsupported()) {
       console.log(`  ${render.icons.info} ${render.wrap(render.c.dim, KEY_MODES_UNSUPPORTED_MESSAGE)}`);
     }
@@ -972,6 +973,7 @@ program
       const keyScan = scanKeyDir(keysDir);
       if (keyScan.state === "unreadable") {
         // A keys directory doctor cannot read is not a clean result.
+        keysDirUnreadable = true;
         issues++;
         console.log(`  ${render.icons.warn} Keys directory could not be read: ${render.wrap(render.c.dim, keysDir)} — key checks skipped`);
       } else {
@@ -1006,15 +1008,6 @@ program
           issues++;
         }
 
-        // Agent key files must be owner-only on POSIX (flair#3077). Read-only:
-        // this never changes a file.
-        if (!keyModesUnsupported()) {
-          for (const finding of keyModeFindings(keysDir, keyScan.entries)) {
-            issues++;
-            console.log(`  ${render.icons.warn} ${render.wrap(render.c.yellow, formatKeyModeFinding(finding))}`);
-          }
-        }
-
         if (nodeKeyIds.length > 0 && harperResponding) {
           if (pairNotRun) {
             reportPairNotRun("Node key instance check");
@@ -1030,6 +1023,22 @@ program
       console.log(`  ${render.icons.error} Keys directory missing: ${render.wrap(render.c.dim, keysDir)}`);
       console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair init --agent-id <your-agent>`);
       issues++;
+    }
+
+    // Agent key files must be owner-only on POSIX (flair#3077). Read-only:
+    // this never changes a file. It covers every location signing reads from,
+    // not only the default keys directory.
+    if (!keyModesUnsupported()) {
+      const modeScan = scanAgentKeyModes();
+      for (const { dir, code } of modeScan.unreadable) {
+        if (dir === keysDir && keysDirUnreadable) continue;
+        issues++;
+        console.log(`  ${render.icons.warn} agent key directory ${render.wrap(render.c.dim, dir)} could not be read (${code}) — key file modes not checked`);
+      }
+      for (const finding of modeScan.findings) {
+        issues++;
+        console.log(`  ${render.icons.warn} ${render.wrap(render.c.yellow, formatKeyModeFinding(finding))}`);
+      }
     }
 
     // 3. Config file (flair#1514) — same resolution Harper uses: cwd, then
