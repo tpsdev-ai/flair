@@ -615,6 +615,23 @@ describe("callOpsApi on a real Harper (#3144)", () => {
 
   afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
+  test("a wrong password carries the fixed authentication-failed description", async () => {
+    const wrongPassword = "wrong-password-3144";
+    const basicHeader = `Basic ${Buffer.from(`admin:${wrongPassword}`).toString("base64")}`;
+    const err = await callOpsApi(harper.opsURL, { operation: "list_users" }, "admin", wrongPassword).then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    expect(err).toBeInstanceOf(OpsApiError);
+    const opsError = err as OpsApiError;
+    expect(opsError.category).toBe("authentication-failed");
+    expect(opsError.status).toBe(401);
+    expect(opsError.message).toBe("Ops API call failed (401) for 'list_users': authentication failed");
+    expect(opsError.message).not.toContain(wrongPassword);
+    expect(opsError.message).not.toContain(basicHeader);
+  }, 30_000);
+
   test("an add_user failure carries the fixed description, and the fallback branch is selected", async () => {
     const err = await callOpsApi(harper.opsURL, {
       operation: "add_user", username: DUPLICATE_USER, password: SUBMITTED_PASSWORD, role: "super_user", active: true,

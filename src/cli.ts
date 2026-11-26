@@ -4074,8 +4074,8 @@ function classifyOpsApiError(
   // Classify the parsed body's `error` string, or `message` only when the body
   // has no `error` key at all, and only when the status (and, for already-exists,
   // operation) is the category's own. Anything else — a non-JSON body, a value
-  // that is not a string, another field, another status or operation — is
-  // unclassified. The value is never returned or printed.
+  // that is not a string, another field, another status, or another operation for
+  // already-exists — is unclassified. The value is never returned or printed.
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
