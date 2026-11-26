@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-// Read the first resolvable native package's own manifest, else the version
-// harper-fabric-embeddings declares, using these roots for each: install root,
-// installed Flair, nested embeddings, hoisted embeddings (flair#3133, #3153).
-// Installed trees can resolve a different version from the checkout lockfile.
+// Installed mode reports a native package found inside the install tree by its own
+// version; otherwise the platform version harper-fabric-embeddings declares; when
+// harper-fabric-embeddings is absent too, the script refuses. Checkout mode reads
+// harper-fabric-embeddings' declared platform version (flair#3133, #3153).
 
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,8 +36,10 @@ function manifestOf(installDir, root, packageName) {
   const end = modules + (name?.startsWith("@") ? 3 : 2);
   if (modules !== -1 && name && end < parts.length) {
     const candidate = join(parts.slice(0, end).join(sep), "package.json");
-    // A manifest resolved above the install directory is not part of that tree.
-    if (!inside(installDir, candidate)) return null;
+    // Containment is decided on real paths: a manifest that resolves outside the
+    // install tree, directly or through a symlink, is not part of that tree.
+    const real = realOrNull(candidate);
+    if (real !== null && !insideReal(installDir, real)) return null;
     try {
       const manifest = JSON.parse(readFileSync(candidate, "utf8"));
       if (manifest.name === packageName) return { manifest, source: candidate };
@@ -48,11 +50,18 @@ function manifestOf(installDir, root, packageName) {
   throw new Error(`llama-installed-version: could not read ${packageName}'s own package.json from ${root}`);
 }
 
-/** True when `path` is `dir` or below it. */
-function inside(dir, path) {
-  const root = resolve(dir);
-  const target = resolve(path);
-  return target === root || target.startsWith(root + sep);
+/** True when the real path `target` is `dir`'s real path or below it. */
+function insideReal(dir, target) {
+  const root = realOrNull(dir);
+  return root !== null && (target === root || target.startsWith(root + sep));
+}
+
+function realOrNull(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
 }
 
 /** First resolvable manifest for this package, or null when absent. */

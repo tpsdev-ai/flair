@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { load } from "js-yaml";
@@ -177,6 +177,13 @@ describe("llama-installed-version real manifests", () => {
     }));
     const dir = join(parent, "app");
     expect(readLlamaInstalledPackage(dir)).toEqual({ version: "3.18.1", source: embeddings });
+  });
+
+  test("ignores a manifest symlinked outside the install tree", () => {
+    const outside = fixture(packageFiles("", native, "9.9.9"));
+    const dir = fixture({ [`node_modules/${native}/index.js`]: "" });
+    symlinkSync(join(outside, "node_modules", native, "package.json"), join(dir, "node_modules", native, "package.json"));
+    expect(() => readLlamaInstalledPackage(dir)).toThrow(/is not installed under .* and harper-fabric-embeddings is not installed/);
   });
 
   test("install root precedes Flair", () => {
