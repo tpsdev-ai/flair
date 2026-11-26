@@ -36,6 +36,7 @@ import {
   openSync,
   readFileSync,
   readSync,
+  realpathSync,
   renameSync,
   unlinkSync,
   writeSync,
@@ -125,8 +126,9 @@ export function ensureAgentKeysDir(keysDir: string): void {
     if (firstCreated !== undefined) {
       for (let created = keysDir; ; created = dirname(created)) {
         if ([".", ".."].includes(basename(created))) continue;
-        const parent = dirname(created);
+        let parent = dirname(created);
         try {
+          parent = realpathSync(parent);
           syncAgentKeysDir(parent);
         } catch (error) {
           throw new AgentKeyFileRefusal(
@@ -432,14 +434,23 @@ function syncAgentKeysDir(directory: string): void {
  */
 export function stageAgentKeyFile(privateKeyPath: string, data: string | Uint8Array): string {
   const tempPath = writeAgentKeyTemp(privateKeyPath, Buffer.from(data));
+  let directory = dirname(privateKeyPath);
+  let kind = "keys";
   try {
-    // Sync the staged entry before Flair can accept the new public key.
-    syncAgentKeysDir(dirname(privateKeyPath));
+    // On POSIX, sync the staged entry and its directory's parent before Flair
+    // can accept the new public key, including retries after a failed parent sync.
+    syncAgentKeysDir(directory);
+    if (!WIN32) {
+      kind = "parent";
+      directory = dirname(directory);
+      directory = realpathSync(directory);
+      syncAgentKeysDir(directory);
+    }
     return tempPath;
   } catch (error) {
     try { unlinkSync(tempPath); } catch { /* best effort */ }
     throw new AgentKeyFileRefusal(
-      `flair could not sync keys directory ${dirname(privateKeyPath)} (${error instanceof Error ? error.message : String(error)}); check the directory and filesystem, then retry rotation`,
+      `flair could not sync ${kind} directory ${directory} (${error instanceof Error ? error.message : String(error)}); check the directory and filesystem, then retry rotation`,
     );
   }
 }

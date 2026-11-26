@@ -391,7 +391,8 @@ async function readAgentPublicKeyAfterUpdate(
   if (!row || typeof row !== "object" || Array.isArray(row)) {
     return { ok: false, reason: "the read returned a malformed Agent row" };
   }
-  if (row.id !== id) return { ok: false, reason: `the read returned Agent '${String(row.id)}' while looking up '${id}'` };
+  if (typeof row.id !== "string") return { ok: false, reason: "the read returned a non-string Agent id" };
+  if (row.id !== id) return { ok: false, reason: `the read returned Agent '${row.id}' while looking up '${id}'` };
   if (typeof row.publicKey !== "string" || row.publicKey.length === 0) {
     return { ok: false, reason: "the read returned no public key" };
   }
