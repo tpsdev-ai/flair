@@ -124,16 +124,16 @@ describe("llama-installed-version real manifests", () => {
       [`node_modules/${native}/index.js`]: "",
       "node_modules/@node-llama-cpp/package.json": JSON.stringify({ name: native, version: "9.9.9" }),
     });
-    expect(() => readLlamaInstalledPackage(dir)).toThrow(/llama-installed-version: could not read .*own manifest/);
+    expect(() => readLlamaInstalledPackage(dir)).toThrow(/was not found under the selected install directory/);
     const result = spawnSync("node", [join(ROOT, "scripts/ci/llama-installed-version.mjs"), dir], { encoding: "utf8" });
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("llama-installed-version: could not read");
+    expect(result.stderr).toContain("was not found under the selected install directory");
   });
 
   test("absence names the searched directory and packages", () => {
     const dir = fixture({});
     expect(() => readLlamaInstalledPackage(dir)).toThrow(
-      `llama-installed-version: ${native} is not installed under ${dir} and harper-fabric-embeddings is not installed`,
+      `llama-installed-version: ${native} is not installed under ${dir} and harper-fabric-embeddings was not found under the selected install directory`,
     );
     const result = spawnSync("node", [join(ROOT, "scripts/ci/llama-installed-version.mjs"), dir], { encoding: "utf8" });
     expect(result.status).toBe(1);
@@ -142,7 +142,7 @@ describe("llama-installed-version real manifests", () => {
 
   test("does not fall back to a full node-llama-cpp package", () => {
     const dir = fixture(packageFiles("", "node-llama-cpp", "3.16.1"));
-    expect(() => readLlamaInstalledPackage(dir)).toThrow(/is not installed under .* and harper-fabric-embeddings is not installed/);
+    expect(() => readLlamaInstalledPackage(dir)).toThrow(/is not installed under .* and harper-fabric-embeddings was not found under the selected install directory/);
   });
 
   test("reports the platform version harper-fabric-embeddings declares when the native is absent", () => {
@@ -183,7 +183,62 @@ describe("llama-installed-version real manifests", () => {
     const outside = fixture(packageFiles("", native, "9.9.9"));
     const dir = fixture({ [`node_modules/${native}/index.js`]: "" });
     symlinkSync(join(outside, "node_modules", native, "package.json"), join(dir, "node_modules", native, "package.json"));
-    expect(() => readLlamaInstalledPackage(dir)).toThrow(/is not installed under .* and harper-fabric-embeddings is not installed/);
+    expect(() => readLlamaInstalledPackage(dir)).toThrow(/is not installed under .* and harper-fabric-embeddings was not found under the selected install directory/);
+  });
+
+  test("skips an outside manifest whose canonicalization fails before reading it", () => {
+    const outside = fixture(packageFiles("", native, "9.9.9"));
+    const dir = fixture({ [`node_modules/${native}/index.js`]: "" });
+    const candidate = join(dir, "node_modules", native, "package.json");
+    symlinkSync(join(outside, "node_modules", native, "package.json"), candidate);
+    expect(JSON.parse(readFileSync(candidate, "utf8")).version).toBe("9.9.9");
+    const result = spawnSync("node", ["--input-type=module", "-e", `
+      import fs from "node:fs";
+      import { syncBuiltinESMExports } from "node:module";
+      const candidate = ${JSON.stringify(candidate)};
+      const realpath = fs.realpathSync;
+      const read = fs.readFileSync;
+      let attempts = 0;
+      let reads = 0;
+      fs.realpathSync = function(path, ...args) {
+        if (path === candidate) {
+          attempts++;
+          throw new Error("injected canonicalization failure");
+        }
+        return realpath.call(this, path, ...args);
+      };
+      fs.readFileSync = function(path, ...args) {
+        if (path === candidate) reads++;
+        return read.call(this, path, ...args);
+      };
+      syncBuiltinESMExports();
+      const { readLlamaInstalledPackage } = await import(${JSON.stringify(join(ROOT, "scripts/ci/llama-installed-version.mjs"))});
+      try {
+        console.log(JSON.stringify(readLlamaInstalledPackage(${JSON.stringify(dir)})));
+      } catch (error) {
+        console.error(error.message);
+        process.exitCode = 1;
+      }
+      console.log(JSON.stringify({ attempts, reads }));
+    `], { encoding: "utf8" });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("harper-fabric-embeddings was not found under the selected install directory");
+    expect(result.stdout).not.toContain("9.9.9");
+    const probe = JSON.parse(result.stdout.trim());
+    expect(probe.attempts).toBeGreaterThan(0);
+    expect(probe.reads).toBe(0);
+  });
+
+  test("refusal scopes missing embeddings to the selected tree despite a parent installation", () => {
+    const parent = fixture(packageFiles("", "harper-fabric-embeddings", "0.5.0"));
+    const dir = join(parent, "app");
+    mkdirSync(dir);
+    const result = spawnSync("node", [join(ROOT, "scripts/ci/llama-installed-version.mjs"), dir], { encoding: "utf8" });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr.trim()).toBe(
+      `llama-installed-version: ${native} is not installed under ${dir} and harper-fabric-embeddings was not found under the selected install directory`,
+    );
   });
 
   test("install root precedes Flair", () => {

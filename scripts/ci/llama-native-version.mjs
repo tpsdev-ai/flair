@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Read the native version shipped flair loads from bun.lock (flair#3133, #3153).
+// Read embeddings' declared platform native version from bun.lock (flair#3133, #3153).
 // The benchmark's node-llama-cpp can drift from harper-fabric-embeddings' native.
 
 import { readFileSync } from "node:fs";
@@ -14,7 +14,7 @@ export const LOCKFILE = resolve(ROOT, "bun.lock");
 /** Accepted version shape for native installs. */
 export const SEMVER = /^[0-9]+\.[0-9]+\.[0-9]+$/;
 
-/** The package whose declared platform native shipped flair loads. */
+/** The embeddings package that declares platform native versions. */
 export const EMBEDDINGS_PACKAGE = "harper-fabric-embeddings";
 
 /** The native package a linux CI lane installs. */

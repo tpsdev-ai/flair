@@ -1,2 +1,2 @@
-- **CI installs the native version flair loads: the platform native `harper-fabric-embeddings` declares, not the benchmark's `node-llama-cpp` pin.**
-  An installed tree reports a native package found inside the install tree by its own version, otherwise the version `harper-fabric-embeddings` declares, and with neither the script refuses. A manifest that resolves outside the install tree is ignored.
+- **Checkout CI installs the platform native version `harper-fabric-embeddings` declares.**
+  Installed mode uses a native package found inside the tree by its own version, else the declared platform version, else refuses. Manifests without a canonical path inside the selected tree are skipped.

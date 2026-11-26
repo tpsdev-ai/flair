@@ -1,8 +1,6 @@
 #!/usr/bin/env node
-// Installed mode reports a native package found inside the install tree by its own
-// version; otherwise the platform version harper-fabric-embeddings declares; when
-// harper-fabric-embeddings is absent too, the script refuses. Checkout mode reads
-// harper-fabric-embeddings' declared platform version (flair#3133, #3153).
+// Installed mode uses a contained native manifest's version, else embeddings'
+// declared platform version, else refuses (flair#3133, #3153).
 
 import { readFileSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -36,10 +34,10 @@ function manifestOf(installDir, root, packageName) {
   const end = modules + (name?.startsWith("@") ? 3 : 2);
   if (modules !== -1 && name && end < parts.length) {
     const candidate = join(parts.slice(0, end).join(sep), "package.json");
-    // Containment is decided on real paths: a manifest that resolves outside the
-    // install tree, directly or through a symlink, is not part of that tree.
+    // Require canonical containment before reading a manifest; a symlink can
+    // otherwise supply a version from outside the selected install tree.
     const real = realOrNull(candidate);
-    if (real !== null && !insideReal(installDir, real)) return null;
+    if (real === null || !insideReal(installDir, real)) return null;
     try {
       const manifest = JSON.parse(readFileSync(candidate, "utf8"));
       if (manifest.name === packageName) return { manifest, source: candidate };
@@ -64,7 +62,7 @@ function realOrNull(path) {
   }
 }
 
-/** First resolvable manifest for this package, or null when absent. */
+/** First contained manifest for this package, or null when not found. */
 export function findInstalledPackage(dir, packageName) {
   for (const root of resolutionRoots(dir)) {
     let found;
@@ -94,7 +92,7 @@ export function readLlamaInstalledPackage(dir, packageName = DEFAULT_PACKAGE) {
     const embeddings = findInstalledPackage(dir, EMBEDDINGS_PACKAGE);
     if (embeddings === null) {
       throw new Error(
-        `llama-installed-version: ${packageName} is not installed under ${resolve(dir)} and ${EMBEDDINGS_PACKAGE} is not installed`,
+        `llama-installed-version: ${packageName} is not installed under ${resolve(dir)} and ${EMBEDDINGS_PACKAGE} was not found under the selected install directory`,
       );
     }
     return declaredNativeVersion(embeddings, packageName);
