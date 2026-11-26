@@ -58,8 +58,14 @@ flair init --target https://<cluster>.<org>.harperfabric.com \
 - `--force` is required — this writes to a live instance.
 - `--remote` marks it a federation **hub** and creates the `flair_pair_initiator` role;
   without it, pairing later fails role-not-found.
-- Generated admin password lands in `~/.tps/secrets/flair-fabric-hdb` (mode `0600`);
-  `--flair-admin-pass` to choose your own.
+- The Flair admin password is saved to `~/.tps/secrets/flair-fabric-hdb` (mode `0600`)
+  before the cluster is asked to set it; `--flair-admin-pass` to choose your own. Only
+  a run that creates or updates `admin` writes the file — a cluster admin that is
+  already a super_user is reused, and no file is written. With no file present the
+  password is written directly and kept even if the deployment is refused; with one
+  present, the new value is staged beside it and moved into place after the cluster
+  accepts it and the staged copy verifies. If the cluster accepts the change but the
+  saved copy cannot be confirmed, init prints the recovery step.
 
 Run **once**, before serving multi-region traffic — see
 [Multi-region](#multi-region-replication-vs-federation).
