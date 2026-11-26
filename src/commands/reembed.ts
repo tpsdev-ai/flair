@@ -454,7 +454,7 @@ const REEMBED_IDENTITY_MISMATCH_REMEDY =
 
 /** The remedy for a target whose HTTP and ops ports are the same port. */
 const REEMBED_EQUAL_PORTS_REMEDY =
-  "The HTTP and ops ports must differ; pass --port and FLAIR_OPS_PORT (or --ops-port) with two different ports.";
+  "The HTTP and ops ports must differ; pass --port and FLAIR_OPS_PORT with two different ports.";
 
 /** Why the all-agent run refused its target pair (flair#3135); one reason per condition (flair#3128). */
 export type ReembedTargetRefusalReason =
