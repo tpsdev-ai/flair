@@ -336,6 +336,44 @@ describe("provisionFabric — full happy path", () => {
     expect(waitCalled).toBe(true);
   });
 
+  test("accepts an unrelated record with database grants and no super_user", async () => {
+    const operations: string[] = [];
+
+    globalThis.fetch = mock(async (url: string, opts?: any) => {
+      const parsed = new URL(url);
+      if (parsed.port === "19925") {
+        const body = JSON.parse(opts.body);
+        operations.push(body.operation);
+        if (body.operation === "list_users") {
+          return new Response(JSON.stringify([
+            { username: "cluster-admin", role: { permission: { super_user: false } } },
+            {
+              username: "cluster-db-reader",
+              permission: { flair: { tables: { Memory: { read: true, insert: false, update: false, delete: false, attribute_permissions: [] } } } },
+            },
+          ]), { status: 200 });
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (parsed.port === "19926" && parsed.pathname.includes("FederationPair")) {
+        return new Response(JSON.stringify({ error: "instanceId and publicKey required" }), { status: 400 });
+      }
+      return new Response("unknown", { status: 400 });
+    });
+
+    const principal = await provisionFabric(
+      TEST_OPTS.target,
+      TEST_OPTS.opsTarget,
+      TEST_OPTS.clusterAdminUser,
+      TEST_OPTS.clusterAdminPass,
+      TEST_OPTS.flairAdminPass,
+    );
+
+    expect(principal).toEqual({ username: "admin", password: TEST_OPTS.flairAdminPass, created: true });
+    expect(operations).toContain("deploy_component");
+    expect(operations).toContain("add_user");
+  });
+
   test("skips add_user when cluster-admin is already super_user", async () => {
     let listUsersCalled = false;
     let addUserCalled = false;
@@ -471,6 +509,14 @@ describe("provisionFabric — full happy path", () => {
     ["numeric permission", [{ username: "cluster-admin", role: { permission: { super_user: 1 } } }]],
     ["null permission", [{ username: "cluster-admin", role: { permission: { super_user: null } } }]],
     ["missing permission", [{ username: "cluster-admin", role: { permission: {} } }]],
+    ["admin missing super_user", [
+      { username: "cluster-admin", role: { permission: { super_user: false } } },
+      { username: "admin", role: { permission: {} } },
+    ]],
+    ["admin string super_user", [
+      { username: "cluster-admin", role: { permission: { super_user: false } } },
+      { username: "admin", role: { permission: { super_user: "false" } } },
+    ]],
     ["non-object entry", [null]],
     ["array entry", [[]]],
     ["non-array response", {}],
@@ -502,7 +548,14 @@ describe("provisionFabric — full happy path", () => {
 
     expect(out.error, `init failed to run: ${out.stderr}`).toBeUndefined();
     expect(out.status).toBe(1);
-    expect(out.stderr).toContain(Array.isArray(response) ? "malformed record" : "not an array");
+    const decidingRecord = ["string permission", "numeric permission", "null permission", "missing permission", "admin missing super_user", "admin string super_user"].includes(_label);
+    expect(out.stderr).toContain(
+      !Array.isArray(response)
+        ? "not an array"
+        : decidingRecord
+          ? "malformed record for a user that decides provisioning"
+          : "no readable username",
+    );
     expect(out.stderr).toContain("provisioning refused to change anything");
     const seen = readFileSync(requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
     expectNoWriteRequest(seen, "malformed list_users", TEST_OPTS.opsTarget);
@@ -2251,6 +2304,58 @@ describe("flair#3130 — remote init credential ordering (real Harper)", () => {
     expect(out.stdout).not.toContain(chosenPass);
     expect(out.stderr).not.toContain(chosenPass);
   }, 150_000);
+});
+
+describe("flair#3159 — unrelated list_users records (real Harper)", () => {
+  let harper: HarperInstance;
+
+  beforeAll(async () => {
+    harper = await startLocalHarper();
+    const superRole = await harperOps(harper, "admin", "test123", { operation: "add_role", role: "super-role", permission: { super_user: true } });
+    expect([200, 409], superRole.text).toContain(superRole.status);
+    const clusterUser = await harperOps(harper, "admin", "test123", {
+      operation: "add_user", username: "cluster-north", password: "cluster-north-pass", role: "super-role", active: true,
+    });
+    expect([200, 409], clusterUser.text).toContain(clusterUser.status);
+
+    // Harper accepts a role that holds only database grants and no super_user
+    // flag, so list_users returns a record whose permission has no super_user.
+    const dbOnlyRole = await harperOps(harper, "admin", "test123", {
+      operation: "add_role",
+      role: "database-only-role",
+      permission: {
+        flair: {
+          tables: {
+            Memory: { read: true, insert: false, update: false, delete: false, attribute_permissions: [] },
+          },
+        },
+      },
+    });
+    expect(dbOnlyRole.status, dbOnlyRole.text).toBe(200);
+    const dbOnlyUser = await harperOps(harper, "admin", "test123", {
+      operation: "add_user", username: "cluster-db-reader", password: "cluster-db-reader-pass", role: "database-only-role", active: true,
+    });
+    expect([200, 409], dbOnlyUser.text).toContain(dbOnlyUser.status);
+  }, 180_000);
+
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
+
+  test("a user whose role holds only database grants does not make provisioning refuse", async () => {
+    const listed = await harperOps(harper, "admin", "test123", { operation: "list_users" });
+    expect(listed.status, listed.text.slice(0, 200)).toBe(200);
+    expect(((listed.body as any[]) ?? []).map((record) => record.username)).toContain("cluster-db-reader");
+
+    const recorder = installRecorder({ user: "cluster-north", pass: "cluster-north-pass" });
+    try {
+      const principal = await provisionFabric(
+        harper.httpURL, harper.opsURL, "cluster-north", "cluster-north-pass", "generated-3159",
+      );
+      expect(principal).toEqual({ username: "cluster-north", password: "cluster-north-pass", created: false });
+      expect(recorder.deployAuthOk(), "the deploy request must carry the cluster administrator's Basic auth").toBe(true);
+    } finally {
+      recorder.restore();
+    }
+  }, 120_000);
 });
 
 // ─── the `flair init` action helpers ────────────────────────────────────────────
