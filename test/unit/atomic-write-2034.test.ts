@@ -4,7 +4,7 @@
  * the files live in a scratch directory.
  */
 import { describe, test, expect } from "bun:test";
-import { readdirSync, readFileSync, renameSync, statSync, writeFileSync, existsSync } from "node:fs";
+import { readdirSync, readFileSync, renameSync, statSync, writeFileSync, existsSync, fstatSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
 import { writeFilesAtomically } from "../../src/lib/atomic-write.ts";
@@ -30,6 +30,31 @@ describe("writeFilesAtomically", () => {
     expect(statSync(a).mode & 0o777).toBe(0o600);
     expect(statSync(b).mode & 0o777).toBe(0o755);
     expect(readdirSync(dir).sort()).toEqual(["shim", "unit.plist"]);
+  });
+
+  test("secret staging is 0600 during writes and before replacement", () => {
+    const { a } = pair();
+    let writes = 0;
+    let replacements = 0;
+    writeFilesAtomically([{ path: a, content: "secret", mode: 0o600 }], {
+      write: (fd, data) => {
+        expect(fstatSync(fd).mode & 0o777).toBe(0o600);
+        const bytes = Buffer.from(data);
+        for (const byte of bytes) {
+          writeSync(fd, Buffer.from([byte]));
+          expect(fstatSync(fd).mode & 0o777).toBe(0o600);
+        }
+        writes++;
+      },
+      rename: (from, to) => {
+        expect(statSync(from).mode & 0o777).toBe(0o600);
+        expect(readFileSync(from, "utf-8")).toBe("secret");
+        replacements++;
+        renameSync(from, to);
+      },
+    });
+    expect(writes).toBe(1);
+    expect(replacements).toBe(1);
   });
 
   test("a failure on the SECOND rename restores the first file's bytes and mode", () => {

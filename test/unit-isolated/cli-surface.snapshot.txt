@@ -52,7 +52,7 @@ flair init
       description: Rotate Harper's persisted admin hash via the operations socket, then write ~/.flair/admin-pass
       attr: resetAdminPass
     --admin-user <name>
-      description: Admin username when authenticating to an already-running instance via --target/--ops-target (env: FLAIR_ADMIN_USER; default: admin — local bootstrap and Fabric provisioning always create 'admin')
+      description: Admin username when authenticating to an already-running instance via --target/--ops-target (env: FLAIR_ADMIN_USER; default: admin — local bootstrap creates 'admin'; Fabric provisioning reuses an existing super_user cluster administrator, and otherwise creates or updates 'admin')
       attr: adminUser
     --keys-dir <dir>
       description: Directory for Ed25519 keys
@@ -3154,8 +3154,10 @@ Options:
   --admin-user <name>          Admin username when authenticating to an
                                already-running instance via
                                --target/--ops-target (env: FLAIR_ADMIN_USER;
-                               default: admin — local bootstrap and Fabric
-                               provisioning always create 'admin')
+                               default: admin — local bootstrap creates 'admin';
+                               Fabric provisioning reuses an existing super_user
+                               cluster administrator, and otherwise creates or
+                               updates 'admin')
   --keys-dir <dir>             Directory for Ed25519 keys
   --data-dir <dir>             Harper data directory
   --skip-start                 Do not start Harper; with --agent, defer
