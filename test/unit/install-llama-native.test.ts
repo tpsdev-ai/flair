@@ -59,9 +59,11 @@ describe("install-llama-native", () => {
   for (const version of ["3", "3.22.3-beta", "3.22.3;echo bad", "3.22.3\n"]) {
     test(`refuses malformed version ${JSON.stringify(version)} before running`, () => {
       const lockfile = join(fixture(), "bun.lock");
-      writeFileSync(lockfile, JSON.stringify({ packages: { "node-llama-cpp": [`node-llama-cpp@${version}`] } }));
+      writeFileSync(lockfile, JSON.stringify({ packages: { "harper-fabric-embeddings": [
+        "harper-fabric-embeddings@0.5.0", "", { optionalDependencies: { "@node-llama-cpp/linux-x64": version } },
+      ] } }));
       const { calls, runner } = recordingRunner();
-      expect(() => installLlamaNative([], { runner, log, lockfile })).toThrow(/install-llama-native: llama-native-version: malformed packages/);
+      expect(() => installLlamaNative([], { runner, log, lockfile })).toThrow(/install-llama-native: llama-native-version:/);
       expect(calls).toEqual([]);
     });
   }
@@ -85,9 +87,9 @@ describe("install-llama-native", () => {
 
   test("malformed installed version refuses before running", () => {
     const dir = fixture();
-    const root = join(dir, "node_modules/node-llama-cpp");
+    const root = join(dir, "node_modules/@node-llama-cpp/linux-x64");
     mkdirSync(root, { recursive: true });
-    writeFileSync(join(root, "package.json"), JSON.stringify({ name: "node-llama-cpp", version: "3", main: "index.js" }));
+    writeFileSync(join(root, "package.json"), JSON.stringify({ name: "@node-llama-cpp/linux-x64", version: "3", main: "index.js" }));
     writeFileSync(join(root, "index.js"), "");
     const { calls, runner } = recordingRunner();
     expect(() => installLlamaNative(["--installed", dir], { runner, log })).toThrow(/install-llama-native: llama-installed-version:.*not x.y.z/);

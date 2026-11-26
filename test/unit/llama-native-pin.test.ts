@@ -37,38 +37,49 @@ const nested = `${flair}node_modules/harper-fabric-embeddings/`;
 const hoisted = "node_modules/harper-fabric-embeddings/";
 
 describe("llama-native-version", () => {
-  test("reads the resolution in the repository lockfile", () => {
+  test("reads the platform native version harper-fabric-embeddings declares", () => {
     const lock = readFileSync(join(ROOT, "bun.lock"), "utf8");
-    const resolved = lock.match(/"node-llama-cpp": \["node-llama-cpp@([^"]+)"/)?.[1];
-    expect(resolved).toBeDefined();
-    expect(readLlamaNativeVersion(lock)).toBe(resolved as string);
+    const manifest = JSON.parse(readFileSync(join(ROOT, "node_modules/harper-fabric-embeddings/package.json"), "utf8"));
+    const declared = manifest.optionalDependencies["@node-llama-cpp/linux-x64"];
+    expect(declared).toBe("3.18.1");
+    expect(readLlamaNativeVersion(lock)).toBe(declared);
   });
 
   test("rejects a missing packages map with a named error", () => {
     expect(() => readLlamaNativeVersion('{}')).toThrow(/llama-native-version: missing or malformed packages map/);
   });
 
-  test("rejects a missing packages entry despite a lookalike elsewhere", () => {
-    const text = '{"packages": {}, "elsewhere": {\n"node-llama-cpp": ["node-llama-cpp@9.9.9"]}}';
-    expect(() => readLlamaNativeVersion(text)).toThrow(/llama-native-version: missing packages\["node-llama-cpp"\]/);
+  test("rejects a missing embeddings entry despite a lookalike elsewhere", () => {
+    const text = '{"packages": {}, "elsewhere": {\n"harper-fabric-embeddings": ["harper-fabric-embeddings@0.5.0"]}}';
+    expect(() => readLlamaNativeVersion(text)).toThrow(/llama-native-version: missing packages\["harper-fabric-embeddings"\]/);
   });
 
-  test("reads the packages entry despite a lookalike elsewhere", () => {
-    const text = '{"packages": {\n"node-llama-cpp": ["node-llama-cpp@3.22.3"]}, "elsewhere": {\n"node-llama-cpp": ["node-llama-cpp@9.9.9"]}}';
-    expect(readLlamaNativeVersion(text)).toBe("3.22.3");
+  test("reads the declared pin despite a benchmark lookalike elsewhere", () => {
+    const text = '{"packages": {\n"harper-fabric-embeddings": ["harper-fabric-embeddings@0.5.0", "", {\n"optionalDependencies": {"@node-llama-cpp/linux-x64": "3.18.1"}}]}, "elsewhere": {\n"node-llama-cpp": ["node-llama-cpp@3.22.3"]}}';
+    expect(readLlamaNativeVersion(text)).toBe("3.18.1");
   });
 
-  for (const entry of [null, {}, [], "node-llama-cpp@3.22.3", [1], ["other@3.22.3"], ["node-llama-cpp@3"], ["node-llama-cpp@3.22.3\n"]]) {
-    test(`rejects malformed packages entry ${JSON.stringify(entry)}`, () => {
-      const text = JSON.stringify({ packages: { "node-llama-cpp": entry } });
-      expect(() => readLlamaNativeVersion(text)).toThrow(/llama-native-version: malformed packages\["node-llama-cpp"\]/);
+  for (const entry of [null, {}, [], "harper-fabric-embeddings@0.5.0", [1], ["other@0.5.0"], ["harper-fabric-embeddings@0.5"], ["harper-fabric-embeddings@0.5.0"], ["harper-fabric-embeddings@0.5.0", "", null]]) {
+    test(`rejects malformed embeddings entry ${JSON.stringify(entry)}`, () => {
+      const text = JSON.stringify({ packages: { "harper-fabric-embeddings": entry } });
+      expect(() => readLlamaNativeVersion(text)).toThrow(/llama-native-version: malformed packages\["harper-fabric-embeddings"\]/);
     });
   }
 
+  test("rejects an embeddings entry that does not declare the platform native", () => {
+    const text = JSON.stringify({ packages: { "harper-fabric-embeddings": ["harper-fabric-embeddings@0.5.0", "", { optionalDependencies: { "@node-llama-cpp/win-x64": "3.18.1" } }] } });
+    expect(() => readLlamaNativeVersion(text)).toThrow(/does not declare @node-llama-cpp\/linux-x64/);
+  });
+
+  test("rejects a declared version that is not x.y.z", () => {
+    const text = JSON.stringify({ packages: { "harper-fabric-embeddings": ["harper-fabric-embeddings@0.5.0", "", { optionalDependencies: { "@node-llama-cpp/linux-x64": "^3.18.1" } }] } });
+    expect(() => readLlamaNativeVersion(text)).toThrow(/declared @node-llama-cpp\/linux-x64 "\^3\.18\.1" in bun\.lock is not x\.y\.z/);
+  });
+
   test("preserves comma and closing brace inside a string while removing trailing commas", () => {
     const note = JSON.stringify('escaped " quote,} and slash \\,}');
-    const text = `{"note": ${note}, "packages": {"node-llama-cpp": ["node-llama-cpp@3.22.3",],},}`;
-    expect(readLlamaNativeVersion(text)).toBe("3.22.3");
+    const text = `{"note": ${note}, "packages": {"harper-fabric-embeddings": ["harper-fabric-embeddings@0.5.0", "", {"optionalDependencies": {"@node-llama-cpp/linux-x64": "3.18.1",},},],},}`;
+    expect(readLlamaNativeVersion(text)).toBe("3.18.1");
   });
 });
 
@@ -76,7 +87,6 @@ describe("llama-installed-version real manifests", () => {
   for (const [label, root, name, version] of [
     ["native at install root", "", native, "3.18.1"],
     ["native under installed Flair", flair, native, "3.17.2"],
-    ["family without native", "", "node-llama-cpp", "3.16.1"],
     ["hoisted embeddings", hoisted, native, "3.15.2"],
     ["nested embeddings", nested, native, "3.14.1"],
   ]) {
@@ -123,16 +133,54 @@ describe("llama-installed-version real manifests", () => {
   test("absence names the searched directory and packages", () => {
     const dir = fixture({});
     expect(() => readLlamaInstalledPackage(dir)).toThrow(
-      `llama-installed-version: ${native} and node-llama-cpp are not installed under ${dir}`,
+      `llama-installed-version: ${native} is not installed under ${dir} and harper-fabric-embeddings is not installed`,
     );
     const result = spawnSync("node", [join(ROOT, "scripts/ci/llama-installed-version.mjs"), dir], { encoding: "utf8" });
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain(`llama-installed-version: ${native} and node-llama-cpp are not installed under ${dir}`);
+    expect(result.stderr).toContain(`llama-installed-version: ${native} is not installed under ${dir}`);
   });
 
-  test("native precedes family; install root precedes Flair", () => {
+  test("does not fall back to a full node-llama-cpp package", () => {
+    const dir = fixture(packageFiles("", "node-llama-cpp", "3.16.1"));
+    expect(() => readLlamaInstalledPackage(dir)).toThrow(/is not installed under .* and harper-fabric-embeddings is not installed/);
+  });
+
+  test("reports the platform version harper-fabric-embeddings declares when the native is absent", () => {
     const dir = fixture({
-      ...packageFiles("", "node-llama-cpp", "3.10.0"),
+      ...packageFiles(flair, "harper-fabric-embeddings", "0.5.0"),
+    });
+    writeFileSync(join(dir, nested, "package.json"), JSON.stringify({
+      name: "harper-fabric-embeddings",
+      version: "0.5.0",
+      main: "index.js",
+      optionalDependencies: { [native]: "3.18.1", "@node-llama-cpp/win-x64": "3.18.1" },
+    }));
+    const source = join(dir, nested, "package.json");
+    expect(readLlamaInstalledPackage(dir)).toEqual({ version: "3.18.1", source });
+    expect(readLlamaInstalledVersion(dir)).toBe("3.18.1");
+    const result = spawnSync("node", [join(ROOT, "scripts/ci/llama-installed-version.mjs"), dir], { encoding: "utf8" });
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe("3.18.1");
+  });
+
+  test("ignores a native package resolved from a parent node_modules", () => {
+    const parent = fixture({
+      ...packageFiles("", native, "9.9.9"),
+      ...packageFiles("app/", "harper-fabric-embeddings", "0.5.0"),
+    });
+    const embeddings = join(parent, "app/node_modules/harper-fabric-embeddings/package.json");
+    writeFileSync(embeddings, JSON.stringify({
+      name: "harper-fabric-embeddings",
+      version: "0.5.0",
+      main: "index.js",
+      optionalDependencies: { [native]: "3.18.1" },
+    }));
+    const dir = join(parent, "app");
+    expect(readLlamaInstalledPackage(dir)).toEqual({ version: "3.18.1", source: embeddings });
+  });
+
+  test("install root precedes Flair", () => {
+    const dir = fixture({
       ...packageFiles("", native, "3.11.0"),
       ...packageFiles(flair, native, "3.12.0"),
     });
@@ -141,9 +189,8 @@ describe("llama-installed-version real manifests", () => {
     });
   });
 
-  test("native under Flair precedes root family; nested embeddings precede hoisted", () => {
+  test("nested embeddings native precedes hoisted native", () => {
     const dir = fixture({
-      ...packageFiles("", "node-llama-cpp", "3.10.0"),
       ...packageFiles(nested, native, "3.12.0"),
       ...packageFiles(hoisted, native, "3.13.0"),
     });

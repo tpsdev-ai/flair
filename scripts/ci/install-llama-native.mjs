@@ -25,12 +25,13 @@ export function installLlamaNative(args, {
       else platform = value;
     }
     if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(platform)) throw new Error(`invalid platform "${platform}"`);
+    const nativePackage = `@node-llama-cpp/${platform}`;
     const { version, source } = installed
-      ? readLlamaInstalledPackage(installed, `@node-llama-cpp/${platform}`)
-      : { version: readLlamaNativeVersion(readFileSync(lockfile, "utf8")), source: lockfile };
+      ? readLlamaInstalledPackage(installed, nativePackage)
+      : { version: readLlamaNativeVersion(readFileSync(lockfile, "utf8"), nativePackage), source: lockfile };
     if (!SEMVER.test(version)) throw new Error(`version "${version}" is not x.y.z`);
     const command = installed ? "npm" : "bun";
-    const argv = [installed ? "install" : "add", "--no-save", `@node-llama-cpp/${platform}@${version}`];
+    const argv = [installed ? "install" : "add", "--no-save", `${nativePackage}@${version}`];
     const options = { cwd: installed ?? cwd, shell: false, stdio: "inherit" };
     log(`llama-native-install: version ${version}; source ${source}`);
     log(`llama-native-install: command ${[command, ...argv].map(word => JSON.stringify(word)).join(" ")}; cwd ${options.cwd}`);
