@@ -6,8 +6,9 @@
  * interleave: each read the current key, staged its own, sent the ops `update`,
  * then renamed its staged key over the current one. The stored public key could
  * end up matching neither private key on disk. The lock serializes rotations of
- * one agent that use the same keys directory; it is taken BEFORE the current
- * key is read and held through the read-back check, the rename and the
+ * one agent that use the same keys directory on a filesystem with reliable
+ * exclusive create; it is taken BEFORE the current key is read and held
+ * through the read-back check, the rename and the
  * public-key write. Rotations that use different keys directories do not share
  * it, and a server-side compare-and-set for the Agent row is out of scope.
  *
@@ -16,13 +17,13 @@
  *     agent; its content is `<pid> <iso> <hostname>` for diagnosis only and is
  *     never an authorization input (a blank or partial record refuses).
  *   - acquisition retries a bounded number of times, then refuses, if the lock
- *     is still held after the retries, with a NAMED message that names the lock
+ *     still exists after the retries, with a NAMED message that names the lock
  *     file and says to remove it only once no rotation of that agent is running.
  *   - a lock path that is not a regular file (a FIFO, a directory, a symlink)
  *     is refused at once, before it is read.
  *   - there is no reclaim, no age-out and no pid-liveness shortcut: a lock left
  *     by a killed run keeps refusing until an operator removes it.
- *   - release removes the lock file when the file at that path still has the
+ *   - release attempts to remove the lock file when that path still has the
  *     device and inode recorded at create. That is an lstat then unlink, not an
  *     atomic remove. A leaked lock refuses the next rotation; it never corrupts
  *     a key file.
@@ -68,6 +69,13 @@ export interface AgentRotationLockOptions {
   retry?: { attempts: number; delayMs: number };
 }
 
+/** Test hook; production leaves it unset. */
+let beforeHolderOpen: ((lockPath: string) => void) | undefined;
+
+export function setAgentRotationLockTestHook(hook: typeof beforeHolderOpen): void {
+  beforeHolderOpen = hook;
+}
+
 export type AgentRotationLockResult =
   | { ok: true; lock: AgentRotationLock }
   | { ok: false; message: string };
@@ -108,13 +116,13 @@ function lockPathKind(lockPath: string): string {
     return "a non-regular file";
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return "missing";
-    return `unreadable (${message(err)})`;
+    return `could not check the lock path (${(err as NodeJS.ErrnoException).code ?? "unknown"})`;
   }
 }
 
 function nonRegularLockRefusal(lockPath: string, id: string, kind: string): string {
   return (
-    `refusing to rotate agent '${id}': the rotation lock path ${lockPath} is not a regular file (lstat reports ${kind}). ` +
+    `refusing to rotate agent '${id}': ${kind.startsWith("could not check") ? `${kind}: ${lockPath}` : `the rotation lock path ${lockPath} is not a regular file (lstat reports ${kind})`}. ` +
     `Remove ${lockPath} only once no rotation of that agent is running.`
   );
 }
@@ -145,9 +153,9 @@ function refusalLine(lockPath: string, id: string, holder: string | null): strin
   const parsed = parseLockHolder(holder);
   const who = parsed
     ? `recorded holder pid ${parsed.pid} since ${parsed.timestamp} on host ${parsed.host}`
-    : "its contents are not a readable holder record (blank or partially written)";
+    : "an unreadable or malformed lock record";
   return (
-    `another rotation of agent '${id}' holds ${lockPath} (${who}); refusing to rotate agent '${id}' without the lock. ` +
+    `an existing lock at ${lockPath} (${who}); refusing to rotate agent '${id}' without the lock. ` +
     `Remove ${lockPath} only once no rotation of that agent is running.`
   );
 }
@@ -172,7 +180,7 @@ function makeHandle(lockPath: string, identity: { dev: number; ino: number }): A
 }
 
 /**
- * Take the per-agent rotation lock, or refuse by name. A lock another run holds
+ * Take the per-agent rotation lock, or refuse by name. An existing lock
  * is retried within the bound and then refused; the caller must exit without
  * reading or writing any key file.
  */
@@ -220,6 +228,7 @@ export function acquireAgentRotationLock(opts: AgentRotationLockOptions): AgentR
   if (kind !== "regular" && kind !== "missing") {
     return { ok: false, message: nonRegularLockRefusal(lockPath, opts.id, kind) };
   }
+  if (kind === "regular") beforeHolderOpen?.(lockPath);
   const holder = kind === "regular" ? readLockHolder(lockPath) : null;
   return { ok: false, message: refusalLine(lockPath, opts.id, holder) };
 }
@@ -231,7 +240,7 @@ export function acquireAgentRotationLock(opts: AgentRotationLockOptions): AgentR
  *
  * TRUSTED-ENV ASSUMPTION: this path is only as privileged as the environment
  * that starts the CLI; a caller who can set it can already set `FLAIR_*` and
- * run the command itself. The wait always ends (40 × 25 ms × 30 = 30 s).
+ * run the command itself. The polling loop is bounded.
  */
 export async function agentRotationTestPause(): Promise<void> {
   const base = process.env.FLAIR_TEST_ROTATE_KEY_PAUSE;

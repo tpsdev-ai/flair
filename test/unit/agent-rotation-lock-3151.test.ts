@@ -1,6 +1,6 @@
 // agent-rotation-lock-3151.test.ts — flair#3151 lock module: identity-checked
 // release, and refusal of a lock path that is not a regular file.
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
@@ -17,6 +17,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as fs from "node:fs";
 import { acquireAgentRotationLock } from "../../src/lib/agent-rotation-lock.js";
 
 const cleanup: Array<() => void> = [];
@@ -88,6 +89,58 @@ describe("flair#3151 — agent rotation lock", () => {
     expect(res.message).toContain("a symlink");
     expect(readFileSync(target, "utf-8")).toBe("target\n");
   });
+
+  it("reports an lstat error as an unchecked path", () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, "agent-a.rotate-key.lock"), "");
+    const stat = spyOn(fs, "lstatSync").mockImplementation(() => {
+      throw Object.assign(new Error("fixture I/O error"), { code: "EIO" });
+    });
+    let res;
+    try {
+      res = acquireAgentRotationLock({ id: "agent-a", keysDir: dir });
+    } finally {
+      stat.mockRestore();
+    }
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.message).toContain("could not check the lock path (EIO)");
+    expect(res.message).not.toContain("not a regular file");
+  });
+
+  for (const variant of ["symlink", "fifo", "blank", "partial"] as const) {
+    it(`refuses the ${variant} lock record before a key read or request within the child's 4 s timeout`, () => {
+      const dir = tempDir();
+      const keysDir = join(dir, "keys");
+      mkdirSync(keysDir, { mode: 0o700 });
+      const keyPath = join(keysDir, "agent-a.key");
+      const seed = Buffer.alloc(32, 7);
+      writeFileSync(keyPath, seed, { mode: 0o600 });
+      const lockPath = join(keysDir, "agent-a.rotate-key.lock");
+      writeFileSync(lockPath, variant === "blank" ? "" : variant === "partial" ? "123 2026-11-26T00:00:00Z" : "123 timestamp host\n");
+      if (variant === "symlink") writeFileSync(join(keysDir, "target"), "456 timestamp target-host\n");
+      const before = readdirSync(keysDir).sort();
+      const fixture = join(import.meta.dirname, "..", "fixtures", "agent-rotation-lock-race.ts");
+      const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(FLAIR_|HARPER_|HDB_|FABRIC_)/.test(key)));
+      const started = Date.now();
+      const run = spawnSync("bun", [fixture, keysDir, variant], {
+        env: { ...env, HOME: dir }, encoding: "utf-8", timeout: 4_000,
+      });
+      expect(run.error, `${variant}: ${run.stderr}`).toBeUndefined();
+      expect(run.status, run.stderr).toBe(0);
+      expect(Date.now() - started).toBeLessThan(4_000);
+      expect(JSON.parse(run.stdout.trim().split("\n").at(-1)!)).toEqual({
+        code: 1, keyReads: 0, requests: 0, swaps: variant === "symlink" || variant === "fifo" ? 1 : 0,
+      });
+      expect(run.stderr).toContain("an existing lock");
+      expect(run.stderr).toContain("an unreadable or malformed lock record");
+      expect(run.stderr).toContain(lockPath);
+      expect(readFileSync(keyPath).equals(seed)).toBe(true);
+      expect(readdirSync(keysDir).sort()).toEqual(before);
+      if (variant === "symlink") expect(lstatSync(lockPath).isSymbolicLink()).toBe(true);
+      if (variant === "fifo") expect(lstatSync(lockPath).isFIFO()).toBe(true);
+    }, 15_000);
+  }
 
   it("a FIFO at the lock path is refused within the child's budget and touches no key file", () => {
     const dir = tempDir();

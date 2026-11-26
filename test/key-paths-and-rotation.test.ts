@@ -947,7 +947,7 @@ describe("agent rotate-key (real command, POSIX)", () => {
     expect(existsSync(lockPath)).toBe(true);
   }, 20_000);
 
-  it("with the lock already held, a rotation reads no key and sends no request", async () => {
+  it("with an existing lock, a rotation reads no key and sends no request", async () => {
     const oldSeed = seedCurrentKey();
     const lockPath = join(keysDir, `${id}.rotate-key.lock`);
     writeFileSync(lockPath, `999999 ${new Date().toISOString()} host-a\n`);
@@ -957,7 +957,7 @@ describe("agent rotate-key (real command, POSIX)", () => {
     const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
 
     expect(result.code).toBe(1);
-    expect(result.stderr).toContain("another rotation of agent");
+    expect(result.stderr).toContain("an existing lock");
     expect(result.stderr).toContain(lockPath);
     expect(keyRead).toBe(false);
     expect(requestCount).toBe(0);

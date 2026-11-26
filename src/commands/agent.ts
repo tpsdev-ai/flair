@@ -724,10 +724,11 @@ export function register(program: Command): void {
         throw err;
       }
       // flair#3151 — the lock serializes rotations of this agent that use this
-      // keys directory. It is taken before the current key is read and held
-      // through the read-back check, the rename and the public-key write. A
+      // keys directory on a filesystem with reliable exclusive create. It is
+      // taken before the current key is read and held through the read-back
+      // check, the rename and the public-key write. A
       // second rotation of this agent in this keys directory retries and, if the
-      // lock is still held, refuses here; a rotation in a different keys
+      // lock still exists, refuses here; a rotation in a different keys
       // directory uses a different lock file.
       const lockResult = acquireAgentRotationLock({ id, keysDir });
       if (lockResult.ok === false) {
