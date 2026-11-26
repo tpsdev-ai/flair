@@ -63,6 +63,8 @@ export interface AgentKeyFileTestHooks {
   beforeKeyRead?: (fd: number) => void;
   /** Runs after the temp key is complete and before it is linked into place. */
   beforePublish?: (tempPath: string, finalPath: string) => void;
+  /** Runs with the final path immediately after the hard link is made. */
+  afterPublish?: (finalPath: string) => void;
   syncKeysDir?: (fd: number) => void;
 }
 
@@ -72,7 +74,14 @@ export function setAgentKeyFileTestHooks(hooks: AgentKeyFileTestHooks | undefine
   testHooks = hooks;
 }
 
-/** Device + inode of a key file, as recorded when this process created it. */
+/**
+ * Device + inode of a key file, recorded from the temp file's own descriptor
+ * before it is published. Cleanup removes a path only if, when checked, it
+ * still names the file this grant created; a path swapped between that check
+ * and the unlink can still be removed, which a POSIX unlink by name cannot
+ * prevent. The keys directory is owner-only (0700 on POSIX), so only a
+ * process running as the same user can make that swap.
+ */
 export interface KeyFileIdentity {
   dev: number;
   ino: number;
@@ -291,7 +300,7 @@ function writeAgentKeyTemp(
   privateKeyPath: string,
   bytes: Buffer,
   onCreated?: (path: string, identity: KeyFileIdentity) => void,
-): string {
+): { path: string; identity: KeyFileIdentity } {
   const tempPrefix = `.${basename(privateKeyPath)}.tmp-`;
   const maxTempAttempts = 5;
   let fd: number | undefined;
@@ -312,7 +321,8 @@ function writeAgentKeyTemp(
   }
   try {
     const created = fstatSync(fd);
-    onCreated?.(tempPath, { dev: created.dev, ino: created.ino });
+    const identity = { dev: created.dev, ino: created.ino };
+    onCreated?.(tempPath, identity);
     // The open mode is narrowed by the umask; set it exactly, still before the
     // first byte, so the protection is the mode the file is created with.
     fchmodSync(fd, 0o600);
@@ -331,7 +341,7 @@ function writeAgentKeyTemp(
     fsyncSync(fd);
     closeSync(fd);
     fd = undefined;
-    return tempPath;
+    return { path: tempPath, identity };
   } catch (error) {
     if (fd !== undefined) {
       try {
@@ -364,25 +374,26 @@ export function createAgentKeyFile(
   data: string | Uint8Array,
   onCreated?: (path: string, identity: KeyFileIdentity) => void,
 ): void {
-  const tempPath = writeAgentKeyTemp(privateKeyPath, Buffer.from(data), onCreated);
+  const temp = writeAgentKeyTemp(privateKeyPath, Buffer.from(data), onCreated);
   try {
-    testHooks?.beforePublish?.(tempPath, privateKeyPath);
+    testHooks?.beforePublish?.(temp.path, privateKeyPath);
     // linkSync fails with EEXIST when the final path appears before publication.
-    linkSync(tempPath, privateKeyPath);
-    // The published name is a hard link to the temp file; record the identity
-    // of what is actually at the path now, right after publication.
-    const published = lstatSync(privateKeyPath);
-    onCreated?.(privateKeyPath, { dev: published.dev, ino: published.ino });
+    linkSync(temp.path, privateKeyPath);
+    testHooks?.afterPublish?.(privateKeyPath);
+    // The published name is a hard link to the temp file, so the identity
+    // recorded from the temp file's descriptor is the identity at the final
+    // path; never re-derive it from the path after publication.
+    onCreated?.(privateKeyPath, temp.identity);
   } catch (error) {
     try {
-      unlinkSync(tempPath);
+      unlinkSync(temp.path);
     } catch {
       /* best effort: remove only the temp file this call created */
     }
     throw error;
   }
   try {
-    unlinkSync(tempPath);
+    unlinkSync(temp.path);
   } catch {
     /* the published key is complete; a leftover temp file is mode 0600 */
   }
@@ -453,7 +464,7 @@ function syncAgentKeysDir(directory: string): void {
  * this call created (best effort).
  */
 export function stageAgentKeyFile(privateKeyPath: string, data: string | Uint8Array): string {
-  const tempPath = writeAgentKeyTemp(privateKeyPath, Buffer.from(data));
+  const tempPath = writeAgentKeyTemp(privateKeyPath, Buffer.from(data)).path;
   let directory = dirname(privateKeyPath);
   let kind = "keys";
   try {

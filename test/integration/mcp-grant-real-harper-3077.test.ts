@@ -1,7 +1,9 @@
 // mcp-grant-real-harper-3077.test.ts — flair#3077 slice C, against a REAL
 // Harper: `grantMcpClient` inserts the Agent row through the operations API
-// and the instance then serves the client's CIMD metadata. The inserted row is
-// read back and checked against schemas/agent.graphql's field set.
+// and the instance then serves the client's CIMD metadata. The test reads back
+// the inserted row's id, name, kind, type, status, displayName, publicKey,
+// admin, defaultTrustTier, runtime and createdAt, and the served document's
+// client_id, client_name and jwks key.
 //
 // Build prerequisite: dist/resources/*.js (`bun run build`).
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
@@ -62,7 +64,7 @@ afterAll(async () => {
 }, HARPER_STOP_BUDGET_MS);
 
 describe("flair#3077 slice C — mcp grant against a real Harper", () => {
-  test("(h) the inserted Agent row carries the schema's fields and the instance serves the client's metadata", async () => {
+  test("(h) the inserted Agent row carries the fields the test reads and the instance serves the client's metadata", async () => {
     const { entry } = await grantMcpClient({
       name: CLIENT,
       keysDir,

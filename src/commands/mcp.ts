@@ -400,9 +400,12 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
     return { entry, config };
   } catch (error) {
     // Remove the key files this call created on failure. Cleanup is keyed by
-    // file identity, never by name: a path is removed only while it still
-    // names the same regular file this grant created. Anything left is named
-    // in the error with the reason.
+    // file identity, never by name: a path is removed only if, when checked,
+    // it still names the file this grant created. A path replaced between that
+    // check and the unlink can still be removed; a POSIX unlink by name cannot
+    // close that window. The keys directory is owner-only (0700 on POSIX), so
+    // only a process running as the same user can make that swap. Anything
+    // left is named in the error with the reason.
     if (createdKeyFiles.length > 0) {
       const leftBehind: string[] = [];
       for (const created of createdKeyFiles) {

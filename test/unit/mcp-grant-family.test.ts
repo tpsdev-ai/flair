@@ -418,6 +418,31 @@ describe("grantMcpClient — key files", () => {
     expect(message).toContain("no longer names the file this grant created");
   });
 
+  test("cleanup leaves a private key replaced right after publication and names it", async () => {
+    const privPath = join(keysDir, "swapped.key");
+    const pubPath = join(keysDir, "swapped.pub");
+    setAgentKeyFileTestHooks({ afterPublish: (finalPath) => {
+      if (finalPath !== privPath) return;
+      const replacement = join(dir, "swapped-bytes");
+      writeFileSync(replacement, "replacement private bytes");
+      renameSync(replacement, privPath);
+    } });
+    mkdirSync(manifestPath);
+    const { fetchImpl, calls } = mockOpsFetch();
+    let message = "";
+    try {
+      await grantMcpClient(
+        { name: "swapped", keysDir, manifestPath, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "fixture" },
+        { fetchImpl },
+      );
+    } catch (error) { message = (error as Error).message; }
+    expect(calls.some(call => call.operation === "insert")).toBe(true);
+    expect(readFileSync(privPath, "utf8")).toBe("replacement private bytes");
+    expect(message).toContain(privPath);
+    expect(message).toContain("no longer names the file this grant created");
+    expect(existsSync(pubPath)).toBe(false);
+  });
+
   test.each([false, true])("manifest write failure after insert reports cleanup (unlink fails=%s)", async (failUnlink) => {
     mkdirSync(manifestPath);
     const { fetchImpl, calls } = mockOpsFetch();
