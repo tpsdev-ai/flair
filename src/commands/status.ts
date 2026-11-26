@@ -7,9 +7,9 @@
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
 import { Command } from "commander";
-import { defaultKeysDir, resolveAdminUser } from "../lib/auth-resolve.js";
+import { resolveAdminUser } from "../lib/auth-resolve.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
-import { formatKeyModeFinding, keyModeFindings, keyModesUnsupported, KEY_MODES_UNSUPPORTED_MESSAGE, scanKeyDir } from "../lib/key-dir.js";
+import { defaultKeysDir, formatKeyModeFinding, keyModeFindings, keyModesUnsupported, KEY_MODES_UNSUPPORTED_MESSAGE, scanKeyDir } from "../lib/key-dir.js";
 import { escapeTerminalText } from "../lib/terminal-text.js";
 import * as render from "../render.js";
 import { checkVersion, formatVersionNudge, FLAIR_PKG_NAME } from "../version-check.js";

@@ -75,9 +75,11 @@ import { Option, type Command } from "commander";
 import { createPrivateKey, randomUUID, sign as nodeCryptoSign } from "node:crypto";
 import type { SigningIdentitySource } from "./signing-identity.js";
 import { resolveHome } from "./home.js";
+import { defaultKeysDir } from "./key-dir.js";
 import { isConnectPhaseFailure } from "./connect-phase.js";
 
 export { isConnectPhaseFailure, REFUSED_CODES } from "./connect-phase.js";
+export { defaultKeysDir };
 
 // ─── Failure classification ─────────────────────────────────────────────────
 
@@ -1054,10 +1056,6 @@ export const DEFAULT_ADMIN_USER = "admin";
  */
 export function resolveAdminUser(explicit?: string): string {
   return explicit || process.env.FLAIR_ADMIN_USER || DEFAULT_ADMIN_USER;
-}
-
-export function defaultKeysDir(): string {
-  return join(resolveHome(), ".flair", "keys");
 }
 
 /**

@@ -7,9 +7,9 @@
  * key file is: a directory is not a key, a name must end in `.key`, and a
  * node-scoped federation key is not an agent key (flair#1193).
  */
-import { lstatSync, readdirSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { partitionKeyIds } from "../doctor-client.js";
+import { resolveHome } from "./home.js";
 
 export type KeyDirEntryKind = "dir" | "other" | "key";
 
@@ -100,3 +100,36 @@ export function keyModesUnsupported(): boolean {
 }
 
 export const KEY_MODES_UNSUPPORTED_MESSAGE = "key file modes are not checked on Windows";
+
+/** The keys directory `~/.flair/keys`, resolved at CALL time. */
+export function defaultKeysDir(): string {
+  return join(resolveHome(), ".flair", "keys");
+}
+
+/** Node-shaped file ids. */
+const NODE_KEY_ID_RE = /^flair_[0-9a-f]{8}$/;
+
+/** Match node-shaped ids without a sibling .pub; file type is unproven. */
+export function isNodeKeyId(id: string, keysDir: string): boolean {
+  if (!NODE_KEY_ID_RE.test(id)) return false;
+  return !existsSync(join(keysDir, `${id}.pub`));
+}
+
+/**
+ * Partition `.key`-derived ids into agent signing keys and node-scoped
+ * federation keys (see isNodeKeyId). Node keys must never feed agent handling —
+ * Ed25519 parsing, registration checks, or connector-identity inference
+ * (flair#1193) — so callers keep only `agentKeyIds` for those paths and report
+ * `nodeKeyIds` informatively.
+ */
+export function partitionKeyIds(
+  ids: string[],
+  keysDir: string,
+): { agentKeyIds: string[]; nodeKeyIds: string[] } {
+  const agentKeyIds: string[] = [];
+  const nodeKeyIds: string[] = [];
+  for (const id of ids) {
+    (isNodeKeyId(id, keysDir) ? nodeKeyIds : agentKeyIds).push(id);
+  }
+  return { agentKeyIds, nodeKeyIds };
+}
