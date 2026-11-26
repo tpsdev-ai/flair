@@ -4,12 +4,13 @@
  * ephemeral Harper (flair#3128, flair#3129).
  *
  * The CLI runs against Harper's real HTTP and ops ports, so the all-agent pair
- * proof reads the real OS listener table. A `node --import` preload records
- * every fetch the child sends and can refuse a chosen Memory PATCH, fail a
- * readback GET or ops `search_by_id`, or answer a 2xx readback with a
- * malformed body, so each path can be run with a failing write or readback: the
- * run exits non-zero and its summary names the count and the reason. A clean
- * run exits 0.
+ * proof reads the real OS listener table. The unproven-pair case stubs that
+ * read unavailable; the other pair cases use the real table. A `node --import`
+ * preload records every fetch the child sends and can refuse a chosen Memory
+ * PATCH, fail a readback GET or ops `search_by_id`, or answer a 2xx readback
+ * with a malformed body, so each path can be run with a failing write or
+ * readback: the run exits non-zero and its summary names the count and the
+ * reason. A clean run exits 0.
  *
  * The all-agent run sends every re-embed PATCH with the administrator
  * credential it lists rows with, so it re-embeds rows whose owner has no local
@@ -349,6 +350,16 @@ test("a configured pair whose HTTP port is a foreign listener refuses and sends 
   expect(listenerPatches.filter((entry) => entry.startsWith(`${foreignPort} `))).toEqual([]);
   expect(stdout).not.toContain("Re-embedding complete");
   for (const id of before.keys()) expect(await rowState(id), id).toEqual(before.get(id)!);
+}, 240_000);
+
+test("a proven pair whose HTTP port reports a different instance id refuses with the instance-id remedy and no PATCH", async () => {
+  const { code, stdout, stderr, fetches } = await runReembed(["reembed"], homeAllKeys, true, {
+    env: { FLAIR_TEST_REWRITE_HTTP_INSTANCE_JSON: JSON.stringify([{ id: "r3o-different-instance" }]) },
+  });
+  expect(code, stderr.slice(0, 800)).toBe(1);
+  expect(stderr).toContain("The two ports report different instance ids; point both at one instance.");
+  expect(patchPaths(fetches)).toEqual([]);
+  expect(stdout).not.toContain("Re-embedding complete");
 }, 240_000);
 
 test("an unproven pair refuses with nothing sent to the HTTP port", async () => {

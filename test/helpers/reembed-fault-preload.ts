@@ -17,6 +17,8 @@
  *     `search_by_id` answer.
  *   - FLAIR_TEST_REWRITE_OPS_READBACK_JSON maps a Memory id to a 2xx body.
  *   - FLAIR_TEST_REWRITE_GET_READBACK_JSON maps a Memory id to a 2xx body.
+ *   - FLAIR_TEST_REWRITE_HTTP_INSTANCE_JSON answers every GET /Instance/ with
+ *     this body.
  *
  * Nothing here is used outside tests.
  */
@@ -42,6 +44,7 @@ const refuseGets = jsonMap("FLAIR_TEST_REFUSE_GET_JSON");
 const refuseOpsReadbacks = jsonMap("FLAIR_TEST_REFUSE_OPS_READBACK_JSON");
 const rewriteOpsReadbacks = jsonMap("FLAIR_TEST_REWRITE_OPS_READBACK_JSON");
 const rewriteGetReadbacks = jsonMap("FLAIR_TEST_REWRITE_GET_READBACK_JSON");
+const rewriteHttpInstance = process.env.FLAIR_TEST_REWRITE_HTTP_INSTANCE_JSON;
 
 if (process.env.FLAIR_TEST_PAIR_OS_READS_UNAVAILABLE === "1") {
   const pair = await import(new URL("../../dist/lib/local-instance-pair.js", import.meta.url).href);
@@ -73,6 +76,11 @@ globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestIni
     if (method === "PATCH" && patchStatus !== undefined) {
       return new Response(JSON.stringify({ error: "refused by the test" }), {
         status: Number(patchStatus), headers: { "content-type": "application/json" },
+      });
+    }
+    if (method === "GET" && url.pathname === "/Instance/" && rewriteHttpInstance !== undefined) {
+      return new Response(String(rewriteHttpInstance), {
+        status: 200, headers: { "content-type": "application/json" },
       });
     }
     const getStatus = refuseGets[url.pathname];
