@@ -7,6 +7,7 @@
  * return fixed responses. Every echo case checks the thrown message directly
  * and after decoding attempts.
  */
+import { inspect } from "node:util";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { chdir } from "node:process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -49,7 +50,7 @@ let refusalAffix: "prefix" | "suffix" | undefined;
 /** The last credential the stub actually received, for the assertions. */
 let received: { password?: string; authorization?: string; payload?: string };
 
-beforeEach(() => {
+function setupServer(): void {
   mode = "unclassified";
   statusOverride = undefined;
   refusalAffix = undefined;
@@ -147,11 +148,7 @@ beforeEach(() => {
       return new Response(JSON.stringify(payload), { status: statusOverride ?? status, headers: { "content-type": "application/json" } });
     },
   });
-});
-
-afterEach(() => {
-  server.stop(true);
-});
+}
 
 const addUserBody = () => ({
   operation: OPERATION,
@@ -198,6 +195,11 @@ function expectStatusAndOperation(message: string, status = 400, operation = OPE
 }
 
 describe("callOpsApi fixed error descriptions (#3144)", () => {
+  beforeEach(setupServer);
+  afterEach(() => {
+    server.stop(true);
+  });
+
   test("maps an existing user to the fixed already-exists description", async () => {
     mode = "already-exists";
     const message = (await thrownError({ operation: "add_user", username: "admin", password: "x" })).message;
@@ -525,5 +527,98 @@ describe("callOpsApi fixed error descriptions (#3144)", () => {
 
     expect(run.calls).toEqual(["list_users", "deploy_component", "add_user"]);
     expect(run.message).toContain("withheld");
+  });
+});
+
+describe("callOpsApi fixed no-response descriptions (#3144)", () => {
+  async function rejectedRequest(target: string): Promise<Error> {
+    try {
+      await callOpsApi(target, { operation: "list_users" }, USER, PASS);
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error);
+      return error as Error;
+    }
+    throw new Error("expected a request failure");
+  }
+
+  test("reports the target scheme, host, port and path with a fixed no-response category", async () => {
+    const password = "ops-p@ss:3144";
+    const credentials = `ops-user:${password}`;
+    const target = `https://ops-user:${encodeURIComponent(password)}@127.0.0.1:19925/ops?token=query-3144#fragment-3144`;
+    const failure = new Error(`${target} ${credentials} ${password}`);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => { throw failure; }) as unknown as typeof fetch;
+    try {
+      const error = await rejectedRequest(target);
+      expect(error.cause).toBeUndefined();
+      for (const message of [error.message, error.toString(), inspect(error, { depth: Infinity })]) {
+        expect(leaked(message, password)).toBe(false);
+        expect(leaked(message, credentials)).toBe(false);
+        expect(message).not.toContain("ops-user");
+        expect(message).not.toContain("query-3144");
+        expect(message).not.toContain("fragment-3144");
+        expect(message).toContain("https://127.0.0.1:19925/ops (no response)");
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("reports connection refused after a local listener stops", async () => {
+    const listener = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("ok") });
+    const port = listener.port;
+    listener.stop(true);
+    const error = await rejectedRequest(`http://127.0.0.1:${port}/ops`);
+    expect(error.cause).toBeUndefined();
+    expect(error.message).toBe(
+      `ops API request got no response from http://127.0.0.1:${port}/ops (connection refused). ` +
+      "Set --ops-target or FLAIR_OPS_TARGET to override.",
+    );
+    expect(error.toString()).toBe(`Error: ${error.message}`);
+  });
+
+  test.each([
+    { code: "ECONNREFUSED", category: "connection refused" },
+    { code: "ConnectionRefused", category: "connection refused" },
+    { code: "ETIMEDOUT", category: "timed out" },
+    { code: "UND_ERR_CONNECT_TIMEOUT", category: "timed out" },
+  ])("reports $code as $category through the transport cause", async ({ code, category }) => {
+    const failure = new Error(PASS, { cause: { code } });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => { throw failure; }) as unknown as typeof fetch;
+    try {
+      const error = await rejectedRequest("http://127.0.0.1:19925/ops");
+      expect(error.cause).toBeUndefined();
+      expect(error.message).toContain(`(${category})`);
+      expect(error.message).not.toContain(PASS);
+      expect(error.toString()).not.toContain(PASS);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("reports an AbortSignal timeout with the fixed timed-out category", async () => {
+    const failure = new DOMException(PASS, "TimeoutError");
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => { throw failure; }) as unknown as typeof fetch;
+    try {
+      const error = await rejectedRequest("http://127.0.0.1:19925/ops");
+      expect(error.cause).toBeUndefined();
+      expect(error.message).toContain("(timed out)");
+      expect(error.message).not.toContain(PASS);
+      expect(error.toString()).not.toContain(PASS);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("names an unparseable URL as the configured ops target", async () => {
+    const error = await rejectedRequest(`not a URL ${PASS}`);
+    expect(error.cause).toBeUndefined();
+    expect(error.message).toBe(
+      "ops API request got no response from the configured ops target (no response). " +
+      "Set --ops-target or FLAIR_OPS_TARGET to override.",
+    );
+    expect(error.toString()).not.toContain(PASS);
   });
 });

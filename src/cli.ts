@@ -4116,11 +4116,29 @@ export async function callOpsApi(
       signal: AbortSignal.timeout(30_000),
     });
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
+    let target = "the configured ops target";
+    try {
+      const parsed = new URL(opsUrl);
+      target = `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+    } catch {}
+    let category = "no response";
+    const seen = new Set<unknown>();
+    for (let current = err; current && typeof current === "object" && !seen.has(current);) {
+      seen.add(current);
+      const failure = current as { code?: unknown; name?: unknown; cause?: unknown };
+      if (failure.code === "ECONNREFUSED" || failure.code === "ConnectionRefused") {
+        category = "connection refused";
+        break;
+      }
+      if (failure.name === "TimeoutError" || failure.code === "ETIMEDOUT" || failure.code === "UND_ERR_CONNECT_TIMEOUT") {
+        category = "timed out";
+        break;
+      }
+      current = failure.cause;
+    }
     throw new Error(
-      `ops API unreachable at ${opsUrl} (derived from --target). ` +
-      `Set --ops-target or FLAIR_OPS_TARGET to override. ` +
-      `(${message})`,
+      `ops API request got no response from ${target} (${category}). ` +
+      `Set --ops-target or FLAIR_OPS_TARGET to override.`,
     );
   }
   if (!res.ok) {
