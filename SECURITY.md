@@ -155,6 +155,13 @@ bits is refused with `chmod 600 <path>`, while rotation reports it. A successful
 rotation replaces the file; a failed update leaves it. On Windows mode bits
 do not establish owner-only. Legacy path `~/.tps/secrets/flair/<agentId>-priv.key` is also supported.
 
+`flair export --include-key` publishes its output through a `0600` temp file
+renamed over the target, so an existing output file's wider mode does not apply
+to the new contents. The keystore seed file is replaced the same way.
+A generated passphrase is published at `0600` if its path is absent. When used
+(`FLAIR_KEY_PASSPHRASE` unset), an existing generated passphrase file with group
+or world bits is refused unchanged before reading, with `chmod 600 <path>`. On Windows the mode bits do not apply.
+
 ### Key Generation
 
 Keys are generated during `flair agent add` using Ed25519 (via tweetnacl).

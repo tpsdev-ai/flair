@@ -9,7 +9,7 @@
  * (mode 0600). Never falls back to guessable data.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, linkSync, mkdirSync, openSync, readFileSync, unlinkSync, type Stats } from "node:fs";
 import { join } from "node:path";
 import { resolveHome } from "./lib/home.js";
 import { writeFilesAtomically } from "./lib/atomic-write.js";
@@ -55,12 +55,50 @@ function passphrasePath(): string {
   return join(keysDir(), ".passphrase");
 }
 
+interface PassphraseHooks {
+  platform?: NodeJS.Platform;
+  beforePublish?: () => void;
+  link?: typeof linkSync;
+  fstat?: (fd: number) => Stats;
+  read?: (source: string | number) => string;
+}
+
+/**
+ * Read the auto-generated passphrase through one no-follow descriptor, after
+ * refusing a file wider than owner-only. On Windows the mode check is skipped
+ * and the file is read by path.
+ */
+function readPassphraseFile(pp: string, hooks: PassphraseHooks): string {
+  const read = hooks.read ?? ((source: string | number) => readFileSync(source, "utf-8"));
+  const checked = (source: string | number): string => {
+    const passphrase = read(source).trim();
+    if (!passphrase) throw new Error(`passphrase file ${pp} is empty`);
+    return passphrase;
+  };
+  if ((hooks.platform ?? process.platform) === "win32") {
+    return checked(pp);
+  }
+  const fd = openSync(pp, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const st = (hooks.fstat ?? fstatSync)(fd);
+    if ((st.mode & 0o077) !== 0) {
+      throw new Error(
+        `passphrase file ${pp} is accessible to other users (mode ${(st.mode & 0o777).toString(8).padStart(3, "0")}); ` +
+          `run chmod 600 ${pp} to make it owner-only`,
+      );
+    }
+    return checked(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /**
  * Get or create the keystore passphrase.
  * Priority: FLAIR_KEY_PASSPHRASE env var > auto-generated file.
  * Never falls back to guessable data (hostname, username, etc.).
  */
-function getPassphrase(): string {
+function getPassphrase(hooks: PassphraseHooks = {}): string {
   // Explicit env var takes priority
   if (process.env.FLAIR_KEY_PASSPHRASE) {
     return process.env.FLAIR_KEY_PASSPHRASE;
@@ -68,9 +106,12 @@ function getPassphrase(): string {
 
   const pp = passphrasePath();
 
-  // Read existing auto-generated passphrase
-  if (existsSync(pp)) {
-    return readFileSync(pp, "utf-8").trim();
+  // Read existing auto-generated passphrase; a missing file falls through to
+  // generation, and any other open/read failure propagates.
+  try {
+    return readPassphraseFile(pp, hooks);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
   }
 
   // Generate a cryptographically random passphrase and persist it
@@ -79,8 +120,41 @@ function getPassphrase(): string {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
   const generated = randomBytes(32).toString("base64url");
-  writeFileSync(pp, generated, { mode: 0o600 });
-  return generated;
+  const staged = join(dir, `.passphrase.${process.pid}.${randomBytes(8).toString("hex")}.tmp`);
+  writeFilesAtomically([{ path: staged, content: generated, mode: 0o600 }]);
+  let passphrase = generated;
+  let failure: { error: unknown } | undefined;
+  try {
+    hooks.beforePublish?.();
+    // Link the complete file without replacing a competing passphrase; reread on conflict.
+    try {
+      (hooks.link ?? linkSync)(staged, pp);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code !== "EEXIST") {
+        throw new Error(
+          `could not publish the generated passphrase at ${pp} (${code}: ${(error as Error).message}); ` +
+            "if the keys dir's volume does not support hard links, set FLAIR_KEY_PASSPHRASE or use a keys dir on a volume that does",
+        );
+      }
+      passphrase = readPassphraseFile(pp, hooks);
+    }
+  } catch (error) {
+    failure = { error };
+  }
+  try {
+    unlinkSync(staged);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      const cleanup = `could not remove staged passphrase ${staged} (${(error as NodeJS.ErrnoException)?.code}: ${(error as Error).message})`;
+      throw new Error(
+        `${failure ? (failure.error as Error).message : `passphrase at ${pp}`}; ${cleanup}`,
+        { cause: failure ? failure.error : error },
+      );
+    }
+  }
+  if (failure) throw failure.error;
+  return passphrase;
 }
 
 /**
@@ -144,7 +218,7 @@ class FileKeyStore implements KeyStore {
     }
     const p = keyPath(instanceId);
     const encrypted = encryptSeed(seed);
-    writeFileSync(p, encrypted, { mode: 0o600 });
+    writeFilesAtomically([{ path: p, content: encrypted, mode: 0o600 }]);
   }
 }
 
@@ -243,4 +317,4 @@ export function recordSeedOwner(instanceId: string, dataDir: string): void {
 }
 
 // Export helpers for testing
-export { encryptSeed, decryptSeed, deriveKey, keyPath, keysDir };
+export { encryptSeed, decryptSeed, deriveKey, getPassphrase, keyPath, keysDir };

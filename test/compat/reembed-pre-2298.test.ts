@@ -10,6 +10,7 @@ import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
 
 const CLI = join(resolve(import.meta.dir, "../.."), "dist", "cli.js");
+const PRELOAD = join(resolve(import.meta.dir, ".."), "helpers", "reembed-fault-preload.ts");
 const BASELINE_VERSION = "0.59.0";
 const AGENT_ID = "reembed-compat-agent";
 const MEMORY_ID = "reembed-compat-memory";
@@ -40,6 +41,8 @@ describe("HEAD reembed against published Flair 0.59.0 [flair#2337]", () => {
   let port: number;
   let patches = 0;
   let healthReads = 0;
+  let authorizedRequests = 0;
+  let advertiseCapability = false;
 
   async function op(body: Record<string, unknown>): Promise<any> {
     const inst = baseline!;
@@ -62,13 +65,14 @@ describe("HEAD reembed against published Flair 0.59.0 [flair#2337]", () => {
     return rows[0];
   }
 
-  function runReembed(args: string[]): Promise<{ code: number | null; signal: string | null; out: string }> {
+  function runReembed(args: string[], httpPort: number = port, fetchLog?: string): Promise<{ code: number | null; signal: string | null; out: string }> {
     return new Promise((resolveRun, reject) => {
-      const child = spawn("node", [CLI, "reembed", "--port", String(port), ...args], {
+      const child = spawn("node", ["--import", PRELOAD, CLI, "reembed", "--port", String(httpPort), ...args], {
         cwd: baselineDir,
         env: {
           ...cleanEnv(),
           HOME: home,
+          ...(fetchLog ? { FLAIR_TEST_FETCH_LOG: fetchLog } : {}),
           FLAIR_OPS_PORT: new URL(baseline!.opsURL).port,
           FLAIR_ADMIN_USER: baseline!.admin.username,
           FLAIR_ADMIN_PASS: baseline!.admin.password,
@@ -138,8 +142,16 @@ describe("HEAD reembed against published Flair 0.59.0 [flair#2337]", () => {
     expect(stored.embeddingModel).toBe(fixtures[1].row.embeddingModel);
 
     proxy = createServer((req, res) => {
+      if (req.headers.authorization) authorizedRequests++;
       if (req.method === "PATCH") patches++;
-      if (req.method === "GET" && req.url === "/Health") healthReads++;
+      if (req.method === "GET" && req.url === "/Health") {
+        healthReads++;
+        if (advertiseCapability) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ version: BASELINE_VERSION, capabilities: ["memory-reembed-patch"] }));
+          return;
+        }
+      }
       const upstream = request(new URL(req.url!, baseline!.httpURL), {
         method: req.method,
         headers: { ...req.headers, host: new URL(baseline!.httpURL).host },
@@ -172,23 +184,65 @@ describe("HEAD reembed against published Flair 0.59.0 [flair#2337]", () => {
     }
   }, 120_000);
 
-  for (const mode of ["all agents", "--agent"]) {
-    test(`${mode}: refusal, zero PATCHes and unchanged stored embedding`, async () => {
-      const before = await readMemory();
-      patches = 0;
-      healthReads = 0;
-      const result = await runReembed(mode === "--agent" ? ["--agent", AGENT_ID] : []);
-      expect(result.signal, result.out).toBeNull();
-      expect(result.code, result.out).toBe(1);
-      expect(result.out).toContain("does not advertise the re-embed PATCH");
-      expect(result.out).toContain(`server version ${BASELINE_VERSION}`);
-      expect(result.out).toContain("Restart or upgrade the server, then re-run `flair reembed`");
-      expect(healthReads).toBe(1);
-      expect(patches).toBe(0);
-      const after = await readMemory();
-      expect(after.embedding).toEqual(before.embedding);
-      expect(after.embeddingModel).toBe(before.embeddingModel);
-      console.log(`${mode}: Flair ${BASELINE_VERSION}; exit 1; remedy present; PATCHes=${patches}; stored embedding and model unchanged`);
-    }, 90_000);
-  }
+  test("all agents: refusal, zero PATCH requests and unchanged stored embedding", async () => {
+    const before = await readMemory();
+    // Target Harper's real port so the pair proof reaches the advertisement check.
+    const fetchLog = join(baselineDir, "all-agents-fetch.jsonl");
+    await writeFile(fetchLog, "");
+    const result = await runReembed([], Number(new URL(baseline!.httpURL).port), fetchLog);
+    const requests = (await readFile(fetchLog, "utf8")).trim().split("\n").filter(Boolean)
+      .map((line) => JSON.parse(line) as { method: string; host: string; path: string });
+    expect(requests.some((req) => req.host === new URL(baseline!.httpURL).host && req.path === "/Health")).toBe(true);
+    expect(requests.filter((req) => req.method.toUpperCase() === "PATCH")).toHaveLength(0);
+    expect(result.signal, result.out).toBeNull();
+    expect(result.code, result.out).toBe(1);
+    expect(result.out).toContain("does not advertise the re-embed PATCH");
+    expect(result.out).toContain(`server version ${BASELINE_VERSION}`);
+    expect(result.out).toContain("Restart or upgrade the server, then re-run `flair reembed`");
+    const after = await readMemory();
+    expect(after.embedding).toEqual(before.embedding);
+    expect(after.embeddingModel).toBe(before.embeddingModel);
+    console.log(`all agents: Flair ${BASELINE_VERSION}; exit 1; remedy present; stored embedding and model unchanged`);
+  }, 90_000);
+
+  test("--agent: refusal, zero PATCHes and unchanged stored embedding", async () => {
+    const before = await readMemory();
+    patches = 0;
+    healthReads = 0;
+    const result = await runReembed(["--agent", AGENT_ID]);
+    expect(result.signal, result.out).toBeNull();
+    expect(result.code, result.out).toBe(1);
+    expect(result.out).toContain("does not advertise the re-embed PATCH");
+    expect(result.out).toContain(`server version ${BASELINE_VERSION}`);
+    expect(result.out).toContain("Restart or upgrade the server, then re-run `flair reembed`");
+    expect(healthReads).toBe(1);
+    expect(patches).toBe(0);
+    const after = await readMemory();
+    expect(after.embedding).toEqual(before.embedding);
+    expect(after.embeddingModel).toBe(before.embeddingModel);
+    console.log(`--agent: Flair ${BASELINE_VERSION}; exit 1; remedy present; PATCHes=${patches}; stored embedding and model unchanged`);
+  }, 90_000);
+
+  test("all agents aimed at the proxy: ambiguous_instance_target and no Authorization header or PATCH reaches it", async () => {
+    const before = await readMemory();
+    patches = 0;
+    const authorizationsBefore = authorizedRequests;
+    advertiseCapability = true;
+    let result: { code: number | null; signal: string | null; out: string };
+    try {
+      result = await runReembed([], port);
+    } finally {
+      advertiseCapability = false;
+    }
+    expect(result.signal, result.out).toBeNull();
+    // The security property comes first: this refused run sends the proxy
+    // neither the administrator's credential nor a PATCH.
+    expect(authorizedRequests).toBe(authorizationsBefore);
+    expect(patches).toBe(0);
+    expect(result.code, result.out).toBe(1);
+    expect(result.out).toContain("ambiguous_instance_target");
+    const after = await readMemory();
+    expect(after.embedding).toEqual(before.embedding);
+    expect(after.embeddingModel).toBe(before.embeddingModel);
+  }, 90_000);
 });

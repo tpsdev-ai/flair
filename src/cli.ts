@@ -74,7 +74,7 @@ import { flairConfigPath, flairDataDir } from "./lib/flair-paths.js";
 import { encodeRecordId } from "./lib/record-id-path.js";
 import { invalidAgentIdMessage, isValidAgentId } from "./lib/agent-id-rule.js";
 import { agentHomeEndpoint, decideProbedPairIdentity, readHttpInstanceIdentity, resolveTargetInstanceId, resolveTargetInstanceIdentity, stampAgentHome, type ProbedPairIdentity } from "./lib/agent-home.js";
-import { proveLocalInstancePair, type LocalInstancePairProof } from "./lib/local-instance-pair.js";
+import { IncompleteInstancePairError, proveLocalInstancePair, type LocalInstancePairProof } from "./lib/local-instance-pair.js";
 import {
   httpBind,
   httpCorsAccessList,
@@ -1541,6 +1541,19 @@ function resolveOpsPort(opts: { opsPort?: string | number; port?: string | numbe
 /** The named refusal for a configured-pair conflict or an unpaired one-sided target (flair#2474). */
 export const AMBIGUOUS_INSTANCE_TARGET_ERROR = "ambiguous_instance_target";
 
+/**
+ * The port pair one target addresses, and whether config bound it
+ * (flair#2474, flair#3135). `pairBound` is true when the pair came from a
+ * COMPLETE configured pair: both ports were recorded, and the target equals
+ * that pair (an unnamed port is taken from it). A pair the caller named that
+ * matches no complete configured pair, and a derived one, are not bound.
+ */
+export interface AgentHomeTarget {
+  httpPort: number;
+  opsPort: number;
+  pairBound: boolean;
+}
+
 /** The remedy appended to an {@link AMBIGUOUS_INSTANCE_TARGET_ERROR} refusal. */
 export const INSTANCE_TARGET_REMEDY = "Pass both ports (--port and --ops-port) for one instance.";
 
@@ -1579,7 +1592,7 @@ export interface AgentHomeTargetInputs {
  * Ports used "as given" are NOT VERIFIED: nothing here contacts an instance to
  * confirm that two named ports belong to one instance.
  */
-export function decideAgentHomeTarget(i: AgentHomeTargetInputs): { httpPort: number; opsPort: number } {
+export function decideAgentHomeTarget(i: AgentHomeTargetInputs): AgentHomeTarget {
   const { httpPort, httpNamed, namedOps, configuredHttp, configuredOps } = i;
   const remedy = INSTANCE_TARGET_REMEDY;
   if (configuredHttp !== null && configuredOps !== null) {
@@ -1592,18 +1605,22 @@ export function decideAgentHomeTarget(i: AgentHomeTargetInputs): { httpPort: num
           + `the config pairs HTTP ${configuredHttp} with ops ${configuredOps}. ${remedy}`,
       );
     }
-    return { httpPort, opsPort };
+    // Both sides equal the configured pair (or neither does — only when the
+    // caller named both, since an unnamed port is taken from the pair).
+    return { httpPort, opsPort, pairBound: httpMatches && opsMatches };
   }
   const opsNamed = namedOps !== null;
   if (httpNamed !== opsNamed) {
-    const [named, namedPort, other] = httpNamed ? ["HTTP", httpPort, "ops"] : ["ops", namedOps, "HTTP"];
-    throw new Error(
+    const [named, namedPort, other]: ["HTTP" | "ops", number, "HTTP" | "ops"] = httpNamed ? ["HTTP", httpPort, "ops"] : ["ops", namedOps!, "HTTP"];
+    throw new IncompleteInstancePairError(
       `${AMBIGUOUS_INSTANCE_TARGET_ERROR}: only the ${named} port (${namedPort}) was named, and no complete port pair could be resolved from config `
         + `(HTTP ${configuredHttp ?? "none"}, ops ${configuredOps ?? "none"}) to take the ${other} port from, so the two ports could address different instances. ${remedy}`,
+      named,
+      other,
     );
   }
-  if (namedOps !== null) return { httpPort, opsPort: namedOps };
-  return { httpPort, opsPort: i.deriveOps() };
+  if (namedOps !== null) return { httpPort, opsPort: namedOps, pairBound: false };
+  return { httpPort, opsPort: i.deriveOps(), pairBound: false };
 }
 
 /**
@@ -1626,10 +1643,7 @@ export function decideAgentHomeTarget(i: AgentHomeTargetInputs): { httpPort: num
  * ports when there is no complete pair) are used as given, without
  * verification. Every refusal is `ambiguous_instance_target`.
  */
-export function resolveAgentHomeTarget(opts: { port?: string | number; opsPort?: string | number; dataDir?: string }, httpPortOverride?: number): {
-  httpPort: number;
-  opsPort: number;
-} {
+export function resolveAgentHomeTarget(opts: { port?: string | number; opsPort?: string | number; dataDir?: string }, httpPortOverride?: number): AgentHomeTarget {
   // `flair doctor` probes the port it actually reached (a PID-discovered
   // `effectivePort` can differ from the configured one), so it passes that port
   // here; every other caller lets the resolver resolve it. When neither port is
@@ -1646,7 +1660,7 @@ export function resolveAgentHomeTarget(opts: { port?: string | number; opsPort?:
     const n = Number(opts.opsPort);
     if (!(Number.isInteger(n) && n >= 1 && n <= 65535)) {
       // An invalid --ops-port is refused by resolveOpsPort, which exits.
-      return { httpPort, opsPort: resolveOpsPort(opts) };
+      return { httpPort, opsPort: resolveOpsPort(opts), pairBound: false };
     }
     namedOps = n;
   } else if (process.env.FLAIR_OPS_PORT) {
@@ -4169,9 +4183,9 @@ export interface FabricProvisionHooks {
    */
   beforeAdminPasswordApplied?: () => void;
   /**
-   * Runs before attempting the add_user request (and its alter_user fallback)
-   * to set `admin`'s password. A failure after this point may have reached
-   * the cluster even when this function throws.
+   * Runs before attempting the add_user or alter_user request that sets
+   * `admin`'s password. A failure after this point may have reached the cluster
+   * even when this function throws.
    */
   adminPasswordRequestSent?: () => void;
   /** Runs after add_user/alter_user for `admin` succeeded. */
@@ -4213,14 +4227,42 @@ export async function provisionFabric(
     );
   }
   const users = userInfo;
-  const adminRecord = users.find(
-    (u: any) => u.username === clusterAdminUser || u.user?.username === clusterAdminUser,
-  );
-  const clusterAdminIsSuperUser = !!(
-    adminRecord?.role?.permission?.super_user ??
-    adminRecord?.permission?.super_user ??
-    false
-  );
+  const usernames: string[] = [];
+  const superUsers: boolean[] = [];
+  for (const record of users) {
+    const username =
+      record !== null && typeof record === "object" && !Array.isArray(record)
+        ? typeof record.username === "string"
+          ? record.username
+          : typeof record.user?.username === "string"
+            ? record.user.username
+            : undefined
+        : undefined;
+    const permission = record?.role?.permission ?? record?.permission;
+    const superUser = permission?.super_user;
+    if (username === undefined || username === "" || typeof superUser !== "boolean") {
+      throw new Error(
+        "The cluster's list_users response contained a malformed record, so provisioning refused to change anything",
+      );
+    }
+    usernames.push(username);
+    superUsers.push(superUser);
+  }
+  const clusterAdminRecords = usernames.filter((name) => name === clusterAdminUser).length;
+  if (clusterAdminRecords !== 1) {
+    throw new Error(
+      `The cluster's list_users response does not confirm the cluster administrator '${clusterAdminUser}' exactly once, so provisioning refused to change anything`,
+    );
+  }
+  const adminRecords = usernames.filter((name) => name === DEFAULT_ADMIN_USER).length;
+  if (adminRecords > 1) {
+    throw new Error(
+      `The cluster's list_users response lists more than one Flair administrator '${DEFAULT_ADMIN_USER}' record, so provisioning refused to change anything`,
+    );
+  }
+  const clusterAdminIndex = usernames.indexOf(clusterAdminUser);
+  const clusterAdminIsSuperUser = superUsers[clusterAdminIndex] === true;
+  const adminExists = adminRecords === 1;
 
   if (!clusterAdminIsSuperUser) {
     // Save the password before anything on the cluster changes.
@@ -4258,35 +4300,15 @@ export async function provisionFabric(
     return { username: clusterAdminUser, password: clusterAdminPass, created: false };
   } else {
     console.log(`Provisioning Harper user 'admin' as super_user...`);
-    try {
-      hooks.adminPasswordRequestSent?.();
-      await callOpsApi(opsTarget, {
-        operation: "add_user",
-        username: "admin",
-        password: flairAdminPass,
-        role: "super_user",
-        active: true,
-      }, clusterAdminUser, clusterAdminPass);
-      console.log("User 'admin' created ✓");
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("already exists") || msg.includes("duplicate")) {
-        // Idempotent: fall back to alter_user
-        console.log("User 'admin' already exists — updating password...");
-        await callOpsApi(opsTarget, {
-          operation: "alter_user",
-          username: "admin",
-          password: flairAdminPass,
-          role: "super_user",
-          active: true,
-        }, clusterAdminUser, clusterAdminPass);
-        console.log("User 'admin' updated ✓");
-        hooks.afterAdminPasswordApplied?.();
-        return { username: "admin", password: flairAdminPass, created: true };
-      } else {
-        throw err;
-      }
-    }
+    hooks.adminPasswordRequestSent?.();
+    await callOpsApi(opsTarget, {
+      operation: adminExists ? "alter_user" : "add_user",
+      username: "admin",
+      password: flairAdminPass,
+      role: "super_user",
+      active: true,
+    }, clusterAdminUser, clusterAdminPass);
+    console.log(adminExists ? "User 'admin' updated ✓" : "User 'admin' created ✓");
     hooks.afterAdminPasswordApplied?.();
     return { username: "admin", password: flairAdminPass, created: true };
   }
@@ -8982,6 +9004,8 @@ bindReembedCli({
   privKeyPath,
   resolveHttpPort,
   resolveOpsPort,
+  resolveAgentHomeTarget,
+  ambiguousInstanceTargetError: AMBIGUOUS_INSTANCE_TARGET_ERROR,
 });
 registerReembed(program);
 

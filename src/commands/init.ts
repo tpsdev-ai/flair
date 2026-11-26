@@ -290,7 +290,7 @@ async function seedUsingFlairSkillViaRest(baseUrl: string, adminUser: string, ad
  * name the leg's input, so the remedy points at the operator's own flag.
  */
 function refuseReservedPrincipal(name: string, role: string, flag: string): void {
-  if (name !== cli.FLAIR_AGENT_USERNAME) return;
+  if (name.trim().toLowerCase() !== cli.FLAIR_AGENT_USERNAME) return;
   console.error(`Error: '${cli.FLAIR_AGENT_USERNAME}' is a reserved Flair account and cannot be the ${role}.`);
   console.error(`  Use a different ${role} (${flag}).`);
   process.exit(1);
@@ -405,7 +405,7 @@ export interface RemoteInitLaterOptions {
    * the agent seed, and verify the instance with `/FederationInstance` instead
    * of `/Health`.
    */
-  provisioned: boolean;
+  provisioningLeg: boolean;
   agentId?: string;
   keysDir?: string;
 }
@@ -424,13 +424,13 @@ export async function finishRemoteInit(
   principal: RemoteInitPrincipal,
   opts: RemoteInitLaterOptions,
 ): Promise<{ instanceId?: string; privPath?: string }> {
-  const { baseUrl, opsUrl, remote, provisioned, agentId } = opts;
+  const { baseUrl, opsUrl, remote, provisioningLeg, agentId } = opts;
   const adminUser = principal.username;
   const adminPass = principal.password;
   const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
   const role = remote ? "hub" : undefined;
 
-  if (provisioned) {
+  if (provisioningLeg) {
     // Hub instances (--remote) receive federation pair requests and need
     // the flair_pair_initiator role so bootstrap credentials can pass
     // platform auth before reaching the FederationPair resource handler.
@@ -539,7 +539,7 @@ export async function finishRemoteInit(
   await seedUsingFlairSkillViaRest(baseUrl, adminUser, adminPass);
 
   // Verify connectivity
-  if (provisioned) {
+  if (provisioningLeg) {
     // Use /FederationInstance with Basic auth (not /Health which false-401s on Fabric)
     console.log("Verifying remote connectivity...");
     const verifyRes = await fetch(`${baseUrl}/FederationInstance`, {
@@ -592,7 +592,7 @@ addAdminPassOptions(
     { adminPassFileHelp: "Read admin password from file (chmod 600 recommended)" },
   )
   .option("--reset-admin-pass", "Rotate Harper's persisted admin hash via the operations socket, then write ~/.flair/admin-pass")
-  .option("--admin-user <name>", "Admin username when authenticating to an already-running instance via --target/--ops-target (env: FLAIR_ADMIN_USER; default: admin — local bootstrap and Fabric provisioning always create 'admin')")
+  .option("--admin-user <name>", "Admin username when authenticating to an already-running instance via --target/--ops-target (env: FLAIR_ADMIN_USER; default: admin — local bootstrap creates 'admin'; Fabric provisioning reuses an existing super_user cluster administrator, and otherwise creates or updates 'admin')")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
   .option("--data-dir <dir>", "Harper data directory")
   .option("--skip-start", "Do not start Harper; with --agent, defer registration (ignored with --target/--ops-target)")
@@ -738,6 +738,9 @@ addAdminPassOptions(
         }
         provisionedPrincipal = provisioned;
         didProvision = true;
+        if (!provisioned.created && existsSync(secretPath)) {
+          console.warn(`⚠ ${secretPath} already exists, but this run reused an existing super_user cluster administrator and neither changed nor verified that file. Verify it by authenticating to the instance with the password it holds before relying on it.`);
+        }
         if (provisioned.created) {
           console.log(`Admin password written to ${secretPath}`);
         }
@@ -773,7 +776,7 @@ addAdminPassOptions(
         baseUrl,
         opsUrl,
         remote: !!opts.remote,
-        provisioned: didProvision,
+        provisioningLeg: didProvision,
         agentId,
         keysDir: opts.keysDir,
       });
