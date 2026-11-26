@@ -98,12 +98,17 @@ test.each([
   await expect(opsStoredModelReader(1, "Basic abc")("x")).rejects.toThrow();
 }, 10_000);
 
-test.each([
-  ["no row", () => Response.json([])],
-  ["another row", () => Response.json([{ id: "y", embeddingModel: "gguf:model" }])],
-])("opsStoredModelReader answers undefined for %s", async (_label, response) => {
-  stubFetch(response);
+test("opsStoredModelReader answers undefined for an empty result", async () => {
+  stubFetch(() => Response.json([]));
   expect(await opsStoredModelReader(1, "Basic abc")("x")).toBeUndefined();
+}, 10_000);
+
+test.each([
+  ["a body that is not a row array", () => Response.json({ id: "x", embeddingModel: "gguf:model" }), "answered an object, not a row array"],
+  ["a row array without the requested id", () => Response.json([{ id: "y", embeddingModel: "gguf:model" }]), "answered 1 row(s) without the requested id"],
+])("opsStoredModelReader throws for %s", async (_label, response, reason) => {
+  stubFetch(response);
+  await expect(opsStoredModelReader(1, "Basic abc")("x")).rejects.toThrow(reason);
 }, 10_000);
 
 test("agentStoredModelReader reads the row with a signed GET as the agent", async () => {
@@ -125,7 +130,10 @@ test.each([
   await expect(agentStoredModelReader("http://127.0.0.1:1", "agent-a", keyFile())("x")).rejects.toThrow();
 }, 10_000);
 
-test("agentStoredModelReader answers undefined for another row", async () => {
-  stubFetch(() => Response.json({ id: "y", embeddingModel: "gguf:model" }));
-  expect(await agentStoredModelReader("http://127.0.0.1:1", "agent-a", keyFile())("x")).toBeUndefined();
+test.each([
+  ["a record that does not name the requested id", () => Response.json({ id: "y", embeddingModel: "gguf:model" }), "does not name the requested id"],
+  ["a non-record body", () => Response.json([{ id: "x", embeddingModel: "gguf:model" }]), "answered an array, not a record"],
+])("agentStoredModelReader throws for %s", async (_label, response, reason) => {
+  stubFetch(response);
+  await expect(agentStoredModelReader("http://127.0.0.1:1", "agent-a", keyFile())("x")).rejects.toThrow(reason);
 }, 10_000);

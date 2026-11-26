@@ -20,11 +20,19 @@ import { join } from "node:path";
 import nacl from "tweetnacl";
 import { tempDir } from "../helpers/temp-dir";
 import { bindCli, readAllMemoryRows, register } from "../../src/commands/reembed.ts";
+import { setInstancePairOsReadsForTests } from "../../src/lib/local-instance-pair.ts";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 
 const realExit = process.exit;
 const realLog = console.log;
 const realError = console.error;
+
+/** The pair proof reads the OS listener table; the stub server has no process, so inject one. */
+const SIMULATED_LISTENER_TABLE = {
+  listeners: () => ({ kind: "listeners" as const, pids: [24_600] }),
+  birth: () => ({ kind: "birth" as const, id: "24600@simulated" }),
+  commandLine: () => "node\u0000/simulated/node_modules/harper/dist/bin/harper.js\u0000run\u0000.",
+};
 
 type Scenario = { name: string; body: unknown };
 
@@ -49,6 +57,7 @@ const patched: string[] = [];
 let opsRequests = 0;
 
 beforeAll(async () => {
+  setInstancePairOsReadsForTests(SIMULATED_LISTENER_TABLE);
   server = createServer((req, res) => {
     let requestBody = "";
     req.on("data", (chunk) => { requestBody += chunk; });
@@ -75,6 +84,10 @@ beforeAll(async () => {
         res.end(JSON.stringify(ids.map((id) => ({ id, embeddingModel: getModelId() }))));
         return;
       }
+      if (operation === "get_configuration") {
+        res.end(JSON.stringify({ http: { port: `127.0.0.1:${port}` }, operationsApi: { network: { port } } }));
+        return;
+      }
       res.end(JSON.stringify(body));
     });
   });
@@ -83,6 +96,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  setInstancePairOsReadsForTests(null);
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 

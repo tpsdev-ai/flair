@@ -14,6 +14,7 @@ import {
   readHttpInstanceIdentity,
   resolveTargetInstanceIdentity,
 } from "../lib/agent-home.js";
+import { proveLocalInstancePair } from "../lib/local-instance-pair.js";
 import {
   MEMORY_REEMBED_PATCH_CAPABILITY,
   healthVersion,
@@ -64,9 +65,9 @@ function ambiguousInstanceTargetError(): string {
 
 /**
  * flair#2561: reads the `embeddingModel` stored on Memory row `id`, resolving
- * undefined when the response carries no stamp for that row, and throwing when
- * the read request or its JSON fails, so a failed read is not reported as a
- * missing stamp. `flair reembed` reads the stamp from the stored row after each
+ * undefined when the answer is an empty result, and throwing when the request,
+ * its JSON, or its shape fails, so a failed read is not reported as a missing
+ * stamp. `flair reembed` reads the stamp from the stored row after each
  * re-embed PATCH, because the PATCH response carries no embedding field.
  */
 export type StoredModelReader = (id: string) => Promise<unknown>;
@@ -92,8 +93,15 @@ export function opsStoredModelReader(opsPort: string | number, opsAuth: string):
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const rows: unknown = await res.json();
-    const row = Array.isArray(rows) ? rows.find((r) => (r as { id?: unknown } | null)?.id === id) : undefined;
-    return (row as { embeddingModel?: unknown } | undefined)?.embeddingModel;
+    if (!Array.isArray(rows)) {
+      throw new Error(`search_by_id answered ${describeJsonShape(rows)}, not a row array`);
+    }
+    if (rows.length === 0) return undefined;
+    const row = rows.find((r) => (r as { id?: unknown } | null)?.id === id);
+    if (row === undefined) {
+      throw new Error(`search_by_id answered ${rows.length} row(s) without the requested id`);
+    }
+    return (row as { embeddingModel?: unknown }).embeddingModel;
   };
 }
 
@@ -240,8 +248,14 @@ export function agentStoredModelReader(baseUrl: string, agentId: string, keyPath
     const res = await authFetch(baseUrl, agentId, keyPath, "GET", `/Memory/${encodeRecordId(id)}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const row: unknown = await res.json();
-    const record = row as { id?: unknown; embeddingModel?: unknown } | null;
-    return record?.id === id ? record.embeddingModel : undefined;
+    if (row === null || typeof row !== "object" || Array.isArray(row)) {
+      throw new Error(`GET /Memory/${encodeRecordId(id)} answered ${describeJsonShape(row)}, not a record`);
+    }
+    const record = row as { id?: unknown; embeddingModel?: unknown };
+    if (record.id !== id) {
+      throw new Error(`GET /Memory/${encodeRecordId(id)} answered a record that does not name the requested id`);
+    }
+    return record.embeddingModel;
   };
 }
 
@@ -351,6 +365,15 @@ function errorText(err: unknown): string {
   return message.length > 0 ? message : "unknown error";
 }
 
+/** A short name for a JSON value's shape, for a read that answered something else. */
+function describeJsonShape(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "an array";
+  if (typeof value === "object") return "an object";
+  if (typeof value === "undefined") return "undefined";
+  return `a ${typeof value}`;
+}
+
 /**
  * A failure reason on ONE line (flair#3128): a stored model string or an error
  * message can carry CR, LF or another control character, which would split the
@@ -402,32 +425,37 @@ export async function reembedServerSupportError(baseUrl: string): Promise<string
   return reembedUnsupportedMessage(healthVersion(body));
 }
 
-/** The remedy appended to a target-pair refusal (flair#3135). */
-const REEMBED_TARGET_REMEDY =
-  "Run it without --port so the instance's configured pair is used, or pass the HTTP and ops ports that pair records.";
+/** The remedy appended to a target-pair refusal for an unbound pair (flair#3135). */
+const REEMBED_UNBOUND_TARGET_REMEDY =
+  "Remove or correct the --port or FLAIR_URL override so the instance's configured pair is used.";
+
+/** The remedy appended to a target-pair refusal for a configured pair (flair#3135). */
+const REEMBED_PAIR_MISMATCH_REMEDY =
+  "The configured pair does not match the running instance; check ~/.flair/config.yaml (or the data directory's harper-config.yaml).";
 
 /**
  * flair#3135: the administrator's Basic credential goes to the HTTP port only
- * when that port is shown to belong to the instance whose ops API lists the
- * rows. This runs before the row listing, so every refusal precedes any PATCH.
- * A configuration-bound pair is probed on both sides: one shared identity
- * proceeds, two different identities refuse, and an unestablished one proceeds
- * (the configuration is the binding). A pair configuration does not record is
- * refused without a request to the HTTP port, since the credential may not be
- * sent there to read its identity.
+ * after `proveLocalInstancePair` has proven, from the ops port and the OS
+ * listener table, that one Harper process listens on that ops port and on the
+ * HTTP port this run targets. This runs before any request to the HTTP port, so
+ * every refusal precedes any PATCH. After the proof, the two endpoints'
+ * reported instance identities are a second check: two different ids refuse.
  */
 async function reembedTargetPairRefusal(
   target: { httpPort: number; opsPort: number; pairBound: boolean },
   adminUser: string,
   adminPass: string,
 ): Promise<string | null> {
+  const remedy = target.pairBound ? REEMBED_PAIR_MISMATCH_REMEDY : REEMBED_UNBOUND_TARGET_REMEDY;
   const refusal = (detail: string): string =>
-    `❌ flair reembed stopped before its first write: ${ambiguousInstanceTargetError()} — ${detail}\n   ${REEMBED_TARGET_REMEDY}`;
-  if (!target.pairBound) {
-    return refusal(
-      `the HTTP port ${target.httpPort} and the ops port ${target.opsPort} are not the pair this instance's configuration records, `
-        + `so the HTTP port's identity cannot be read before the credential is sent to it`,
-    );
+    `❌ flair reembed stopped before its first write: ${ambiguousInstanceTargetError()} — ${detail}\n   ${remedy}`;
+  const authorization = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
+  const proof = await proveLocalInstancePair(target.opsPort, authorization);
+  if (proof.kind !== "proven") {
+    return refusal(`the ops port ${target.opsPort} is not proven to pair with an HTTP port on this host: ${proof.detail}`);
+  }
+  if (proof.httpPort !== target.httpPort) {
+    return refusal(`the ops port ${target.opsPort} is proven to pair with HTTP port ${proof.httpPort}, not ${target.httpPort}`);
   }
   const [httpIdentity, opsIdentity] = await Promise.all([
     readHttpInstanceIdentity(`http://127.0.0.1:${target.httpPort}`, adminUser, adminPass),
@@ -506,6 +534,13 @@ program
         process.exit(1);
       }
       baseUrl = `http://127.0.0.1:${target.httpPort}`;
+      // flair#3135: prove the pair before ANY request to the HTTP port, so the
+      // administrator credential reaches that port only after the proof.
+      const pairRefusal = await reembedTargetPairRefusal(target, resolveAdminUser(undefined), adminPassEnv!);
+      if (pairRefusal) {
+        console.error(pairRefusal);
+        process.exit(1);
+      }
     }
 
     // flair#2337: require the advertised token before either PATCH loop.
@@ -578,15 +613,8 @@ program
       // Reads the pages before the first write (flair#3086). The read refuses
       // when its last page (MAX_MEMORY_READ_PAGES) comes back full, and the
       // command exits non-zero without writing.
-      // flair#3135: before the listing and the first PATCH, show that the HTTP
-      // port belongs to the instance whose ops API lists the rows.
       const opsPort = target!.opsPort;
       const adminUser = resolveAdminUser(undefined);
-      const pairRefusal = await reembedTargetPairRefusal(target!, adminUser, adminPass);
-      if (pairRefusal) {
-        console.error(pairRefusal);
-        process.exit(1);
-      }
       const opsAuth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
       const readStoredModel = opsStoredModelReader(opsPort, opsAuth);
       // The first page selects every row by id alone. An empty condition list
@@ -788,7 +816,7 @@ program
 
     const failed = errors > 0;
     console.log(`\n\n${failed ? "❌" : "✅"} Re-embedding complete: ${processed} updated, ${errors} errors`);
-    for (const line of failureReasonLines(errorsByReason, `re-run \`flair reembed --agent ${agentId}\` after fixing the cause`)) console.log(line);
+    for (const line of failureReasonLines(errorsByReason, `re-run \`flair reembed --agent ${oneLine(agentId)}\` after fixing the cause`)) console.log(line);
     if (keylessTruncated) console.log(keylessTruncationNotice(keylessListed));
     if (failed || keylessTruncated) process.exit(1);
   });

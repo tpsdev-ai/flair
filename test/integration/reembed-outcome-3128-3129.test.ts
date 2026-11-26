@@ -3,11 +3,13 @@
  * the keyless listing's row ownership, through the real CLI and a real
  * ephemeral Harper (flair#3128, flair#3129).
  *
- * A recording proxy in front of Harper refuses chosen Memory PATCH requests
- * with a per-row status, and can fail a row's readback GET or an ops
- * search_by_id after a successful PATCH, so each path can be run with a
- * failing write or readback: the run exits non-zero and its summary names the
- * count and the reason. A clean run exits 0.
+ * The CLI runs against Harper's real HTTP and ops ports, so the all-agent pair
+ * proof reads the real OS listener table. A `node --import` preload records
+ * every fetch the child sends and can refuse a chosen Memory PATCH, fail a
+ * readback GET or ops `search_by_id`, or answer a 2xx readback with a
+ * malformed body, so each path can be run with a failing write or readback: the
+ * run exits non-zero and its summary names the count and the reason. A clean
+ * run exits 0.
  *
  * The all-agent run sends every re-embed PATCH with the administrator
  * credential it lists rows with, so it re-embeds rows whose owner has no local
@@ -25,17 +27,15 @@
  *
  * Throwaway HOMEs, ephemeral ports, the boot migration trigger omitted. The
  * Harper instance's base URLs are asserted to be 127.0.0.1 on ports other than
- * 9925 and 9926; the CLI's HTTP requests go through the recording proxy, and
- * its ops reads go through a second proxy to the instance's ops port. Two cases
- * point `--port` at a separate listener that advertises the re-embed
- * capability: an unrecorded pair refuses and the listener sees no Authorization
- * header, and a configured pair whose HTTP port reports another instance id
- * refuses.
+ * 9925 and 9926. Two cases point `--port` at a separate listener that
+ * advertises the re-embed capability: an unrecorded pair refuses and the
+ * listener sees no Authorization header or PATCH, and a configured pair whose
+ * HTTP port is that listener refuses for the ops port's proven HTTP port.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
@@ -54,13 +54,15 @@ const B_ROW = "r3o-b-1";
 const C_ROW = "r3o-c-1";
 const D_ROWS = ["r3o-d-1", "r3o-d-2"];
 const REFUSED_ROW = A_ROWS[0];
+const NEWLINE_AGENT = "r3o-agent-newline\ncontinued";
+const NEWLINE_ROW = "r3o-newline-1";
 
-/** The Memory path a re-embed PATCH or readback GET for `id` requests. */
 const rowPath = (id: string) => `/Memory/${encodeURIComponent(id)}`;
 
 const agentA = { id: AGENT_A, ...nacl.sign.keyPair() };
 const agentB = { id: AGENT_B, ...nacl.sign.keyPair() };
 const agentC = { id: AGENT_C, ...nacl.sign.keyPair() };
+const agentNewline = { id: NEWLINE_AGENT, ...nacl.sign.keyPair() };
 
 let component: ComposedComponent;
 let harper: HarperInstance;
@@ -69,18 +71,19 @@ let homeMissingC: string;
 let homeOnlyA: string;
 let homeForeign: string;
 let homeUnpaired: string;
-let proxyPort = 0;
-let opsProxyPort = 0;
+let homeNewline: string;
 let foreignPort = 0;
 let unpairedListenerPort = 0;
+let logDir = "";
+let runSeq = 0;
 let listenerAuthorizations: string[] = [];
 let listenerPatches: string[] = [];
-let refusedPatches = new Map<string, number>();
-let refusedReadbacks = new Map<string, number>();
-const refusedOpsSearches = new Set<string>();
-const rewrittenOpsReadbacks = new Map<string, string>();
-const patchUrls: string[] = [];
 const servers: Server[] = [];
+
+const PRELOAD = join(import.meta.dirname, "..", "helpers", "reembed-fault-preload.ts");
+const realHttpPort = () => Number(new URL(harper.httpURL).port);
+const realOpsPort = () => Number(new URL(harper.opsURL).port);
+const harperHttpHost = () => `${new URL(harper.httpURL).hostname}:${new URL(harper.httpURL).port}`;
 
 const opsAuth = () => "Basic " + Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString("base64");
 
@@ -151,102 +154,6 @@ const FIELDS_THAT_MUST_NOT_MOVE = [
   "writeBackWriteId",
 ] as const;
 
-/** A reverse proxy that records every Memory PATCH and can refuse chosen rows' writes or readbacks. */
-async function startProxy(target: string): Promise<number> {
-  const server = createServer((req, res) => {
-    const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => chunks.push(chunk));
-    req.on("end", async () => {
-      const payload = Buffer.concat(chunks);
-      const url = req.url ?? "";
-      if (req.method === "PATCH") patchUrls.push(url);
-      const refused = req.method === "PATCH" ? refusedPatches : req.method === "GET" ? refusedReadbacks : undefined;
-      const refusedStatus = refused?.get(url);
-      if (refusedStatus !== undefined) {
-        res.writeHead(refusedStatus, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "refused by the test proxy" }));
-        return;
-      }
-      const headers: Record<string, string> = {};
-      if (req.headers["content-type"]) headers["content-type"] = String(req.headers["content-type"]);
-      if (req.headers.authorization) headers.authorization = String(req.headers.authorization);
-      try {
-        const upstream = await fetch(`${target}${req.url}`, {
-          method: req.method,
-          headers,
-          body: payload.length > 0 ? payload : undefined,
-          signal: AbortSignal.timeout(120_000),
-        });
-        const upstreamBody = Buffer.from(await upstream.arrayBuffer());
-        res.writeHead(upstream.status, { "Content-Type": upstream.headers.get("content-type") ?? "application/json" });
-        res.end(upstreamBody);
-      } catch {
-        res.writeHead(502, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "proxy upstream failed" }));
-      }
-    });
-  });
-  servers.push(server);
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  return (server.address() as AddressInfo).port;
-}
-
-/** A proxy to the ops port that refuses a chosen row's `search_by_id` readback. */
-async function startOpsProxy(target: string): Promise<number> {
-  const server = createServer((req, res) => {
-    const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => chunks.push(chunk));
-    req.on("end", async () => {
-      const payload = Buffer.concat(chunks);
-      if (req.method === "POST") {
-        let body: { operation?: unknown; ids?: unknown } | undefined;
-        try {
-          body = JSON.parse(payload.toString());
-        } catch {
-          body = undefined;
-        }
-        if (
-          body?.operation === "search_by_id"
-          && Array.isArray(body.ids)
-          && body.ids.some((id) => refusedOpsSearches.has(String(id)))
-        ) {
-          res.writeHead(500, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "refused by the test proxy" }));
-          return;
-        }
-        if (body?.operation === "search_by_id" && Array.isArray(body.ids)) {
-          const rewritten = body.ids.map((id) => rewrittenOpsReadbacks.get(String(id))).find((value) => value !== undefined);
-          if (rewritten !== undefined) {
-            res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(rewritten);
-            return;
-          }
-        }
-      }
-      const headers: Record<string, string> = {};
-      if (req.headers["content-type"]) headers["content-type"] = String(req.headers["content-type"]);
-      if (req.headers.authorization) headers.authorization = String(req.headers.authorization);
-      try {
-        const upstream = await fetch(`${target}${req.url}`, {
-          method: req.method,
-          headers,
-          body: payload.length > 0 ? payload : undefined,
-          signal: AbortSignal.timeout(120_000),
-        });
-        const upstreamBody = Buffer.from(await upstream.arrayBuffer());
-        res.writeHead(upstream.status, { "Content-Type": upstream.headers.get("content-type") ?? "application/json" });
-        res.end(upstreamBody);
-      } catch {
-        res.writeHead(502, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "proxy upstream failed" }));
-      }
-    });
-  });
-  servers.push(server);
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  return (server.address() as AddressInfo).port;
-}
-
 function makeHome(label: string, agents: Agent[]): string {
   const home = mkdtempSync(join(tmpdir(), `flair-${label}-home-`));
   const keysDir = join(home, ".flair", "keys");
@@ -298,6 +205,8 @@ beforeAll(async () => {
   homeOnlyA = makeHome("3128-only-a", [agentA]);
   homeForeign = makeHome("3128-foreign", [agentA, agentB, agentC]);
   homeUnpaired = makeHome("3128-unpaired", [agentA, agentB, agentC]);
+  homeNewline = makeHome("3128-newline", [agentNewline]);
+  logDir = mkdtempSync(join(tmpdir(), "flair-3128-fetch-"));
   component = componentWithoutMigrationBoot();
   harper = await startHarper({ cwd: component.dir, harperBinDir: component.sourceRoot });
   for (const url of [new URL(harper.httpURL), new URL(harper.opsURL)]) {
@@ -337,38 +246,44 @@ beforeAll(async () => {
     table: "Instance",
     records: [{ id: "r3o-instance", role: "hub", publicKey: "cHVibGljLWtleQ", status: "active", createdAt: now }],
   });
-  proxyPort = await startProxy(harper.httpURL);
-  opsProxyPort = await startOpsProxy(harper.opsURL);
-  for (const home of [homeAllKeys, homeMissingC]) writePairConfig(home, proxyPort, opsProxyPort);
+  for (const home of [homeAllKeys, homeMissingC]) writePairConfig(home, realHttpPort(), realOpsPort());
   listenerAuthorizations = [];
   listenerPatches = [];
   foreignPort = await startListener([{ id: "r3o-other-instance" }]);
   unpairedListenerPort = await startListener([{ id: "r3o-instance" }]);
-  writePairConfig(homeForeign, foreignPort, Number(new URL(harper.opsURL).port));
+  writePairConfig(homeForeign, foreignPort, realOpsPort());
 }, 300_000);
 
 afterAll(async () => {
   for (const server of servers) await new Promise<void>((resolve) => server.close(() => resolve()));
   if (harper) await stopHarper(harper);
   component?.cleanup();
-  for (const home of [homeAllKeys, homeMissingC, homeOnlyA, homeForeign, homeUnpaired]) if (home) rmSync(home, { recursive: true, force: true });
+  for (const home of [homeAllKeys, homeMissingC, homeOnlyA, homeForeign, homeUnpaired, homeNewline]) {
+    if (home) rmSync(home, { recursive: true, force: true });
+  }
+  if (logDir) rmSync(logDir, { recursive: true, force: true });
 }, HARPER_STOP_BUDGET_MS);
 
-type Run = { code: number | null; stdout: string; stderr: string };
+type FetchEntry = { method: string; host: string; path: string };
+type Run = { code: number | null; stdout: string; stderr: string; fetches: FetchEntry[] };
 
 async function runReembed(
   args: string[],
   home: string,
   admin: boolean | string,
-  ports: { http: number; ops: number } = { http: proxyPort, ops: opsProxyPort },
+  opts: { ports?: { http: number; ops: number }; env?: Record<string, string> } = {},
 ): Promise<Run> {
-  patchUrls.length = 0;
+  const ports = opts.ports ?? { http: realHttpPort(), ops: realOpsPort() };
+  const logPath = join(logDir, `fetch-${runSeq++}.log`);
+  writeFileSync(logPath, "");
   const base = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(FLAIR_|HARPER_|HDB_|FABRIC_)/.test(key)));
   const env: Record<string, string | undefined> = {
     ...base,
     HOME: home,
     FLAIR_OPS_PORT: String(ports.ops),
     NO_COLOR: "1",
+    FLAIR_TEST_FETCH_LOG: logPath,
+    ...opts.env,
   };
   if (admin) {
     env.FLAIR_ADMIN_USER = harper.admin.username;
@@ -377,6 +292,7 @@ async function runReembed(
   const child = spawnCli([...args, "--port", String(ports.http), "--batch-size", "1", "--delay-ms", "0"], {
     env,
     timeout: 180_000,
+    preload: PRELOAD,
   });
   let stdout = "";
   let stderr = "";
@@ -386,18 +302,16 @@ async function runReembed(
     child.on("error", reject);
     child.on("close", (exitCode) => resolve(exitCode));
   });
-  return { code, stdout, stderr };
+  const fetches = readFileSync(logPath, "utf-8")
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as FetchEntry);
+  return { code, stdout, stderr, fetches };
 }
 
-function resetRefusals(): void {
-  refusedPatches = new Map();
-  refusedReadbacks = new Map();
-  refusedOpsSearches.clear();
-  rewrittenOpsReadbacks.clear();
-}
+const patchPaths = (fetches: FetchEntry[]): string[] => fetches.filter((entry) => entry.method === "PATCH").map((entry) => entry.path);
 
 test("a pair bound by the instance's configuration proceeds and the all-agent run exits 0", async () => {
-  resetRefusals();
   const { code, stdout, stderr } = await runReembed(["reembed"], homeAllKeys, true);
   expect(code, stderr.slice(0, 800)).toBe(0);
   expect(stdout).toContain("✅ Re-embedding complete: 7 updated, 0 errors");
@@ -406,39 +320,52 @@ test("a pair bound by the instance's configuration proceeds and the all-agent ru
 }, 240_000);
 
 test("a named pair that configuration does not bind refuses with no Authorization header sent to that HTTP port", async () => {
-  resetRefusals();
   const before = new Map<string, Record<string, unknown>>();
   for (const id of [...A_ROWS, B_ROW, C_ROW, ...D_ROWS]) before.set(id, await rowState(id));
   const listenerBefore = listenerAuthorizations.filter((entry) => entry.startsWith(`${unpairedListenerPort} `)).length;
   const { code, stdout, stderr } = await runReembed(["reembed"], homeUnpaired, true, {
-    http: unpairedListenerPort,
-    ops: Number(new URL(harper.opsURL).port),
+    ports: { http: unpairedListenerPort, ops: realOpsPort() },
   });
   expect(code, stderr.slice(0, 800)).toBe(1);
   expect(listenerAuthorizations.filter((entry) => entry.startsWith(`${unpairedListenerPort} `))).toHaveLength(listenerBefore);
   expect(listenerPatches.filter((entry) => entry.startsWith(`${unpairedListenerPort} `))).toEqual([]);
   expect(stderr).toContain("ambiguous_instance_target");
+  expect(stderr).toContain("--port or FLAIR_URL");
   expect(stdout).not.toContain("Re-embedding complete");
   for (const id of before.keys()) expect(await rowState(id), id).toEqual(before.get(id)!);
 }, 240_000);
 
-test("a configuration-bound pair whose HTTP port reports another instance refuses with ambiguous_instance_target", async () => {
-  resetRefusals();
+test("a configured pair whose HTTP port is a foreign listener refuses and sends it no Authorization header or PATCH", async () => {
   const before = new Map<string, Record<string, unknown>>();
   for (const id of [...A_ROWS, B_ROW, C_ROW, ...D_ROWS]) before.set(id, await rowState(id));
+  const listenerBefore = listenerAuthorizations.filter((entry) => entry.startsWith(`${foreignPort} `)).length;
   const { code, stdout, stderr } = await runReembed(["reembed"], homeForeign, true, {
-    http: foreignPort,
-    ops: Number(new URL(harper.opsURL).port),
+    ports: { http: foreignPort, ops: realOpsPort() },
   });
   expect(code, stderr.slice(0, 800)).toBe(1);
   expect(stderr).toContain("ambiguous_instance_target");
+  expect(stderr).toContain("configured pair does not match the running instance");
+  expect(listenerAuthorizations.filter((entry) => entry.startsWith(`${foreignPort} `))).toHaveLength(listenerBefore);
   expect(listenerPatches.filter((entry) => entry.startsWith(`${foreignPort} `))).toEqual([]);
   expect(stdout).not.toContain("Re-embedding complete");
   for (const id of before.keys()) expect(await rowState(id), id).toEqual(before.get(id)!);
 }, 240_000);
 
+test("an unproven pair refuses with nothing sent to the HTTP port", async () => {
+  const before = new Map<string, Record<string, unknown>>();
+  for (const id of [...A_ROWS, B_ROW, C_ROW, ...D_ROWS]) before.set(id, await rowState(id));
+  const { code, stdout, stderr, fetches } = await runReembed(["reembed"], homeAllKeys, true, {
+    env: { FLAIR_TEST_PAIR_OS_READS_UNAVAILABLE: "1" },
+  });
+  expect(fetches.filter((entry) => entry.host === harperHttpHost())).toEqual([]);
+  expect(code, stderr.slice(0, 800)).toBe(1);
+  expect(stderr).toContain("ambiguous_instance_target");
+  expect(stderr).toContain("not proven to pair");
+  expect(stdout).not.toContain("Re-embedding complete");
+  for (const id of before.keys()) expect(await rowState(id), id).toEqual(before.get(id)!);
+}, 240_000);
+
 test("a clean single-agent run exits 0 with the unchanged summary", async () => {
-  resetRefusals();
   const { code, stdout, stderr } = await runReembed(["reembed", "--agent", AGENT_A], homeAllKeys, true);
   expect(code, stderr.slice(0, 800)).toBe(0);
   expect(stdout).toContain("Candidates for re-embedding: 2");
@@ -447,9 +374,9 @@ test("a clean single-agent run exits 0 with the unchanged summary", async () => 
 }, 240_000);
 
 test("a refused write in the all-agent path exits 1 and names the count and reason", async () => {
-  resetRefusals();
-  refusedPatches.set(rowPath(REFUSED_ROW), 500);
-  const { code, stdout, stderr } = await runReembed(["reembed"], homeAllKeys, true);
+  const { code, stdout, stderr } = await runReembed(["reembed"], homeAllKeys, true, {
+    env: { FLAIR_TEST_REFUSE_PATCH_JSON: JSON.stringify({ [rowPath(REFUSED_ROW)]: 500 }) },
+  });
   expect(code, stderr.slice(0, 800)).toBe(1);
   expect(stdout).toContain("❌ Re-embedding complete: 6 updated, 1 errors");
   expect(stdout).toContain("1 row(s) not updated: HTTP 500");
@@ -457,9 +384,9 @@ test("a refused write in the all-agent path exits 1 and names the count and reas
 }, 240_000);
 
 test("a refused write in the single-agent path exits 1 and names the count and reason", async () => {
-  resetRefusals();
-  refusedPatches.set(rowPath(REFUSED_ROW), 500);
-  const { code, stdout, stderr } = await runReembed(["reembed", "--agent", AGENT_A], homeAllKeys, true);
+  const { code, stdout, stderr } = await runReembed(["reembed", "--agent", AGENT_A], homeAllKeys, true, {
+    env: { FLAIR_TEST_REFUSE_PATCH_JSON: JSON.stringify({ [rowPath(REFUSED_ROW)]: 500 }) },
+  });
   expect(code, stderr.slice(0, 800)).toBe(1);
   expect(stdout).toContain("❌ Re-embedding complete: 1 updated, 1 errors");
   expect(stdout).toContain("1 row(s) not updated: HTTP 500");
@@ -467,11 +394,15 @@ test("a refused write in the single-agent path exits 1 and names the count and r
 }, 240_000);
 
 test("the summary reports each distinct failure reason once with its row count", async () => {
-  resetRefusals();
-  refusedPatches.set(rowPath(A_ROWS[0]), 500);
-  refusedPatches.set(rowPath(A_ROWS[1]), 500);
-  refusedPatches.set(rowPath(B_ROW), 503);
-  const { code, stdout, stderr } = await runReembed(["reembed"], homeAllKeys, true);
+  const { code, stdout, stderr } = await runReembed(["reembed"], homeAllKeys, true, {
+    env: {
+      FLAIR_TEST_REFUSE_PATCH_JSON: JSON.stringify({
+        [rowPath(A_ROWS[0])]: 500,
+        [rowPath(A_ROWS[1])]: 500,
+        [rowPath(B_ROW)]: 503,
+      }),
+    },
+  });
   expect(code, stderr.slice(0, 800)).toBe(1);
   expect(stdout).toContain("❌ Re-embedding complete: 4 updated, 3 errors");
   const reasonLines = stdout.split("\n").map((line) => line.trim()).filter((line) => line.includes("row(s) not updated:"));
@@ -482,9 +413,13 @@ test("the summary reports each distinct failure reason once with its row count",
 }, 240_000);
 
 test("a stored model string with a newline renders as one failure reason line", async () => {
-  resetRefusals();
-  rewrittenOpsReadbacks.set(REFUSED_ROW, JSON.stringify([{ id: REFUSED_ROW, embeddingModel: "wrong\nmodel" }]));
-  const { code, stdout, stderr } = await runReembed(["reembed", "--agent", AGENT_A], homeAllKeys, true);
+  const { code, stdout, stderr } = await runReembed(["reembed", "--agent", AGENT_A], homeAllKeys, true, {
+    env: {
+      FLAIR_TEST_REWRITE_OPS_READBACK_JSON: JSON.stringify({
+        [REFUSED_ROW]: JSON.stringify([{ id: REFUSED_ROW, embeddingModel: "wrong\nmodel" }]),
+      }),
+    },
+  });
   expect(code, stderr.slice(0, 800)).toBe(1);
   const reasonLines = stdout.split("\n").filter((line) => line.includes("row(s) not updated:"));
   expect(reasonLines).toHaveLength(1);
@@ -492,9 +427,9 @@ test("a stored model string with a newline renders as one failure reason line", 
 }, 240_000);
 
 test("a successful PATCH whose readback fails exits non-zero and does not count the row", async () => {
-  resetRefusals();
-  refusedReadbacks.set(rowPath(A_ROWS[0]), 500);
-  const { code, stdout, stderr } = await runReembed(["reembed", "--agent", AGENT_A], homeOnlyA, false);
+  const { code, stdout, stderr } = await runReembed(["reembed", "--agent", AGENT_A], homeOnlyA, false, {
+    env: { FLAIR_TEST_REFUSE_GET_JSON: JSON.stringify({ [rowPath(A_ROWS[0])]: 500 }) },
+  });
   expect(code, stderr.slice(0, 800)).toBe(1);
   expect(stdout).toContain("❌ Re-embedding complete: 1 updated, 1 errors");
   expect(stdout).toContain("1 row(s) not updated: stored model read failed: HTTP 500");
@@ -503,23 +438,42 @@ test("a successful PATCH whose readback fails exits non-zero and does not count 
 }, 240_000);
 
 test("a successful all-agent PATCH whose ops readback fails exits non-zero and does not count the row", async () => {
-  resetRefusals();
-  refusedOpsSearches.add(REFUSED_ROW);
-  const { code, stdout, stderr } = await runReembed(["reembed"], homeAllKeys, true);
+  const { code, stdout, stderr, fetches } = await runReembed(["reembed"], homeAllKeys, true, {
+    env: { FLAIR_TEST_REFUSE_OPS_READBACK_JSON: JSON.stringify({ [REFUSED_ROW]: 500 }) },
+  });
   expect(code, stderr.slice(0, 800)).toBe(1);
   expect(stdout).toContain("❌ Re-embedding complete: 6 updated, 1 errors");
   expect(stdout).toContain("1 row(s) not updated: stored model read failed: HTTP 500");
   expect(stdout).not.toContain("✅ Re-embedding complete");
-  expect(patchUrls).toContain(rowPath(REFUSED_ROW));
+  expect(fetches.filter((entry) => entry.method === "PATCH").map((entry) => entry.path)).toContain(rowPath(REFUSED_ROW));
 }, 240_000);
 
+test("a malformed 2xx readback is a failed read with its reason, not a missing stamp", async () => {
+  const allAgent = await runReembed(["reembed"], homeAllKeys, true, {
+    env: {
+      FLAIR_TEST_REWRITE_OPS_READBACK_JSON: JSON.stringify({ [REFUSED_ROW]: JSON.stringify({ not: "rows" }) }),
+    },
+  });
+  expect(allAgent.code, allAgent.stderr.slice(0, 800)).toBe(1);
+  expect(allAgent.stdout).toContain("row(s) not updated: stored model read failed: search_by_id answered an object, not a row array");
+  expect(allAgent.stdout).not.toContain("stored embeddingModel is missing");
+
+  const signed = await runReembed(["reembed", "--agent", AGENT_A], homeOnlyA, false, {
+    env: {
+      FLAIR_TEST_REWRITE_GET_READBACK_JSON: JSON.stringify({ [A_ROWS[0]]: JSON.stringify([]) }),
+    },
+  });
+  expect(signed.code, signed.stderr.slice(0, 800)).toBe(1);
+  expect(signed.stdout).toContain(`row(s) not updated: stored model read failed: GET /Memory/${A_ROWS[0]} answered an array, not a record`);
+  expect(signed.stdout).not.toContain("stored embeddingModel is missing");
+}, 300_000);
+
 test("the admin all-agent run re-embeds rows whose owners have no key and leaves their identity fields byte-identical", async () => {
-  resetRefusals();
   const ids = [...A_ROWS, B_ROW, C_ROW, ...D_ROWS, SEED_SKILL_ID];
   const before = new Map<string, Record<string, unknown>>();
   for (const id of ids) before.set(id, await rowState(id));
 
-  const { code, stdout, stderr } = await runReembed(["reembed"], homeMissingC, true);
+  const { code, stdout, stderr, fetches } = await runReembed(["reembed"], homeMissingC, true);
   expect(code, stderr.slice(0, 800)).toBe(0);
   expect(stdout).toContain("✅ Re-embedding complete: 7 updated, 0 errors");
   expect(stdout).not.toContain("skipped");
@@ -532,12 +486,11 @@ test("the admin all-agent run re-embeds rows whose owners have no key and leaves
       expect(after[field], `${id}: ${field} unchanged`).toBe(prior[field]);
     }
     expect(identityState(after), `${id}: every other stored field unchanged`).toEqual(identityState(prior));
-    expect(patchUrls).toContain(rowPath(id));
+    expect(fetches.filter((entry) => entry.method === "PATCH").map((entry) => entry.path)).toContain(rowPath(id));
   }
 }, 240_000);
 
 test("a wrong administrator password exits non-zero before any row changes", async () => {
-  resetRefusals();
   const ids = [...A_ROWS, B_ROW, C_ROW, ...D_ROWS, SEED_SKILL_ID];
   const before = new Map<string, Record<string, unknown>>();
   for (const id of ids) before.set(id, await rowState(id));
@@ -550,28 +503,41 @@ test("a wrong administrator password exits non-zero before any row changes", asy
 }, 240_000);
 
 test("a --dry-run all-agent run counts rows without needing any owner's key", async () => {
-  resetRefusals();
-  const { code, stdout, stderr } = await runReembed(["reembed", "--dry-run"], homeMissingC, true);
+  const { code, stdout, stderr, fetches } = await runReembed(["reembed", "--dry-run"], homeMissingC, true);
   expect(code, stderr.slice(0, 800)).toBe(0);
   expect(stdout).toContain("✅ Re-embedding complete: 0 updated, 0 errors");
   expect(stdout).not.toContain("Key not found");
-  expect(patchUrls).toEqual([]);
+  expect(patchPaths(fetches)).toEqual([]);
 }, 240_000);
 
 test("keyless single-agent excludes other agents' listed rows from the candidate and counts and reports them in Skipped (other agents)", async () => {
-  resetRefusals();
   const otherIds = [B_ROW, C_ROW, ...D_ROWS, SEED_SKILL_ID];
   const before = new Map<string, Record<string, unknown>>();
   for (const id of otherIds) before.set(id, await rowState(id));
-  const { code, stdout, stderr } = await runReembed(["reembed", "--agent", AGENT_A], homeOnlyA, false);
+  const { code, stdout, stderr, fetches } = await runReembed(["reembed", "--agent", AGENT_A], homeOnlyA, false);
   expect(code, stderr.slice(0, 800)).toBe(0);
   expect(stdout).toContain("Candidates for re-embedding: 2");
   expect(stdout).toContain(`Skipped (other agents): ${otherIds.length}`);
   expect(stdout).toContain(`✅ Re-embedding complete: 2 updated, 0 errors`);
   for (const id of otherIds) {
     expect(await rowState(id), id).toEqual(before.get(id)!);
-    expect(patchUrls).not.toContain(rowPath(id));
+    expect(patchPaths(fetches)).not.toContain(rowPath(id));
   }
+}, 240_000);
+
+test("an agent id with a newline renders as one failure entry line", async () => {
+  await op({
+    operation: "insert",
+    database: "flair",
+    table: "Memory",
+    records: [memoryRow(NEWLINE_ROW, NEWLINE_AGENT, "public")],
+  });
+  const { code, stdout, stderr } = await runReembed(["reembed", "--agent", NEWLINE_AGENT], homeNewline, true);
+  expect(code, stderr.slice(0, 800)).toBe(1);
+  const entry = stdout.split("\n").find((line) => line.includes("row(s) not updated:"));
+  expect(entry).toBeDefined();
+  expect(entry).toContain(`--agent ${NEWLINE_AGENT.replace(/\n/g, "\\n")}`);
+  expect(entry).toContain("after fixing the cause");
 }, 240_000);
 
 test("the seeded rows are current after the runs (the re-embeds the assertions relied on)", async () => {
