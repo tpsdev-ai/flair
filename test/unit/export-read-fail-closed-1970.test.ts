@@ -17,7 +17,7 @@ import { exportFileMode } from "../../src/commands/export.js";
 const CHILD_DEADLINE_MS = 20_000;
 const CLI_PATH = join(import.meta.dirname ?? __dirname, "..", "..", "dist", "cli.js");
 const PRELOAD = join(import.meta.dirname ?? __dirname, "..", "fixtures", "export-fetch-1970.cjs");
-const AGENT = "agent one/2";
+const AGENT = "agent-one-2";
 const URL = "http://example.test";
 
 interface CliResult { stdout: string; stderr: string; code: number | null; paths: string[] }
