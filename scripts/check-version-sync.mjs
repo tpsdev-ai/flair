@@ -370,6 +370,21 @@ function write(version) {
   }
 }
 
+function hasIdentifier(text, identifier) {
+  let index = text.indexOf(identifier);
+  while (index !== -1) {
+    const before = index > 0 ? text[index - 1] : "";
+    const after = index + identifier.length < text.length ? text[index + identifier.length] : "";
+    const isWordChar = (c) =>
+      (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c === "_" || c === "$";
+    if (!isWordChar(before) && !isWordChar(after)) {
+      return true;
+    }
+    index = text.indexOf(identifier, index + 1);
+  }
+  return false;
+}
+
 export function verify(expected, customNonReleaseConstants) {
   const nonReleaseConstants = customNonReleaseConstants ?? loadNonReleaseConstants();
   const problems = [];
@@ -403,9 +418,7 @@ export function verify(expected, customNonReleaseConstants) {
       );
       continue;
     }
-    const escaped = entry.identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const identifierPattern = new RegExp(`(?:^|\\W)${escaped}(?:$|\\W)`);
-    if (!identifierPattern.test(text)) {
+    if (!hasIdentifier(text, entry.identifier)) {
       problems.push(
         `stale non-release constant: "${entry.identifier}" was not found in ${normFile} (${entry.reason})`,
       );
