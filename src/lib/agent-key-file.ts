@@ -352,8 +352,8 @@ export function createAgentKeyFile(privateKeyPath: string, data: string | Uint8A
 
 /**
  * Write `data` to a unique 0600 temp file beside `privateKeyPath` and leave it
- * staged. A failure sends nothing and removes only the temp file this call
- * created.
+ * staged. A failure sends nothing and attempts to remove only the temp file
+ * this call created (best effort).
  */
 export function stageAgentKeyFile(privateKeyPath: string, data: string | Uint8Array): string {
   return writeAgentKeyTemp(privateKeyPath, Buffer.from(data));
