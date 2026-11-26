@@ -2,9 +2,10 @@
  * init-remote-ops.test.ts — Integration tests for the atomic
  * `flair init --remote` provisioning flow.
  *
- * Mocks fetch() to simulate the ops API and Flair REST endpoints.
- * Verifies operation ordering, idempotence, timeout handling, and
- * the secret-file write.
+ * Hermetic cases mock fetch() for the tarball, ops-call and provisioning
+ * mechanics; the provisioning branches and the init action also run against a
+ * spawned Harper. Verifies operation ordering, idempotence, timeout handling,
+ * the secret-file write and remote-init refusals.
  */
 
 import { describe, test, expect, beforeAll, beforeEach, afterEach, afterAll, mock } from "bun:test";
@@ -373,8 +374,53 @@ describe("provisionFabric — full happy path", () => {
     expect(addUserCalled).toBe(false);
   });
 
-  test("falls back to alter_user when add_user returns 'already exists'", async () => {
-    let addUserErr = false;
+  test("uses alter_user and never add_user when list_users reports an existing admin", async () => {
+    let addUserCalled = false;
+    let alterUserCalled = false;
+
+    globalThis.fetch = mock(async (url: string, opts?: any) => {
+      const parsed = new URL(url);
+      if (parsed.port === "19925") {
+        const body = JSON.parse(opts.body);
+        if (body.operation === "deploy_component") {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        if (body.operation === "list_users") {
+          return new Response(JSON.stringify([
+            { username: "cluster-admin", role: { permission: { super_user: false } } },
+            { username: "admin", role: { permission: { super_user: true } } },
+          ]), { status: 200 });
+        }
+        if (body.operation === "add_user") {
+          addUserCalled = true;
+        }
+        if (body.operation === "alter_user") {
+          alterUserCalled = true;
+          expect(body.username).toBe("admin");
+          expect(body.password).toBe(TEST_OPTS.flairAdminPass);
+          expect(body.role).toBe("super_user");
+          expect(body.active).toBe(true);
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        return new Response("unknown", { status: 400 });
+      }
+      return new Response(JSON.stringify({ error: "instanceId and publicKey required" }), { status: 400 });
+    });
+
+    const principal = await provisionFabric(
+      TEST_OPTS.target,
+      TEST_OPTS.opsTarget,
+      TEST_OPTS.clusterAdminUser,
+      TEST_OPTS.clusterAdminPass,
+      TEST_OPTS.flairAdminPass,
+    );
+
+    expect(principal).toEqual({ username: "admin", password: TEST_OPTS.flairAdminPass, created: true });
+    expect(alterUserCalled).toBe(true);
+    expect(addUserCalled).toBe(false);
+  });
+
+  test("an unrelated add_user failure with no admin in list_users propagates instead of falling back to alter_user", async () => {
     let alterUserCalled = false;
 
     globalThis.fetch = mock(async (url: string, opts?: any) => {
@@ -390,15 +436,10 @@ describe("provisionFabric — full happy path", () => {
           ]), { status: 200 });
         }
         if (body.operation === "add_user") {
-          addUserErr = true;
-          return new Response("user already exists", { status: 409 });
+          return new Response("the cluster is read-only", { status: 500 });
         }
         if (body.operation === "alter_user") {
           alterUserCalled = true;
-          expect(body.username).toBe("admin");
-          expect(body.password).toBe(TEST_OPTS.flairAdminPass);
-          expect(body.role).toBe("super_user");
-          expect(body.active).toBe(true);
           return new Response(JSON.stringify({ ok: true }), { status: 200 });
         }
         return new Response("unknown", { status: 400 });
@@ -406,16 +447,43 @@ describe("provisionFabric — full happy path", () => {
       return new Response(JSON.stringify({ error: "instanceId and publicKey required" }), { status: 400 });
     });
 
-    await provisionFabric(
+    await expect(provisionFabric(
       TEST_OPTS.target,
       TEST_OPTS.opsTarget,
       TEST_OPTS.clusterAdminUser,
       TEST_OPTS.clusterAdminPass,
       TEST_OPTS.flairAdminPass,
-    );
+    )).rejects.toThrow("the cluster is read-only");
+    expect(alterUserCalled).toBe(false);
+  });
 
-    expect(addUserErr).toBe(true);
-    expect(alterUserCalled).toBe(true);
+  test("refuses a malformed list_users record before any write", async () => {
+    const writes: string[] = [];
+
+    globalThis.fetch = mock(async (url: string, opts?: any) => {
+      const parsed = new URL(url);
+      if (parsed.port === "19925") {
+        const body = JSON.parse(opts.body);
+        if (body.operation === "list_users") {
+          return new Response(JSON.stringify([
+            { username: "cluster-admin", role: { permission: { super_user: false } } },
+            { role: { permission: { super_user: false } } },
+          ]), { status: 200 });
+        }
+        if (body.operation !== undefined) writes.push(body.operation);
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: "instanceId and publicKey required" }), { status: 400 });
+    });
+
+    await expect(provisionFabric(
+      TEST_OPTS.target,
+      TEST_OPTS.opsTarget,
+      TEST_OPTS.clusterAdminUser,
+      TEST_OPTS.clusterAdminPass,
+      TEST_OPTS.flairAdminPass,
+    )).rejects.toThrow("malformed record");
+    expect(writes).toEqual([]);
   });
 });
 
@@ -674,6 +742,25 @@ describe("flair#3106 — reserved principal refusal (real Harper)", () => {
     expect(readdirSync(home)).toEqual([]);
     expectNoWriteRequest(recorder.all, "reserved-principal/agent-ID overlap refusal", harper.opsURL);
   }, 150_000);
+
+  test("a real Harper treats Flair-Agent, ' flair-agent' and FLAIR-AGENT as distinct users from flair-agent", async () => {
+    const variants = ["Flair-Agent", " flair-agent", "FLAIR-AGENT"];
+    for (const variant of variants) {
+      const added = await harperOps(harper, "admin", "test123", {
+        operation: "add_user", username: variant, password: "variant-pass", role: "super-role", active: true,
+      });
+      expect([200, 409], `add_user ${JSON.stringify(variant)}: ${added.text.slice(0, 200)}`).toContain(added.status);
+      const own = await harperOps(harper, variant, "variant-pass", { operation: "list_users" });
+      expect(own.status, `${JSON.stringify(variant)} must authenticate with its own password`).toBe(200);
+      const cross = await harperOps(harper, variant, "reserved-pass", { operation: "list_users" });
+      expect(cross.status, `${JSON.stringify(variant)} must not authenticate with flair-agent's password`).toBe(401);
+    }
+    const listed = await harperOps(harper, "admin", "test123", { operation: "list_users" });
+    const names = ((listed.body as any[]) ?? []).map((u) => u.username);
+    for (const name of ["flair-agent", ...variants]) {
+      expect(names, `list_users must carry ${JSON.stringify(name)} as its own row`).toContain(name);
+    }
+  }, 60_000);
 });
 
 describe("flair#3106 — external-instance refusal (hermetic)", () => {
@@ -781,7 +868,7 @@ const laterOptions = (h: HarperInstance, agentId: string, keysDir: string) => ({
   baseUrl: h.httpURL,
   opsUrl: h.opsURL,
   remote: true,
-  provisioned: true,
+  provisioningLeg: true,
   agentId,
   keysDir,
 });
@@ -910,6 +997,7 @@ describe("flair#3106 — existing super_user branch (real Harper)", () => {
       expect(hint).toContain("cluster administrator password");
       expect(hint).not.toContain(secretPath);
       expect(out.stdout).toContain("Admin user: cluster-north");
+      expect(out.stderr, "no credential file exists, so the reuse warning must not print").not.toContain("neither changed nor verified");
     } finally {
       recorder.restore();
     }
@@ -1102,6 +1190,8 @@ describe("flair#3106 — created admin branch (real Harper)", () => {
       expect(hint).toContain("cluster administrator password");
       expect(hint).not.toContain(secretPath);
       expect(out.stdout).toContain("Admin user: admin");
+      expect(out.stderr, "the reused branch must warn about the existing credential file").toContain(secretPath);
+      expect(out.stderr).toContain("neither changed nor verified");
     } finally {
       recorder.restore();
     }
@@ -1114,9 +1204,8 @@ describe("flair#3106 — existing admin update path (real Harper)", () => {
 
   beforeAll(async () => {
     harper = await startLocalHarper();
-    // `admin` already exists on a fresh instance, so a non-super cluster
-    // administrator drives provisionFabric's add_user -> "already exists" ->
-    // alter_user branch.
+    // `admin` already exists on a fresh instance, so the validated list_users
+    // records drive provisionFabric's alter_user path.
     const opsRole = await harperOps(harper, "admin", "test123", {
       operation: "add_role",
       role: "cluster-ops-role",
@@ -1443,7 +1532,7 @@ describe("flair#3130 — remote init credential ordering (real Harper)", () => {
 
     expect(out.exitCode, "the action must exit non-zero when the cluster change fails").toBe(1);
     expect(out.stderr, "the failure must name the saved file").toContain(secretPath);
-    expect(recorder.all.filter((call) => call.operation === "add_user" || call.operation === "alter_user").map((call) => call.operation)).toEqual(["add_user"]);
+    expect(recorder.all.filter((call) => call.operation === "add_user" || call.operation === "alter_user").map((call) => call.operation)).toEqual(["alter_user"]);
     expect(out.stderr, "init must report the uncertain outcome").toContain("may hold the password saved");
     expect(
       recorder.all.some((call) => call.operation === "deploy_component"),
@@ -1506,7 +1595,7 @@ describe("flair#3130 — remote init credential ordering (real Harper)", () => {
     }
 
     expect(out.exitCode, "the action must exit non-zero when the cluster change fails").toBe(1);
-    expect(recorder.all.filter((call) => call.operation === "add_user" || call.operation === "alter_user").map((call) => call.operation)).toEqual(["add_user"]);
+    expect(recorder.all.filter((call) => call.operation === "add_user" || call.operation === "alter_user").map((call) => call.operation)).toEqual(["alter_user"]);
     expect(out.stderr, "init must report the uncertain outcome").toContain("may hold the password");
     expect(recorder.all.some((call) => call.operation === "deploy_component"), "the change was attempted").toBe(true);
 
@@ -1611,9 +1700,9 @@ describe("flair#3130 — remote init credential ordering (real Harper)", () => {
       try { operation = bodyText === null ? undefined : JSON.parse(bodyText)?.operation; } catch { operation = undefined; }
       if (operation === "deploy_component") return new Response(JSON.stringify({ ok: true }), { status: 200 });
       const res = await REAL_FETCH(input, init);
-      if (operation === "add_user") {
-        // The seeded admin makes add_user take the duplicate-user path;
-        // alter_user applies the password next. Use a directory at the target.
+      if (operation === "alter_user") {
+        // The seeded admin makes list_users choose the update path, so
+        // alter_user applies the password. Use a directory at the target.
         sentWith = readdirSync(secretsDir);
         rmSync(secretPath, { force: true });
         mkdirSync(secretPath, { recursive: true });
@@ -2096,6 +2185,7 @@ async function runInitAction(args: string[], home: string, opts: { rethrow?: boo
   const origExit = process.exit;
   const origLog = console.log;
   const origErr = console.error;
+  const origWarn = console.warn;
   let stdout = "";
   let stderr = "";
   let exitCode: number | undefined;
@@ -2112,6 +2202,7 @@ async function runInitAction(args: string[], home: string, opts: { rethrow?: boo
   delete process.env.ROOTPATH;
   console.log = (...parts: unknown[]) => { stdout += parts.map((part) => String(part)).join(" ") + "\n"; };
   console.error = (...parts: unknown[]) => { stderr += parts.map((part) => String(part)).join(" ") + "\n"; };
+  console.warn = (...parts: unknown[]) => { stderr += parts.map((part) => String(part)).join(" ") + "\n"; };
   process.exit = ((code?: number) => {
     exitCode = code ?? 0;
     throw new Error(`process.exit(${code ?? 0})`);
@@ -2129,6 +2220,7 @@ async function runInitAction(args: string[], home: string, opts: { rethrow?: boo
     process.exit = origExit;
     console.log = origLog;
     console.error = origErr;
+    console.warn = origWarn;
     if (saved.HOME === undefined) delete process.env.HOME;
     else process.env.HOME = saved.HOME;
     if (saved.USERPROFILE === undefined) delete process.env.USERPROFILE;

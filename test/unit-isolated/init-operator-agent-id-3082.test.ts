@@ -176,3 +176,39 @@ describe("flair init --agent-id refuses a reserved administrator username before
     expect(out).not.toContain("administrator username reserved by this init path");
   }, 60_000);
 });
+
+describe("remote init refuses case and whitespace variants of flair-agent on both administrator inputs", () => {
+  const variants = ["Flair-Agent", " flair-agent", "FLAIR-AGENT"];
+
+  function expectReservedRefused(home: string, result: ReturnType<typeof runInit>, role: string): void {
+    const out = result.stdout + result.stderr;
+    expect(result.status, out).not.toBe(0);
+    expect(out).toContain("'flair-agent' is a reserved Flair account");
+    expect(out).toContain(`cannot be the ${role}`);
+    expect(out).toContain(`Use a different ${role}`);
+    expect(recordedRequests(home)).toEqual([]);
+    expect(existsSync(join(home, "keys"))).toBe(false);
+  }
+
+  for (const variant of variants) {
+    test(`cluster administrator ${JSON.stringify(variant)} is refused before any write`, () => {
+      const home = tempDir("opi-variant-cluster-");
+      const result = runInit(home, [
+        "init", "--target", "http://hub.invalid:9926", "--ops-target", "http://hub.invalid:9925",
+        "--force", "--cluster-admin-user", variant, "--cluster-admin-pass", "fixture-cluster-pass",
+        "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md",
+      ]);
+      expectReservedRefused(home, result, "cluster administrator");
+    }, 60_000);
+
+    test(`Flair administrator ${JSON.stringify(variant)} is refused before any write`, () => {
+      const home = tempDir("opi-variant-admin-");
+      const result = runInit(home, [
+        "init", "--target", "http://hub.invalid:9926", "--ops-target", "http://hub.invalid:9925",
+        "--force", "--admin-pass", "fixture-admin-pass", "--admin-user", variant,
+        "--no-mcp", "--skip-soul", "--skip-smoke", "--skip-hook", "--skip-claude-md",
+      ]);
+      expectReservedRefused(home, result, "admin user");
+    }, 60_000);
+  }
+});
