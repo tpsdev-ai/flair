@@ -4183,9 +4183,9 @@ export interface FabricProvisionHooks {
    */
   beforeAdminPasswordApplied?: () => void;
   /**
-   * Runs before attempting the add_user request (and its alter_user fallback)
-   * to set `admin`'s password. A failure after this point may have reached
-   * the cluster even when this function throws.
+   * Runs before attempting the add_user or alter_user request that sets
+   * `admin`'s password. A failure after this point may have reached the cluster
+   * even when this function throws.
    */
   adminPasswordRequestSent?: () => void;
   /** Runs after add_user/alter_user for `admin` succeeded. */
@@ -4227,14 +4227,42 @@ export async function provisionFabric(
     );
   }
   const users = userInfo;
-  const adminRecord = users.find(
-    (u: any) => u.username === clusterAdminUser || u.user?.username === clusterAdminUser,
-  );
-  const clusterAdminIsSuperUser = !!(
-    adminRecord?.role?.permission?.super_user ??
-    adminRecord?.permission?.super_user ??
-    false
-  );
+  const usernames: string[] = [];
+  const superUsers: boolean[] = [];
+  for (const record of users) {
+    const username =
+      record !== null && typeof record === "object" && !Array.isArray(record)
+        ? typeof record.username === "string"
+          ? record.username
+          : typeof record.user?.username === "string"
+            ? record.user.username
+            : undefined
+        : undefined;
+    const permission = record?.role?.permission ?? record?.permission;
+    const superUser = permission?.super_user;
+    if (username === undefined || username === "" || typeof superUser !== "boolean") {
+      throw new Error(
+        "The cluster's list_users response contained a malformed record, so provisioning refused to change anything",
+      );
+    }
+    usernames.push(username);
+    superUsers.push(superUser);
+  }
+  const clusterAdminRecords = usernames.filter((name) => name === clusterAdminUser).length;
+  if (clusterAdminRecords !== 1) {
+    throw new Error(
+      `The cluster's list_users response does not confirm the cluster administrator '${clusterAdminUser}' exactly once, so provisioning refused to change anything`,
+    );
+  }
+  const adminRecords = usernames.filter((name) => name === DEFAULT_ADMIN_USER).length;
+  if (adminRecords > 1) {
+    throw new Error(
+      `The cluster's list_users response lists more than one Flair administrator '${DEFAULT_ADMIN_USER}' record, so provisioning refused to change anything`,
+    );
+  }
+  const clusterAdminIndex = usernames.indexOf(clusterAdminUser);
+  const clusterAdminIsSuperUser = superUsers[clusterAdminIndex] === true;
+  const adminExists = adminRecords === 1;
 
   if (!clusterAdminIsSuperUser) {
     // Save the password before anything on the cluster changes.
@@ -4272,35 +4300,15 @@ export async function provisionFabric(
     return { username: clusterAdminUser, password: clusterAdminPass, created: false };
   } else {
     console.log(`Provisioning Harper user 'admin' as super_user...`);
-    try {
-      hooks.adminPasswordRequestSent?.();
-      await callOpsApi(opsTarget, {
-        operation: "add_user",
-        username: "admin",
-        password: flairAdminPass,
-        role: "super_user",
-        active: true,
-      }, clusterAdminUser, clusterAdminPass);
-      console.log("User 'admin' created ✓");
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("already exists") || msg.includes("duplicate")) {
-        // Idempotent: fall back to alter_user
-        console.log("User 'admin' already exists — updating password...");
-        await callOpsApi(opsTarget, {
-          operation: "alter_user",
-          username: "admin",
-          password: flairAdminPass,
-          role: "super_user",
-          active: true,
-        }, clusterAdminUser, clusterAdminPass);
-        console.log("User 'admin' updated ✓");
-        hooks.afterAdminPasswordApplied?.();
-        return { username: "admin", password: flairAdminPass, created: true };
-      } else {
-        throw err;
-      }
-    }
+    hooks.adminPasswordRequestSent?.();
+    await callOpsApi(opsTarget, {
+      operation: adminExists ? "alter_user" : "add_user",
+      username: "admin",
+      password: flairAdminPass,
+      role: "super_user",
+      active: true,
+    }, clusterAdminUser, clusterAdminPass);
+    console.log(adminExists ? "User 'admin' updated ✓" : "User 'admin' created ✓");
     hooks.afterAdminPasswordApplied?.();
     return { username: "admin", password: flairAdminPass, created: true };
   }
