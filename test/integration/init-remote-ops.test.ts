@@ -6,7 +6,7 @@
  * record and `alter_user` when it has one; a listed super_user cluster
  * administrator takes the reuse branch instead of an `admin` write. Tarball
  * cases build a real archive from temporary files; other hermetic cases mock
- * their own ops upload and REST responses. Provisioning branches and the init
+ * the HTTP calls they exercise. Provisioning branches and the init
  * action also run against a spawned Harper. Verifies operation ordering,
  * idempotence, timeout handling, the secret-file write and remote-init refusals.
  */
@@ -378,7 +378,7 @@ describe("provisionFabric — full happy path", () => {
     expect(addUserCalled).toBe(false);
   });
 
-  test("sends alter_user and never add_user for admin when list_users lists an admin record", async () => {
+  test("sends alter_user and never add_user for admin when list_users lists an admin record and the cluster administrator is not a super_user", async () => {
     let addUserCalled = false;
     let alterUserCalled = false;
 
