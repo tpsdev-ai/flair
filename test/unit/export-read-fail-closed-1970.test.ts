@@ -56,6 +56,13 @@ describe("flair export: failed reads never create a complete-looking file (#1970
   }, 120_000);
   afterAll(() => { if (scratch) rmSync(scratch, { recursive: true, force: true }); });
 
+  test("POSIX mode output reads a 0640 file", () => {
+    const output = join(scratch, "mode-640.json");
+    writeFileSync(output, "{}", { mode: 0o640 });
+    chmodSync(output, 0o640);
+    expect(exportFileMode(output, "linux")).toBe("640");
+  });
+
   test("Windows mode output states that mode bits are not enforced", () => {
     expect(exportFileMode(join(scratch, "absent.json"), "win32")).toBe("mode bits are not enforced on Windows");
   });
@@ -174,7 +181,7 @@ describe("flair export: failed reads never create a complete-looking file (#1970
     writeFileSync(output, '{"old":true}\n', { mode: 0o644 });
     chmodSync(output, 0o644);
     const inodeBefore = statSync(output).ino;
-    const { code } = await runCli(
+    const { code, stdout } = await runCli(
       ["export", "agent-a", "--url", URL, "--admin-pass", "test-pass-1970", "--output", output],
       { MOCK_AGENT_STATUS: "200", MOCK_AGENT_ID: "agent-a" }, scratch,
     );
@@ -184,6 +191,7 @@ describe("flair export: failed reads never create a complete-looking file (#1970
     expect(data.agent.id).toBe("agent-a");
     expect(st.mode & 0o777).toBe(0o644);
     expect(st.ino).toBe(inodeBefore);
+    expect(stdout).toMatch(/Mode\s+644\b/);
   }, 25_000);
 
   test("an export without --include-key reports and retains an existing 0600 mode", async () => {

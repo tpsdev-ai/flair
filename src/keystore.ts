@@ -56,6 +56,7 @@ function passphrasePath(): string {
 }
 
 interface PassphraseHooks {
+  platform?: NodeJS.Platform;
   beforePublish?: () => void;
   link?: typeof linkSync;
   fstat?: (fd: number) => Stats;
@@ -74,7 +75,7 @@ function readPassphraseFile(pp: string, hooks: PassphraseHooks): string {
     if (!passphrase) throw new Error(`passphrase file ${pp} is empty`);
     return passphrase;
   };
-  if (process.platform === "win32") {
+  if ((hooks.platform ?? process.platform) === "win32") {
     return checked(pp);
   }
   const fd = openSync(pp, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -128,10 +129,12 @@ function getPassphrase(hooks: PassphraseHooks = {}): string {
       (hooks.link ?? linkSync)(staged, pp);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException)?.code;
-      if (code === "ENOTSUP" || code === "ENOSYS") {
-        throw new Error(`keys dir ${dir} does not support hard links; set FLAIR_KEY_PASSPHRASE or use a keys dir on a volume that does`);
+      if (code !== "EEXIST") {
+        throw new Error(
+          `could not publish the generated passphrase at ${pp} (${code}: ${(error as Error).message}); ` +
+            "if the keys dir's volume does not support hard links, set FLAIR_KEY_PASSPHRASE or use a keys dir on a volume that does",
+        );
       }
-      if (code !== "EEXIST") throw error;
       return readPassphraseFile(pp, hooks);
     }
     return generated;

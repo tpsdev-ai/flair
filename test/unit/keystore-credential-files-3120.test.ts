@@ -98,7 +98,7 @@ test("interleaved first uses return the stored passphrase", () => {
   expect(readdirSync(keysDir())).toEqual([".passphrase"]);
 });
 
-for (const code of ["ENOTSUP", "ENOSYS"]) {
+for (const code of ["ENOTSUP", "ENOSYS", "EPERM", "EXDEV"]) {
   test(`passphrase publication refuses ${code} and removes its stage`, () => {
     let staged = "";
     expect(() => getPassphrase({ link: (source, destination) => {
@@ -106,7 +106,10 @@ for (const code of ["ENOTSUP", "ENOSYS"]) {
       expect(destination).toBe(join(keysDir(), ".passphrase"));
       expect(readFileSync(staged, "utf8")).not.toBe("");
       throw Object.assign(new Error("unsupported link"), { code });
-    } })).toThrow(`keys dir ${keysDir()} does not support hard links; set FLAIR_KEY_PASSPHRASE or use a keys dir on a volume that does`);
+    } })).toThrow(
+      `could not publish the generated passphrase at ${join(keysDir(), ".passphrase")} (${code}: unsupported link); ` +
+        "if the keys dir's volume does not support hard links, set FLAIR_KEY_PASSPHRASE or use a keys dir on a volume that does",
+    );
     expect(staged).not.toBe("");
     expect(existsSync(staged)).toBe(false);
     expect(readdirSync(keysDir())).toEqual([]);
@@ -161,4 +164,20 @@ test("passphrase reading uses the checked descriptor after path replacement", ()
     writeFileSync(pp, "replacement-passphrase", { mode: 0o600 });
     return st;
   } })).toBe("original-passphrase");
+});
+
+test("Windows reads a 0644 passphrase by path without fstat", () => {
+  mkdirSync(keysDir(), { recursive: true });
+  const pp = join(keysDir(), ".passphrase");
+  writeFileSync(pp, "windows-passphrase\n", { mode: 0o644 });
+  chmodSync(pp, 0o644);
+  let stats = 0;
+  const sources: Array<string | number> = [];
+  expect(getPassphrase({
+    platform: "win32",
+    fstat: (fd) => { stats++; return fstatSync(fd); },
+    read: (source) => { sources.push(source); return readFileSync(source, "utf-8"); },
+  })).toBe("windows-passphrase");
+  expect(sources).toEqual([pp]);
+  expect(stats).toBe(0);
 });
