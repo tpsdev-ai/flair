@@ -38,7 +38,7 @@ const noDerive = (): number => {
 };
 
 function decide(partial: Partial<AgentHomeTargetInputs>): { httpPort: number; opsPort: number } {
-  return decideAgentHomeTarget({
+  const { httpPort, opsPort } = decideAgentHomeTarget({
     httpPort: 7926,
     httpNamed: false,
     namedOps: null,
@@ -47,6 +47,7 @@ function decide(partial: Partial<AgentHomeTargetInputs>): { httpPort: number; op
     deriveOps: noDerive,
     ...partial,
   });
+  return { httpPort, opsPort };
 }
 
 describe("decideAgentHomeTarget — a one-sided target with an incomplete configured pair is refused", () => {
@@ -156,22 +157,22 @@ describe("resolveAgentHomeTarget — reading Harper's config in a data directory
 
   test("a complete configured pair: --ops-port alone that matches it is accepted with the pair's HTTP port", () => {
     writeFileSync(join(dataDir, "harper-config.yaml"), "http:\n  port: 7926\noperationsApi:\n  network:\n    port: 7925\n");
-    expect(resolveAgentHomeTarget({ dataDir, opsPort: "7925" })).toEqual({ httpPort: 7926, opsPort: 7925 });
+    expect(resolveAgentHomeTarget({ dataDir, opsPort: "7925" })).toEqual({ httpPort: 7926, opsPort: 7925, pairBound: true });
   });
 
   test("a complete configured pair: --port alone that matches it takes the pair's ops port", () => {
     writeFileSync(join(dataDir, "harper-config.yaml"), "http:\n  port: 7926\noperationsApi:\n  network:\n    port: 7925\n");
-    expect(resolveAgentHomeTarget({ dataDir, port: "7926" })).toEqual({ httpPort: 7926, opsPort: 7925 });
+    expect(resolveAgentHomeTarget({ dataDir, port: "7926" })).toEqual({ httpPort: 7926, opsPort: 7925, pairBound: true });
   });
 
   test("an explicit pair for both ports is unchanged: used as given when it matches neither configured side", () => {
     writeFileSync(join(dataDir, "harper-config.yaml"), "http:\n  port: 7926\noperationsApi:\n  network:\n    port: 7925\n");
-    expect(resolveAgentHomeTarget({ dataDir, port: "8926", opsPort: "8925" })).toEqual({ httpPort: 8926, opsPort: 8925 });
+    expect(resolveAgentHomeTarget({ dataDir, port: "8926", opsPort: "8925" })).toEqual({ httpPort: 8926, opsPort: 8925, pairBound: false });
     expect(() => resolveAgentHomeTarget({ dataDir, port: "7926", opsPort: "8925" })).toThrow(AMBIGUOUS_INSTANCE_TARGET_ERROR);
   });
 
   test("an explicit pair for both ports with only the HTTP port configured is used as given", () => {
     writeFileSync(join(dataDir, "harper-config.yaml"), "http:\n  port: 7926\n");
-    expect(resolveAgentHomeTarget({ dataDir, port: "8926", opsPort: "8925" })).toEqual({ httpPort: 8926, opsPort: 8925 });
+    expect(resolveAgentHomeTarget({ dataDir, port: "8926", opsPort: "8925" })).toEqual({ httpPort: 8926, opsPort: 8925, pairBound: false });
   });
 });

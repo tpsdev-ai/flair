@@ -20,11 +20,14 @@ import { join } from "node:path";
 import nacl from "tweetnacl";
 import { tempDir } from "../helpers/temp-dir";
 import { bindCli, readAllMemoryRows, register } from "../../src/commands/reembed.ts";
+import { setInstancePairOsReadsForTests } from "../../src/lib/local-instance-pair.ts";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 
 const realExit = process.exit;
 const realLog = console.log;
 const realError = console.error;
+
+import { SIMULATED_LISTENER_TABLE } from "../helpers/simulated-instance-pair";
 
 type Scenario = { name: string; body: unknown };
 
@@ -42,48 +45,62 @@ const ROWS: Scenario[] = [
   },
 ];
 
-let server: Server;
+let httpServer: Server;
+let opsServer: Server;
 let port: number;
+let opsPort: number;
 let body: unknown;
 const patched: string[] = [];
 let opsRequests = 0;
 
-beforeAll(async () => {
-  server = createServer((req, res) => {
-    let requestBody = "";
-    req.on("data", (chunk) => { requestBody += chunk; });
-    req.on("end", () => {
-      res.setHeader("Content-Type", "application/json");
-      if (req.method === "GET" && req.url === "/Health") {
-        res.end(JSON.stringify({ version: "test", capabilities: ["memory-reembed-patch"] }));
-        return;
-      }
-      if (req.method === "PATCH") {
-        patched.push(req.url ?? "");
-        res.end(JSON.stringify({ id: decodeURIComponent((req.url ?? "").split("/").pop() ?? "") }));
-        return;
-      }
-      opsRequests += 1;
-      let operation: unknown;
-      try {
-        operation = (JSON.parse(requestBody) as { operation?: unknown }).operation;
-      } catch {
-        operation = undefined;
-      }
-      if (operation === "search_by_id") {
-        const ids = (JSON.parse(requestBody) as { ids?: string[] }).ids ?? [];
-        res.end(JSON.stringify(ids.map((id) => ({ id, embeddingModel: getModelId() }))));
-        return;
-      }
-      res.end(JSON.stringify(body));
-    });
+function listener(req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse): void {
+  let requestBody = "";
+  req.on("data", (chunk) => { requestBody += chunk; });
+  req.on("end", () => {
+    res.setHeader("Content-Type", "application/json");
+    if (req.method === "GET" && req.url === "/Health") {
+      res.end(JSON.stringify({ version: "test", capabilities: ["memory-reembed-patch"] }));
+      return;
+    }
+    if (req.method === "PATCH") {
+      patched.push(req.url ?? "");
+      res.end(JSON.stringify({ id: decodeURIComponent((req.url ?? "").split("/").pop() ?? "") }));
+      return;
+    }
+    opsRequests += 1;
+    let operation: unknown;
+    try {
+      operation = (JSON.parse(requestBody) as { operation?: unknown }).operation;
+    } catch {
+      operation = undefined;
+    }
+    if (operation === "search_by_id") {
+      const ids = (JSON.parse(requestBody) as { ids?: string[] }).ids ?? [];
+      res.end(JSON.stringify(ids.map((id) => ({ id, embeddingModel: getModelId() }))));
+      return;
+    }
+    if (operation === "get_configuration") {
+      res.end(JSON.stringify({ http: { port: `127.0.0.1:${port}` }, operationsApi: { network: { port: opsPort } } }));
+      return;
+    }
+    res.end(JSON.stringify(body));
   });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  port = (server.address() as AddressInfo).port;
+}
+
+beforeAll(async () => {
+  setInstancePairOsReadsForTests(SIMULATED_LISTENER_TABLE);
+  httpServer = createServer(listener);
+  await new Promise<void>((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+  port = (httpServer.address() as AddressInfo).port;
+  opsServer = createServer(listener);
+  await new Promise<void>((resolve) => opsServer.listen(0, "127.0.0.1", resolve));
+  opsPort = (opsServer.address() as AddressInfo).port;
 });
 
 afterAll(async () => {
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+  setInstancePairOsReadsForTests(null);
+  await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+  await new Promise<void>((resolve) => opsServer.close(() => resolve()));
 });
 
 afterEach(() => {
@@ -96,7 +113,13 @@ async function run(agent: string | undefined): Promise<{ exitCode: number | null
   patched.length = 0;
   const key = join(tempDir("reembed-validate-3086-"), "agent-a.key");
   writeFileSync(key, nacl.sign.keyPair().secretKey.slice(0, 32), { mode: 0o600 });
-  bindCli({ privKeyPath: () => key, resolveHttpPort: () => port, resolveOpsPort: () => port });
+  bindCli({
+    privKeyPath: () => key,
+    resolveHttpPort: () => port,
+    resolveOpsPort: () => opsPort,
+    resolveAgentHomeTarget: () => ({ httpPort: port, opsPort, pairBound: true }),
+    ambiguousInstanceTargetError: "ambiguous_instance_target",
+  });
 
   const logs: string[] = [];
   let exitCode: number | null = null;

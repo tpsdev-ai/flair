@@ -52,6 +52,7 @@
 import { spawn, spawnSync, type SpawnOptionsWithoutStdio } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { shellScript } from "./shell-script.ts";
 import { nodeBin } from "./node-runtime.ts";
 
@@ -130,10 +131,12 @@ export function assertCliBuildFresh(root = ROOT): void {
   throw new Error(`[build-cli-once] refusing to spawn CLI: ${cli} freshness could not be verified. Rebuild first: \`bun run build:cli\`.`);
 }
 
-export function spawnCli(args: string[], options: SpawnOptionsWithoutStdio & { timeout: number }, root = ROOT) {
+export function spawnCli(args: string[], options: SpawnOptionsWithoutStdio & { timeout: number; preload?: string }, root = ROOT) {
   assertCliBuildFresh(root);
+  // A `node --import` preload runs before dist/cli.js, for test-only seams.
+  const preload = options.preload ? ["--import", pathToFileURL(options.preload).href] : [];
   // Under Node, not the test runner's own runtime (flair#2594): the CLI's tests launch it as users do.
-  return spawn(nodeBin({ env: options.env, cwd: options.cwd }), [join(root, "dist", "cli.js"), ...args], { ...options, timeout: options.timeout });
+  return spawn(nodeBin({ env: options.env, cwd: options.cwd }), [...preload, join(root, "dist", "cli.js"), ...args], { ...options, timeout: options.timeout });
 }
 
 interface BuildStep {
