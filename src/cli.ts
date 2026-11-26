@@ -4157,17 +4157,78 @@ export interface ProvisionedFabricPrincipal {
   created: boolean;
 }
 
+/**
+ * Callbacks a caller (remote `flair init`) uses to persist the Flair
+ * administrator password around the cluster change (flair#3130).
+ */
+export interface FabricProvisionHooks {
+  /**
+   * Runs after the existing-user read decides this run will attempt to set `admin`'s
+   * password, and BEFORE the first cluster write. A throw aborts with nothing
+   * changed on the cluster.
+   */
+  beforeAdminPasswordApplied?: () => void;
+  /**
+   * Runs before attempting the add_user request (and its alter_user fallback)
+   * to set `admin`'s password. A failure after this point may have reached
+   * the cluster even when this function throws.
+   */
+  adminPasswordRequestSent?: () => void;
+  /** Runs after add_user/alter_user for `admin` succeeded. */
+  afterAdminPasswordApplied?: () => void;
+}
+
 export async function provisionFabric(
   target: string,
   opsTarget: string,
   clusterAdminUser: string,
   clusterAdminPass: string,
   flairAdminPass: string,
+  hooks: FabricProvisionHooks = {},
 ): Promise<ProvisionedFabricPrincipal> {
   const projectRoot = process.cwd();
 
-  // 1. Build and deploy component tarball. `target` is the served URL this
-  // function verifies against in step 2 — the same value the component must
+  // 1. Read the cluster's existing users BEFORE any cluster write. The answer
+  // decides whether this run attempts to set `admin`'s password, and a read that fails
+  // must refuse: treating an unknown as "not a super_user" would go on to
+  // change a cluster we could not read.
+  console.log("Checking existing cluster users via ops API...");
+  let userInfo: any;
+  try {
+    userInfo = await callOpsApi(opsTarget, {
+      operation: "list_users",
+    }, clusterAdminUser, clusterAdminPass);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `Could not read the cluster's existing users, so provisioning refused to change anything: ${message}`,
+    );
+  }
+  // list_users returns an array of user objects with role/permission info.
+  // A success response of any other shape is unknown, and an unknown is never
+  // "no super_user": refuse before the password is saved or anything is written.
+  if (!Array.isArray(userInfo)) {
+    throw new Error(
+      "The cluster's list_users response was not an array, so provisioning refused to change anything",
+    );
+  }
+  const users = userInfo;
+  const adminRecord = users.find(
+    (u: any) => u.username === clusterAdminUser || u.user?.username === clusterAdminUser,
+  );
+  const clusterAdminIsSuperUser = !!(
+    adminRecord?.role?.permission?.super_user ??
+    adminRecord?.permission?.super_user ??
+    false
+  );
+
+  if (!clusterAdminIsSuperUser) {
+    // Save the password before anything on the cluster changes.
+    hooks.beforeAdminPasswordApplied?.();
+  }
+
+  // 2. Build and deploy component tarball. `target` is the served URL this
+  // function verifies against in step 3 — the same value the component must
   // advertise in OAuth/A2A discovery, so it is what FLAIR_PUBLIC_URL is set from
   // (flair#1005). A loopback target supplies nothing: see resolveDeployPublicUrl.
   console.log("Building deploy tarball...");
@@ -4181,34 +4242,14 @@ export async function provisionFabric(
     restart: "rolling",
   }, clusterAdminUser, clusterAdminPass);
 
-  // 2. Wait for restart
+  // 3. Wait for restart
   console.log("Waiting for Flair to restart...");
   await waitForFlairRestart(target);
   console.log("Flair is running ✓");
 
-  // 3. Provision Harper super_user
+  // 4. Provision Harper super_user
   // Since custom-admin-username support is merged, the username doesn't have to be "admin".
   // We can use the cluster-admin user directly if it's already a super_user.
-  // Check if cluster admin is already a super_user first:
-  let clusterAdminIsSuperUser = false;
-  try {
-    const userInfo = await callOpsApi(opsTarget, {
-      operation: "list_users",
-    }, clusterAdminUser, clusterAdminPass);
-    // list_users returns an array of user objects with role/permission info
-    const users = Array.isArray(userInfo) ? userInfo : [];
-    const adminRecord = users.find(
-      (u: any) => u.username === clusterAdminUser || u.user?.username === clusterAdminUser,
-    );
-    clusterAdminIsSuperUser = !!(
-      adminRecord?.role?.permission?.super_user ??
-      adminRecord?.permission?.super_user ??
-      false
-    );
-  } catch {
-    // If we can't check, assume not and proceed with add_user
-  }
-
   if (clusterAdminIsSuperUser) {
     // Reuse branch: the cluster administrator is already a super_user, so the
     // later calls authenticate as that administrator with the password the
@@ -4218,6 +4259,7 @@ export async function provisionFabric(
   } else {
     console.log(`Provisioning Harper user 'admin' as super_user...`);
     try {
+      hooks.adminPasswordRequestSent?.();
       await callOpsApi(opsTarget, {
         operation: "add_user",
         username: "admin",
@@ -4239,11 +4281,13 @@ export async function provisionFabric(
           active: true,
         }, clusterAdminUser, clusterAdminPass);
         console.log("User 'admin' updated ✓");
+        hooks.afterAdminPasswordApplied?.();
         return { username: "admin", password: flairAdminPass, created: true };
       } else {
         throw err;
       }
     }
+    hooks.afterAdminPasswordApplied?.();
     return { username: "admin", password: flairAdminPass, created: true };
   }
 }
