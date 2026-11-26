@@ -32,7 +32,9 @@ import { rewriteFederationSchedulerRuntime } from "../federation/scheduler.js";
 import { preferVersionManagerAlias } from "../lib/node-alias-path.js";
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { ensureAgentKeysDir, readOrCreateAgentKey } from "../lib/agent-key-file.js";
+import { stageRemoteAdminPassword, type RemoteAdminPassStage } from "../lib/remote-admin-pass.js";
 
 import { join, resolve } from "node:path";
 import { localPortState } from "../lib/init-tcp-probe.js";
@@ -97,6 +99,12 @@ export type InitCli = {
 
 
 let cli: InitCli;
+
+function remoteAdminPasswordRecovery(clusterAdminUser: string): string {
+  return clusterAdminUser === DEFAULT_ADMIN_USER
+    ? `  The cluster password for '${clusterAdminUser}' may already have changed. Remedy: recover with a separate administrator credential or Harper's out-of-band administrator recovery before re-running remote init.`
+    : "  Remedy: re-run the same remote init command.";
+}
 
 function ownedInitPidfilePid(dataDir: string): number | null {
   let fd: number | undefined;
@@ -483,26 +491,30 @@ export async function finishRemoteInit(
 
   if (agentId || role) {
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
-    mkdirSync(keysDir, { recursive: true });
 
     if (agentId) {
-      privPath = privKeyPath(agentId, keysDir);
+      const agentPrivPath = privKeyPath(agentId, keysDir);
+      privPath = agentPrivPath;
       const pubPath = pubKeyPath(agentId, keysDir);
 
-      if (existsSync(privPath!)) {
-        console.log(`Reusing existing key: ${privPath}`);
-        const seed = new Uint8Array(readFileSync(privPath!));
-        const kp = nacl.sign.keyPair.fromSeed(seed);
+      try {
+        ensureAgentKeysDir(keysDir);
+        const keyFile = readOrCreateAgentKey(agentPrivPath, () => {
+          console.log("Generating Ed25519 keypair...");
+          const kp = nacl.sign.keyPair();
+          return Buffer.from(kp.secretKey.slice(0, 32));
+        });
+        const kp = nacl.sign.keyPair.fromSeed(new Uint8Array(keyFile.bytes));
         pubKeyB64url = b64url(kp.publicKey);
-      } else {
-        console.log("Generating Ed25519 keypair...");
-        const kp = nacl.sign.keyPair();
-        const seed = kp.secretKey.slice(0, 32);
-        writeFileSync(privPath!, Buffer.from(seed));
-        chmodSync(privPath!, 0o600);
-        writeFileSync(pubPath, Buffer.from(kp.publicKey));
-        pubKeyB64url = b64url(kp.publicKey);
-        console.log(`Keypair written: ${privPath} ✓`);
+        if (keyFile.created) {
+          writeFileSync(pubPath, Buffer.from(kp.publicKey));
+          console.log(`Keypair written: ${privPath} ✓`);
+        } else {
+          console.log(`Reusing existing key: ${privPath}`);
+        }
+      } catch (err: unknown) {
+        console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
       }
 
       if (role) await reconcileHubInstance(pubKeyB64url!);
@@ -646,23 +658,87 @@ addAdminPassOptions(
           flairAdminPass = randomBytes(24).toString("base64url");
         }
 
-        // Atomic provisioning: deploy + wait + provision user. The returned
-        // principal is the one this run set up: the existing super_user cluster
-        // administrator when list_users reports the operator's cluster admin as
-        // a super_user, else the `admin` user this run created (or updated).
-        const provisioned: RemoteInitPrincipal = await provisionFabric(baseUrl, opsUrl, clusterAdminUser, clusterAdminPass, flairAdminPass);
+        // Provisioning: save unless reusing a super_user, deploy + wait, provision user.
+        // The returned principal is the one this run set up: the existing
+        // super_user cluster administrator when list_users reports the
+        // operator's cluster admin as a super_user, else the `admin` user this
+        // run created (or updated).
+        const secretPath = join(resolveHome(), ".tps", "secrets", "flair-fabric-hdb");
+        let stagedAdminPass: RemoteAdminPassStage | undefined;
+        let saveAttempted = false;
+        let saveApplied = false;
+        let requestSent = false;
+        let provisioned: RemoteInitPrincipal;
+        try {
+          provisioned = await provisionFabric(baseUrl, opsUrl, clusterAdminUser, clusterAdminPass, flairAdminPass, {
+            // Before the first cluster write, when this run attempts to set
+            // `admin`'s password. A throw here leaves the cluster unchanged.
+            beforeAdminPasswordApplied: () => {
+              saveAttempted = true;
+              stagedAdminPass = stageRemoteAdminPassword(secretPath, flairAdminPass!, writeAdminPassFile);
+            },
+            adminPasswordRequestSent: () => {
+              requestSent = true;
+            },
+            afterAdminPasswordApplied: () => {
+              saveApplied = true;
+              stagedAdminPass!.confirm();
+            },
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (saveAttempted && !stagedAdminPass) {
+            console.error(`Error: could not save the Flair administrator password to ${secretPath}: ${message}`);
+            console.error(`  Remedy: make ${secretPath} a writable regular file you own (mode 0600), then run init again.`);
+            console.error("  The cluster was not changed.");
+            process.exit(1);
+          }
+          if (saveApplied) {
+            const held = stagedAdminPass!.stagedPath;
+            // Recheck the stage before advising a move: it may have changed since confirm().
+            if (held !== null && stagedAdminPass!.stagedFileVerified && stagedAdminPass!.stillValid()) {
+              console.error(`Error: the cluster accepted the Flair administrator password, but ${held} could not be moved into place: ${message}`);
+              console.error(`  The cluster now holds the password in ${held}.`);
+              console.error(`  Remedy: move ${held} over ${secretPath} with mode 0600.`);
+            } else {
+              console.error(`Error: the cluster accepted the Flair administrator password, but the saved credential at ${held ?? secretPath} could not be confirmed: ${message}`);
+              console.error(remoteAdminPasswordRecovery(clusterAdminUser));
+            }
+            process.exit(1);
+          }
+          if (stagedAdminPass && requestSent) {
+            const held = stagedAdminPass.stagedPath;
+            console.error(`Error: Fabric provisioning failed after attempting the add/alter request, so the outcome is uncertain: ${message}`);
+            if (held !== null) {
+              console.error(`  The cluster may hold the password in ${held}.`);
+              console.error(`  If that password logs in, move ${held} over ${secretPath} with mode 0600; if it does not, delete ${held}.`);
+            } else {
+              console.error(`  The cluster may hold the password saved at ${secretPath}.`);
+            }
+            process.exit(1);
+          }
+          if (stagedAdminPass) {
+            const stage = stagedAdminPass;
+            try {
+              stage.abort();
+            } catch (cleanupErr) {
+              const cleanupMessage = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr);
+              console.error(`Error: Fabric provisioning failed after the Flair administrator password was saved: ${message}`);
+              console.error(`Error: could not remove the staged credential ${stage.stagedPath}: ${cleanupMessage}`);
+              process.exit(1);
+            }
+            console.error(`Error: Fabric provisioning failed after the Flair administrator password was saved: ${message}`);
+            if (stage.hadExistingFile) {
+              console.error(`  The existing credential file at ${secretPath} was left unchanged.`);
+            } else {
+              console.error(`  The saved password is kept at ${secretPath}; reuse it on the next run.`);
+            }
+          }
+          throw err;
+        }
         provisionedPrincipal = provisioned;
         didProvision = true;
-
-        // Persist the chosen Flair admin password only when provisioning set it
-        // on the principal. A reused cluster administrator keeps its own
-        // password, so the file must not claim the chosen one. A write failure
-        // stays fatal and lands before the success summary.
         if (provisioned.created) {
-          const secretsDir = join(resolveHome(), ".tps", "secrets");
-          mkdirSync(secretsDir, { recursive: true });
-          const secretPath = join(secretsDir, "flair-fabric-hdb");
-          writeFileSync(secretPath, flairAdminPass + "\n", { mode: 0o600 });
           console.log(`Admin password written to ${secretPath}`);
         }
       } else {
@@ -1501,26 +1577,29 @@ addAdminPassOptions(
 
     if (agentId) {
       // Generate or reuse keypair
-      mkdirSync(keysDir, { recursive: true });
       const privPath = privKeyPath(agentId, keysDir);
       const pubPath = pubKeyPath(agentId, keysDir);
       let pubKeyB64url: string;
 
-      if (existsSync(privPath!)) {
-        console.log(`Reusing existing key: ${privPath}`);
-        const seed = new Uint8Array(readFileSync(privPath!));
-        const kp = nacl.sign.keyPair.fromSeed(seed);
+      try {
+        ensureAgentKeysDir(keysDir);
+        const keyFile = readOrCreateAgentKey(privPath, () => {
+          console.log("Generating Ed25519 keypair...");
+          const kp = nacl.sign.keyPair();
+          // Store only the 32-byte seed (first 32 bytes of secretKey)
+          return Buffer.from(kp.secretKey.slice(0, 32));
+        });
+        const kp = nacl.sign.keyPair.fromSeed(new Uint8Array(keyFile.bytes));
         pubKeyB64url = b64url(kp.publicKey);
-      } else {
-        console.log("Generating Ed25519 keypair...");
-        const kp = nacl.sign.keyPair();
-        // Store only the 32-byte seed (first 32 bytes of secretKey)
-        const seed = kp.secretKey.slice(0, 32);
-        writeFileSync(privPath!, Buffer.from(seed));
-        chmodSync(privPath!, 0o600);
-        writeFileSync(pubPath, Buffer.from(kp.publicKey));
-        pubKeyB64url = b64url(kp.publicKey);
-        console.log(`Keypair written: ${privPath} ✓`);
+        if (keyFile.created) {
+          writeFileSync(pubPath, Buffer.from(kp.publicKey));
+          console.log(`Keypair written: ${privPath} ✓`);
+        } else {
+          console.log(`Reusing existing key: ${privPath}`);
+        }
+      } catch (err: unknown) {
+        console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
       }
 
       const httpUrl = `http://127.0.0.1:${httpPort}`;
