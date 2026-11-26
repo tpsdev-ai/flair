@@ -387,8 +387,8 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
     const config = buildMcpGrantConfig({ name, resource, keyFile: privPath });
     return { entry, config };
   } catch (error) {
-    // Roll back the key files this call created — nothing left behind locally
-    // on a failed grant, and a retry needs no manual cleanup.
+    // Remove the key files this call created on failure; any that remain are
+    // named in the error.
     if (createdKeyPaths.length > 0) {
       const leftBehind: string[] = [];
       for (const path of createdKeyPaths) {
