@@ -206,6 +206,10 @@ async function runReembed(agentId?: string): Promise<{ code: number | null; stdo
   if (!httpProxyPort) {
     httpProxyPort = await startProxy(harper.httpURL);
     opsProxyPort = await startProxy(harper.opsURL);
+    // The all-agent run sends the administrator credential to the HTTP port only
+    // for a pair the instance's configuration records: record the proxies' pair.
+    mkdirSync(join(home, ".flair"), { recursive: true });
+    writeFileSync(join(home, ".flair", "config.yaml"), `port: ${httpProxyPort}\nopsPort: ${opsProxyPort}\n`);
   }
   events.length = 0;
   await resetStaleRows();

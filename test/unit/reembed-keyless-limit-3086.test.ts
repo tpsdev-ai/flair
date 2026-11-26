@@ -60,7 +60,13 @@ async function run(seed: Record<string, unknown>[], dryRun = true): Promise<{ ex
 
   const key = join(tempDir("reembed-keyless-3086-"), "agent-a.key");
   writeFileSync(key, nacl.sign.keyPair().secretKey.slice(0, 32), { mode: 0o600 });
-  bindCli({ privKeyPath: () => key, resolveHttpPort: (opts: any) => Number(opts.port), resolveOpsPort: () => 1 });
+  bindCli({
+    privKeyPath: () => key,
+    resolveHttpPort: (opts: any) => Number(opts.port),
+    resolveOpsPort: () => 1,
+    resolveAgentHomeTarget: (opts: any) => ({ httpPort: Number(opts.port), opsPort: 1, pairBound: false }),
+    ambiguousInstanceTargetError: "ambiguous_instance_target",
+  });
 
   const logs: string[] = [];
   let exitCode: number | null = null;

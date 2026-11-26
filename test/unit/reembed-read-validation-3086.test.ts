@@ -96,7 +96,13 @@ async function run(agent: string | undefined): Promise<{ exitCode: number | null
   patched.length = 0;
   const key = join(tempDir("reembed-validate-3086-"), "agent-a.key");
   writeFileSync(key, nacl.sign.keyPair().secretKey.slice(0, 32), { mode: 0o600 });
-  bindCli({ privKeyPath: () => key, resolveHttpPort: () => port, resolveOpsPort: () => port });
+  bindCli({
+    privKeyPath: () => key,
+    resolveHttpPort: () => port,
+    resolveOpsPort: () => port,
+    resolveAgentHomeTarget: () => ({ httpPort: port, opsPort: port, pairBound: true }),
+    ambiguousInstanceTargetError: "ambiguous_instance_target",
+  });
 
   const logs: string[] = [];
   let exitCode: number | null = null;

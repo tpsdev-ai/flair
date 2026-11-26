@@ -9,6 +9,12 @@ import { Command } from "commander";
 import { authFetch, defaultKeysDir, resolveAdminUser } from "../lib/auth-resolve.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import {
+  agentHomeEndpoint,
+  decideProbedPairIdentity,
+  readHttpInstanceIdentity,
+  resolveTargetInstanceIdentity,
+} from "../lib/agent-home.js";
+import {
   MEMORY_REEMBED_PATCH_CAPABILITY,
   healthVersion,
   parseHealthCapabilities,
@@ -21,6 +27,12 @@ export type ReembedCli = {
   privKeyPath: (...args: any[]) => any;
   resolveHttpPort: (...args: any[]) => any;
   resolveOpsPort: (...args: any[]) => any;
+  resolveAgentHomeTarget: (opts: { port?: string | number; opsPort?: string | number; dataDir?: string }) => {
+    httpPort: number;
+    opsPort: number;
+    pairBound: boolean;
+  };
+  ambiguousInstanceTargetError: string;
 };
 
 let cli: ReembedCli;
@@ -40,6 +52,14 @@ function resolveHttpPort(...args: any[]): any {
 
 function resolveOpsPort(...args: any[]): any {
   return cli.resolveOpsPort(...args);
+}
+
+function resolveAgentHomeTarget(...args: Parameters<ReembedCli["resolveAgentHomeTarget"]>): ReturnType<ReembedCli["resolveAgentHomeTarget"]> {
+  return cli.resolveAgentHomeTarget(...args);
+}
+
+function ambiguousInstanceTargetError(): string {
+  return cli.ambiguousInstanceTargetError;
 }
 
 /**
@@ -253,7 +273,7 @@ export async function reembedRowOutcome(
       embedding: null, embeddingModel: null,
     });
   } catch (err) {
-    return { ok: false, reason: `PATCH failed: ${errorText(err)}` };
+    return { ok: false, reason: `PATCH failed: ${oneLine(errorText(err))}` };
   }
   return reembedOutcomeFromResponse(res, id, intendedModel, readStoredModel);
 }
@@ -281,7 +301,7 @@ export async function adminReembedRowOutcome(
       signal: AbortSignal.timeout(20_000),
     });
   } catch (err) {
-    return { ok: false, reason: `PATCH failed: ${errorText(err)}` };
+    return { ok: false, reason: `PATCH failed: ${oneLine(errorText(err))}` };
   }
   return reembedOutcomeFromResponse(res, id, intendedModel, readStoredModel);
 }
@@ -307,10 +327,11 @@ async function reembedOutcomeFromResponse(
   try {
     stored = await readStoredModel(id);
   } catch (err) {
-    return { ok: false, reason: `stored model read failed: ${errorText(err)}` };
+    return { ok: false, reason: `stored model read failed: ${oneLine(errorText(err))}` };
   }
   if (stored === intendedModel) return { ok: true };
-  return { ok: false, reason: `stored embeddingModel is ${typeof stored === "string" && stored.length > 0 ? stored : "missing"}` };
+  const shown = typeof stored === "string" && stored.length > 0 ? stored : "missing";
+  return { ok: false, reason: `stored embeddingModel is ${oneLine(shown)}` };
 }
 
 /** `reembedRow` as a boolean: true when the PATCH succeeded, the response names the row, and the stored stamp matches. */
@@ -328,6 +349,20 @@ export async function reembedRow(
 function errorText(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
   return message.length > 0 ? message : "unknown error";
+}
+
+/**
+ * A failure reason on ONE line (flair#3128): a stored model string or an error
+ * message can carry CR, LF or another control character, which would split the
+ * reason across output lines and break the per-reason summary.
+ */
+function oneLine(text: string): string {
+  return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, (ch) => {
+    if (ch === "\n") return "\\n";
+    if (ch === "\r") return "\\r";
+    if (ch === "\t") return "\\t";
+    return `\\x${ch.charCodeAt(0).toString(16).padStart(2, "0")}`;
+  });
 }
 
 /** One line per distinct failure reason, with the rows that share it (flair#3128). */
@@ -367,6 +402,44 @@ export async function reembedServerSupportError(baseUrl: string): Promise<string
   return reembedUnsupportedMessage(healthVersion(body));
 }
 
+/** The remedy appended to a target-pair refusal (flair#3135). */
+const REEMBED_TARGET_REMEDY =
+  "Run it without --port so the instance's configured pair is used, or pass the HTTP and ops ports that pair records.";
+
+/**
+ * flair#3135: the administrator's Basic credential goes to the HTTP port only
+ * when that port is shown to belong to the instance whose ops API lists the
+ * rows. This runs before the row listing, so every refusal precedes any PATCH.
+ * A configuration-bound pair is probed on both sides: one shared identity
+ * proceeds, two different identities refuse, and an unestablished one proceeds
+ * (the configuration is the binding). A pair configuration does not record is
+ * refused without a request to the HTTP port, since the credential may not be
+ * sent there to read its identity.
+ */
+async function reembedTargetPairRefusal(
+  target: { httpPort: number; opsPort: number; pairBound: boolean },
+  adminUser: string,
+  adminPass: string,
+): Promise<string | null> {
+  const refusal = (detail: string): string =>
+    `❌ flair reembed stopped before its first write: ${ambiguousInstanceTargetError()} — ${detail}\n   ${REEMBED_TARGET_REMEDY}`;
+  if (!target.pairBound) {
+    return refusal(
+      `the HTTP port ${target.httpPort} and the ops port ${target.opsPort} are not the pair this instance's configuration records, `
+        + `so the HTTP port's identity cannot be read before the credential is sent to it`,
+    );
+  }
+  const [httpIdentity, opsIdentity] = await Promise.all([
+    readHttpInstanceIdentity(`http://127.0.0.1:${target.httpPort}`, adminUser, adminPass),
+    resolveTargetInstanceIdentity(agentHomeEndpoint(target.opsPort, adminUser, adminPass)),
+  ]);
+  const decision = decideProbedPairIdentity(httpIdentity, opsIdentity);
+  if (decision.kind === "different") {
+    return refusal(`the HTTP port reports instance ${decision.httpId}, the ops API reports instance ${decision.opsId}`);
+  }
+  return null;
+}
+
 export function register(program: Command): void {
 // ─── flair reembed ────────────────────────────────────────────────────────────
 //
@@ -403,8 +476,6 @@ program
   .option("--batch-size <n>", "Records per batch", "50")
   .option("--delay-ms <ms>", "Delay between batches (ms)", "100")
   .action(async (opts) => {
-    const port = resolveHttpPort(opts);
-    const baseUrl = `http://127.0.0.1:${port}`;
     const agentId = opts.agent;
     const staleOnly = opts.staleOnly ?? false;
     const dryRun = opts.dryRun ?? false;
@@ -417,6 +488,24 @@ program
     if (!agentId && !adminPassEnv) {
       console.error("❌ Admin password required when --agent is not specified (set FLAIR_ADMIN_PASS or HDB_ADMIN_PASSWORD)");
       process.exit(1);
+    }
+
+    // flair#3135: the all-agent run sends the administrator's Basic credential to
+    // the HTTP port, so it resolves that port and the ops port as ONE target
+    // (`resolveAgentHomeTarget`'s pairing rule) — never independently. The
+    // single-agent PATCH is signed, so its HTTP port stays `resolveHttpPort`.
+    let target: ReturnType<ReembedCli["resolveAgentHomeTarget"]> | null = null;
+    let baseUrl: string;
+    if (agentId) {
+      baseUrl = `http://127.0.0.1:${resolveHttpPort(opts)}`;
+    } else {
+      try {
+        target = resolveAgentHomeTarget(opts);
+      } catch (err) {
+        console.error(`❌ ${errorText(err)}`);
+        process.exit(1);
+      }
+      baseUrl = `http://127.0.0.1:${target.httpPort}`;
     }
 
     // flair#2337: require the advertised token before either PATCH loop.
@@ -489,8 +578,16 @@ program
       // Reads the pages before the first write (flair#3086). The read refuses
       // when its last page (MAX_MEMORY_READ_PAGES) comes back full, and the
       // command exits non-zero without writing.
-      const opsPort = resolveOpsPort(opts);
-      const opsAuth = `Basic ${Buffer.from(`${resolveAdminUser(undefined)}:${adminPass}`).toString("base64")}`;
+      // flair#3135: before the listing and the first PATCH, show that the HTTP
+      // port belongs to the instance whose ops API lists the rows.
+      const opsPort = target!.opsPort;
+      const adminUser = resolveAdminUser(undefined);
+      const pairRefusal = await reembedTargetPairRefusal(target!, adminUser, adminPass);
+      if (pairRefusal) {
+        console.error(pairRefusal);
+        process.exit(1);
+      }
+      const opsAuth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
       const readStoredModel = opsStoredModelReader(opsPort, opsAuth);
       // The first page selects every row by id alone. An empty condition list
       // is refused (node_modules/harper/validation/searchValidator.ts:50-51), and
@@ -555,7 +652,7 @@ program
               }
             } catch (err) {
               errors++;
-              const reason = `unexpected error: ${errorText(err)}`;
+              const reason = `unexpected error: ${oneLine(errorText(err))}`;
               errorsByReason.set(reason, (errorsByReason.get(reason) ?? 0) + 1);
             }
           }
@@ -680,7 +777,7 @@ program
           }
         } catch (err) {
           errors++;
-          const reason = `unexpected error: ${errorText(err)}`;
+          const reason = `unexpected error: ${oneLine(errorText(err))}`;
           errorsByReason.set(reason, (errorsByReason.get(reason) ?? 0) + 1);
         }
       }

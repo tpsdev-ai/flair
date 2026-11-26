@@ -1541,6 +1541,19 @@ function resolveOpsPort(opts: { opsPort?: string | number; port?: string | numbe
 /** The named refusal for a configured-pair conflict or an unpaired one-sided target (flair#2474). */
 export const AMBIGUOUS_INSTANCE_TARGET_ERROR = "ambiguous_instance_target";
 
+/**
+ * The port pair one target addresses, and whether config bound it
+ * (flair#2474, flair#3135). `pairBound` is true when the pair came from a
+ * COMPLETE configured pair: both ports were recorded, and the target equals
+ * that pair (an unnamed port is taken from it). A pair the caller named that
+ * matches no complete configured pair, and a derived one, are not bound.
+ */
+export interface AgentHomeTarget {
+  httpPort: number;
+  opsPort: number;
+  pairBound: boolean;
+}
+
 /** The remedy appended to an {@link AMBIGUOUS_INSTANCE_TARGET_ERROR} refusal. */
 export const INSTANCE_TARGET_REMEDY = "Pass both ports (--port and --ops-port) for one instance.";
 
@@ -1579,7 +1592,7 @@ export interface AgentHomeTargetInputs {
  * Ports used "as given" are NOT VERIFIED: nothing here contacts an instance to
  * confirm that two named ports belong to one instance.
  */
-export function decideAgentHomeTarget(i: AgentHomeTargetInputs): { httpPort: number; opsPort: number } {
+export function decideAgentHomeTarget(i: AgentHomeTargetInputs): AgentHomeTarget {
   const { httpPort, httpNamed, namedOps, configuredHttp, configuredOps } = i;
   const remedy = INSTANCE_TARGET_REMEDY;
   if (configuredHttp !== null && configuredOps !== null) {
@@ -1592,7 +1605,9 @@ export function decideAgentHomeTarget(i: AgentHomeTargetInputs): { httpPort: num
           + `the config pairs HTTP ${configuredHttp} with ops ${configuredOps}. ${remedy}`,
       );
     }
-    return { httpPort, opsPort };
+    // Both sides equal the configured pair (or neither does — only when the
+    // caller named both, since an unnamed port is taken from the pair).
+    return { httpPort, opsPort, pairBound: httpMatches && opsMatches };
   }
   const opsNamed = namedOps !== null;
   if (httpNamed !== opsNamed) {
@@ -1602,8 +1617,8 @@ export function decideAgentHomeTarget(i: AgentHomeTargetInputs): { httpPort: num
         + `(HTTP ${configuredHttp ?? "none"}, ops ${configuredOps ?? "none"}) to take the ${other} port from, so the two ports could address different instances. ${remedy}`,
     );
   }
-  if (namedOps !== null) return { httpPort, opsPort: namedOps };
-  return { httpPort, opsPort: i.deriveOps() };
+  if (namedOps !== null) return { httpPort, opsPort: namedOps, pairBound: false };
+  return { httpPort, opsPort: i.deriveOps(), pairBound: false };
 }
 
 /**
@@ -1626,10 +1641,7 @@ export function decideAgentHomeTarget(i: AgentHomeTargetInputs): { httpPort: num
  * ports when there is no complete pair) are used as given, without
  * verification. Every refusal is `ambiguous_instance_target`.
  */
-export function resolveAgentHomeTarget(opts: { port?: string | number; opsPort?: string | number; dataDir?: string }, httpPortOverride?: number): {
-  httpPort: number;
-  opsPort: number;
-} {
+export function resolveAgentHomeTarget(opts: { port?: string | number; opsPort?: string | number; dataDir?: string }, httpPortOverride?: number): AgentHomeTarget {
   // `flair doctor` probes the port it actually reached (a PID-discovered
   // `effectivePort` can differ from the configured one), so it passes that port
   // here; every other caller lets the resolver resolve it. When neither port is
@@ -1646,7 +1658,7 @@ export function resolveAgentHomeTarget(opts: { port?: string | number; opsPort?:
     const n = Number(opts.opsPort);
     if (!(Number.isInteger(n) && n >= 1 && n <= 65535)) {
       // An invalid --ops-port is refused by resolveOpsPort, which exits.
-      return { httpPort, opsPort: resolveOpsPort(opts) };
+      return { httpPort, opsPort: resolveOpsPort(opts), pairBound: false };
     }
     namedOps = n;
   } else if (process.env.FLAIR_OPS_PORT) {
@@ -8938,6 +8950,8 @@ bindReembedCli({
   privKeyPath,
   resolveHttpPort,
   resolveOpsPort,
+  resolveAgentHomeTarget,
+  ambiguousInstanceTargetError: AMBIGUOUS_INSTANCE_TARGET_ERROR,
 });
 registerReembed(program);
 

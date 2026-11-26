@@ -19,14 +19,18 @@
  *
  * Without FLAIR_ADMIN_PASS, `reembed --agent <id>` lists rows with
  * POST /SemanticSearch, whose read scope includes other agents' non-private
- * rows: this file seeds such rows for other agents and asserts the run neither
- * counts nor writes them, and reports the skipped count.
+ * rows: this file seeds such rows for other agents and asserts the run excludes
+ * them from the candidate, up-to-date and updated counts and reports them in
+ * `Skipped (other agents)`, and writes none.
  *
- * Throwaway HOMEs, ephemeral ports, the boot migration trigger omitted. Each
- * request target is this test's instance: both Harper base URLs are asserted
- * to be 127.0.0.1 on ports other than 9925 and 9926, the CLI's HTTP requests go
- * through the recording proxy, and its ops reads go through a second proxy to
- * the instance's ops port.
+ * Throwaway HOMEs, ephemeral ports, the boot migration trigger omitted. The
+ * Harper instance's base URLs are asserted to be 127.0.0.1 on ports other than
+ * 9925 and 9926; the CLI's HTTP requests go through the recording proxy, and
+ * its ops reads go through a second proxy to the instance's ops port. Two cases
+ * point `--port` at a separate listener that advertises the re-embed
+ * capability: an unrecorded pair refuses and the listener sees no Authorization
+ * header, and a configured pair whose HTTP port reports another instance id
+ * refuses.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createServer, type Server } from "node:http";
@@ -63,11 +67,18 @@ let harper: HarperInstance;
 let homeAllKeys: string;
 let homeMissingC: string;
 let homeOnlyA: string;
+let homeForeign: string;
+let homeUnpaired: string;
 let proxyPort = 0;
 let opsProxyPort = 0;
+let foreignPort = 0;
+let unpairedListenerPort = 0;
+let listenerAuthorizations: string[] = [];
+let listenerPatches: string[] = [];
 let refusedPatches = new Map<string, number>();
 let refusedReadbacks = new Map<string, number>();
 const refusedOpsSearches = new Set<string>();
+const rewrittenOpsReadbacks = new Map<string, string>();
 const patchUrls: string[] = [];
 const servers: Server[] = [];
 
@@ -203,6 +214,14 @@ async function startOpsProxy(target: string): Promise<number> {
           res.end(JSON.stringify({ error: "refused by the test proxy" }));
           return;
         }
+        if (body?.operation === "search_by_id" && Array.isArray(body.ids)) {
+          const rewritten = body.ids.map((id) => rewrittenOpsReadbacks.get(String(id))).find((value) => value !== undefined);
+          if (rewritten !== undefined) {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(rewritten);
+            return;
+          }
+        }
       }
       const headers: Record<string, string> = {};
       if (req.headers["content-type"]) headers["content-type"] = String(req.headers["content-type"]);
@@ -238,12 +257,47 @@ function makeHome(label: string, agents: Agent[]): string {
   return home;
 }
 
+/** Record the instance's port pair the way `flair init` does, so the all-agent run sees a configured pair. */
+function writePairConfig(home: string, httpPort: number, opsPort: number): void {
+  writeFileSync(join(home, ".flair", "config.yaml"), `port: ${httpPort}\nopsPort: ${opsPort}\n`);
+}
+
+/** A listener that advertises the re-embed capability and records any Authorization header and every PATCH, by port. */
+async function startListener(instanceRows: unknown[]): Promise<number> {
+  let port = 0;
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      if (req.headers.authorization) listenerAuthorizations.push(`${port} ${req.method} ${req.url}`);
+      if (req.method === "PATCH") listenerPatches.push(`${port} ${req.url ?? ""}`);
+      res.setHeader("Content-Type", "application/json");
+      if (req.method === "GET" && req.url === "/Health") {
+        res.end(JSON.stringify({ version: "other-instance", capabilities: ["memory-reembed-patch"] }));
+        return;
+      }
+      if (req.method === "GET" && req.url === "/Instance/") {
+        res.end(JSON.stringify(instanceRows));
+        return;
+      }
+      res.writeHead(404);
+      res.end(JSON.stringify({ error: "not this test's instance" }));
+    });
+  });
+  servers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  port = (server.address() as AddressInfo).port;
+  return port;
+}
+
 beforeAll(async () => {
   if (process.env.HARPER_HTTP_URL) throw new Error("requires an isolated Harper; unset HARPER_HTTP_URL");
   ensureCliBuild();
   homeAllKeys = makeHome("3128-all", [agentA, agentB, agentC]);
   homeMissingC = makeHome("3128-missing-c", [agentA, agentB]);
   homeOnlyA = makeHome("3128-only-a", [agentA]);
+  homeForeign = makeHome("3128-foreign", [agentA, agentB, agentC]);
+  homeUnpaired = makeHome("3128-unpaired", [agentA, agentB, agentC]);
   component = componentWithoutMigrationBoot();
   harper = await startHarper({ cwd: component.dir, harperBinDir: component.sourceRoot });
   for (const url of [new URL(harper.httpURL), new URL(harper.opsURL)]) {
@@ -277,8 +331,20 @@ beforeAll(async () => {
     currentSeed(),
   );
   if (seeded.kind !== "ok") throw new Error(`skill seed failed: ${JSON.stringify(seeded)}`);
+  await op({
+    operation: "upsert",
+    database: "flair",
+    table: "Instance",
+    records: [{ id: "r3o-instance", role: "hub", publicKey: "cHVibGljLWtleQ", status: "active", createdAt: now }],
+  });
   proxyPort = await startProxy(harper.httpURL);
   opsProxyPort = await startOpsProxy(harper.opsURL);
+  for (const home of [homeAllKeys, homeMissingC]) writePairConfig(home, proxyPort, opsProxyPort);
+  listenerAuthorizations = [];
+  listenerPatches = [];
+  foreignPort = await startListener([{ id: "r3o-other-instance" }]);
+  unpairedListenerPort = await startListener([{ id: "r3o-instance" }]);
+  writePairConfig(homeForeign, foreignPort, Number(new URL(harper.opsURL).port));
 }, 300_000);
 
 afterAll(async () => {
@@ -290,20 +356,25 @@ afterAll(async () => {
 
 type Run = { code: number | null; stdout: string; stderr: string };
 
-async function runReembed(args: string[], home: string, admin: boolean | string): Promise<Run> {
+async function runReembed(
+  args: string[],
+  home: string,
+  admin: boolean | string,
+  ports: { http: number; ops: number } = { http: proxyPort, ops: opsProxyPort },
+): Promise<Run> {
   patchUrls.length = 0;
   const base = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(FLAIR_|HARPER_|HDB_|FABRIC_)/.test(key)));
   const env: Record<string, string | undefined> = {
     ...base,
     HOME: home,
-    FLAIR_OPS_PORT: String(opsProxyPort),
+    FLAIR_OPS_PORT: String(ports.ops),
     NO_COLOR: "1",
   };
   if (admin) {
     env.FLAIR_ADMIN_USER = harper.admin.username;
     env.FLAIR_ADMIN_PASS = typeof admin === "string" ? admin : harper.admin.password;
   }
-  const child = spawnCli([...args, "--port", String(proxyPort), "--batch-size", "1", "--delay-ms", "0"], {
+  const child = spawnCli([...args, "--port", String(ports.http), "--batch-size", "1", "--delay-ms", "0"], {
     env,
     timeout: 180_000,
   });
@@ -322,15 +393,48 @@ function resetRefusals(): void {
   refusedPatches = new Map();
   refusedReadbacks = new Map();
   refusedOpsSearches.clear();
+  rewrittenOpsReadbacks.clear();
 }
 
-test("a clean all-agent run exits 0 and keeps the success marker", async () => {
+test("a pair bound by the instance's configuration proceeds and the all-agent run exits 0", async () => {
   resetRefusals();
   const { code, stdout, stderr } = await runReembed(["reembed"], homeAllKeys, true);
   expect(code, stderr.slice(0, 800)).toBe(0);
   expect(stdout).toContain("✅ Re-embedding complete: 7 updated, 0 errors");
   expect(stdout).not.toContain("❌");
   expect(stdout).not.toContain("row(s) not updated");
+}, 240_000);
+
+test("a named pair that configuration does not bind refuses with no Authorization header sent to that HTTP port", async () => {
+  resetRefusals();
+  const before = new Map<string, Record<string, unknown>>();
+  for (const id of [...A_ROWS, B_ROW, C_ROW, ...D_ROWS]) before.set(id, await rowState(id));
+  const listenerBefore = listenerAuthorizations.filter((entry) => entry.startsWith(`${unpairedListenerPort} `)).length;
+  const { code, stdout, stderr } = await runReembed(["reembed"], homeUnpaired, true, {
+    http: unpairedListenerPort,
+    ops: Number(new URL(harper.opsURL).port),
+  });
+  expect(code, stderr.slice(0, 800)).toBe(1);
+  expect(listenerAuthorizations.filter((entry) => entry.startsWith(`${unpairedListenerPort} `))).toHaveLength(listenerBefore);
+  expect(listenerPatches.filter((entry) => entry.startsWith(`${unpairedListenerPort} `))).toEqual([]);
+  expect(stderr).toContain("ambiguous_instance_target");
+  expect(stdout).not.toContain("Re-embedding complete");
+  for (const id of before.keys()) expect(await rowState(id), id).toEqual(before.get(id)!);
+}, 240_000);
+
+test("a configuration-bound pair whose HTTP port reports another instance refuses with ambiguous_instance_target", async () => {
+  resetRefusals();
+  const before = new Map<string, Record<string, unknown>>();
+  for (const id of [...A_ROWS, B_ROW, C_ROW, ...D_ROWS]) before.set(id, await rowState(id));
+  const { code, stdout, stderr } = await runReembed(["reembed"], homeForeign, true, {
+    http: foreignPort,
+    ops: Number(new URL(harper.opsURL).port),
+  });
+  expect(code, stderr.slice(0, 800)).toBe(1);
+  expect(stderr).toContain("ambiguous_instance_target");
+  expect(listenerPatches.filter((entry) => entry.startsWith(`${foreignPort} `))).toEqual([]);
+  expect(stdout).not.toContain("Re-embedding complete");
+  for (const id of before.keys()) expect(await rowState(id), id).toEqual(before.get(id)!);
 }, 240_000);
 
 test("a clean single-agent run exits 0 with the unchanged summary", async () => {
@@ -375,6 +479,16 @@ test("the summary reports each distinct failure reason once with its row count",
   expect(reasonLines.filter((line) => line.startsWith("❌ 2 row(s) not updated: HTTP 500"))).toHaveLength(1);
   expect(reasonLines.filter((line) => line.startsWith("❌ 1 row(s) not updated: HTTP 503"))).toHaveLength(1);
   expect(stdout).not.toContain("✅ Re-embedding complete");
+}, 240_000);
+
+test("a stored model string with a newline renders as one failure reason line", async () => {
+  resetRefusals();
+  rewrittenOpsReadbacks.set(REFUSED_ROW, JSON.stringify([{ id: REFUSED_ROW, embeddingModel: "wrong\nmodel" }]));
+  const { code, stdout, stderr } = await runReembed(["reembed", "--agent", AGENT_A], homeAllKeys, true);
+  expect(code, stderr.slice(0, 800)).toBe(1);
+  const reasonLines = stdout.split("\n").filter((line) => line.includes("row(s) not updated:"));
+  expect(reasonLines).toHaveLength(1);
+  expect(reasonLines[0]).toContain("stored embeddingModel is wrong\\nmodel");
 }, 240_000);
 
 test("a successful PATCH whose readback fails exits non-zero and does not count the row", async () => {
@@ -444,7 +558,7 @@ test("a --dry-run all-agent run counts rows without needing any owner's key", as
   expect(patchUrls).toEqual([]);
 }, 240_000);
 
-test("keyless single-agent skips other agents' listed rows without counting or writing them", async () => {
+test("keyless single-agent excludes other agents' listed rows from the candidate and counts and reports them in Skipped (other agents)", async () => {
   resetRefusals();
   const otherIds = [B_ROW, C_ROW, ...D_ROWS, SEED_SKILL_ID];
   const before = new Map<string, Record<string, unknown>>();
