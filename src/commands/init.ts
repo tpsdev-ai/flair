@@ -100,6 +100,12 @@ export type InitCli = {
 
 let cli: InitCli;
 
+function remoteAdminPasswordRecovery(clusterAdminUser: string): string {
+  return clusterAdminUser === DEFAULT_ADMIN_USER
+    ? `  The cluster password for '${clusterAdminUser}' may already have changed. Remedy: recover with a separate administrator credential or Harper's out-of-band administrator recovery before re-running remote init.`
+    : "  Remedy: re-run the same remote init command.";
+}
+
 function ownedInitPidfilePid(dataDir: string): number | null {
   let fd: number | undefined;
   try {
@@ -696,8 +702,7 @@ addAdminPassOptions(
               console.error(`  Remedy: move ${held} over ${secretPath} with mode 0600.`);
             } else {
               console.error(`Error: the cluster accepted the Flair administrator password, but the saved credential at ${held ?? secretPath} could not be confirmed: ${message}`);
-              console.error("  No verified copy of the new password remains on this machine.");
-              console.error("  Remedy: re-run the same remote init command; it saves the Flair administrator password before setting it again.");
+              console.error(remoteAdminPasswordRecovery(clusterAdminUser));
             }
             process.exit(1);
           }

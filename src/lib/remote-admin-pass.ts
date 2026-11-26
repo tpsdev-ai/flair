@@ -100,7 +100,6 @@ function readTarget(path: string): Stats | null {
   }
 }
 
-/** The file must hold exactly the saved bytes and be owner-only. */
 function verifySaved(path: string, expected: string): void {
   // Open once; no-follow on POSIX, ordinary open on Windows. Stat and read
   // through that descriptor.

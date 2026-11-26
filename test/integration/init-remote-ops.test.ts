@@ -8,7 +8,7 @@
  */
 
 import { describe, test, expect, beforeAll, beforeEach, afterEach, afterAll, mock } from "bun:test";
-import { existsSync, readFileSync, readdirSync, rmSync, mkdirSync, writeFileSync, mkdtempSync, chmodSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, readlinkSync, lstatSync, symlinkSync, rmSync, mkdirSync, writeFileSync, mkdtempSync, chmodSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -721,10 +721,9 @@ const basic = (user: string, pass: string) => "Basic " + btoa(`${user}:${pass}`)
 interface RecordedCall { user: string; pass: string; path: string; operation?: string }
 
 /**
- * Record every forwarded Basic-auth request and short-circuit only
- * `deploy_component`, after checking its Basic auth is `deployAuth`'s.
+ * Record forwarded Basic-auth requests; optionally stub deployment after checking auth.
  */
-function installRecorder(deployAuth: { user: string; pass: string }): {
+function installRecorder(deployAuth: { user: string; pass: string }, forwardDeploy = false): {
   calls: RecordedCall[];
   all: { url: string; method: string; authz: string | null; operation?: string }[];
   deployAuthOk: () => boolean;
@@ -746,7 +745,7 @@ function installRecorder(deployAuth: { user: string; pass: string }): {
     if (operation === "deploy_component") {
       deployAuthOk = authz === basic(deployAuth.user, deployAuth.pass);
       if (!deployAuthOk) throw new Error("deploy_component did not carry the cluster administrator's Basic auth");
-      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      if (!forwardDeploy) return new Response(JSON.stringify({ ok: true }), { status: 200 });
     }
     if (authz.startsWith("Basic ")) {
       const decoded = Buffer.from(authz.slice("Basic ".length), "base64").toString("utf8");
@@ -935,7 +934,7 @@ describe("flair#3106 — created admin branch (real Harper)", () => {
     const opsRole = await harperOps(harper, "admin", "test123", {
       operation: "add_role",
       role: "cluster-ops-role",
-      permission: { super_user: false, operations: ["add_user", "drop_user", "alter_user", "list_users"] },
+      permission: { super_user: false, operations: ["deploy_component", "add_user", "drop_user", "alter_user", "list_users"] },
     });
     expect([200, 409], opsRole.text).toContain(opsRole.status);
     const opsUser = await harperOps(harper, "admin", "test123", {
@@ -1121,7 +1120,7 @@ describe("flair#3106 — existing admin update path (real Harper)", () => {
     const opsRole = await harperOps(harper, "admin", "test123", {
       operation: "add_role",
       role: "cluster-ops-role",
-      permission: { super_user: false, operations: ["add_user", "drop_user", "alter_user", "list_users"] },
+      permission: { super_user: false, operations: ["deploy_component", "add_user", "drop_user", "alter_user", "list_users"] },
     });
     expect([200, 409], opsRole.text).toContain(opsRole.status);
     const opsUser = await harperOps(harper, "admin", "test123", {
@@ -1276,12 +1275,12 @@ describe("flair#3106 — already-running instance leg (real Harper)", () => {
 
 // ─── flair#3130: credential save ordering around a real cluster change ────────
 //
-// These drive the command action against a spawned Harper. The deploy upload
-// is stubbed; individual tests also stub list_users or drop an add/alter reply.
+// These drive the command action against a spawned Harper.
 describe("flair#3130 — remote init credential ordering (real Harper)", () => {
   let harper: HarperInstance;
   const WRITER = { user: "cluster-writer", pass: "cluster-writer-pass" };
   const READER = { user: "cluster-reader", pass: "cluster-reader-pass" };
+  const NO_DEPLOY = { user: "cluster-no-deploy", pass: "cluster-no-deploy-pass" };
   const BLIND = { user: "cluster-blind", pass: "cluster-blind-pass" };
 
   const sha256 = (text: string): string => createHash("sha256").update(text).digest("hex");
@@ -1289,15 +1288,16 @@ describe("flair#3130 — remote init credential ordering (real Harper)", () => {
   beforeAll(async () => {
     harper = await startLocalHarper();
     const roles: [string, Record<string, unknown>][] = [
-      ["writer-role", { super_user: false, operations: ["list_users", "add_user", "alter_user", "drop_user", "list_roles"] }],
-      ["reader-role", { super_user: false, operations: ["list_users", "list_roles"] }],
+      ["writer-role", { super_user: false, operations: ["list_users", "deploy_component", "add_user", "alter_user", "drop_user", "list_roles"] }],
+      ["reader-role", { super_user: false, operations: ["list_users", "deploy_component", "list_roles"] }],
+      ["no-deploy-role", { super_user: false, operations: ["list_users", "list_roles"] }],
       ["blind-role", { super_user: false, operations: ["list_roles"] }],
     ];
     for (const [role, permission] of roles) {
       const created = await harperOps(harper, "admin", "test123", { operation: "add_role", role, permission });
       expect([200, 409], created.text).toContain(created.status);
     }
-    for (const [user, role] of [[WRITER.user, "writer-role"], [READER.user, "reader-role"], [BLIND.user, "blind-role"]] as const) {
+    for (const [user, role] of [[WRITER.user, "writer-role"], [READER.user, "reader-role"], [NO_DEPLOY.user, "no-deploy-role"], [BLIND.user, "blind-role"]] as const) {
       const created = await harperOps(harper, "admin", "test123", {
         operation: "add_user", username: user, password: `${user}-pass`, role, active: true,
       });
@@ -1306,6 +1306,74 @@ describe("flair#3130 — remote init credential ordering (real Harper)", () => {
   }, 180_000);
 
   afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
+
+  test("an initial credential symlink is refused before cluster writes", async () => {
+    const home = mkdtempSync(join(tmpDir, "home-"));
+    const secretsDir = join(home, ".tps", "secrets");
+    const secretPath = join(secretsDir, "flair-fabric-hdb");
+    const referent = join(home, "existing-password");
+    const previous = "symlink-previous\n";
+    mkdirSync(secretsDir, { recursive: true });
+    writeFileSync(referent, previous, { mode: 0o600 });
+    symlinkSync(referent, secretPath);
+    const recorder = installRecorder(WRITER);
+    let out: Awaited<ReturnType<typeof runInitAction>>;
+    try {
+      out = await runInitAction(initArgs(harper, {
+        clusterUser: WRITER.user,
+        clusterPass: WRITER.pass,
+        flairPass: "symlink-replacement",
+        agentId: "agent-initial-symlink",
+        keysDir: join(tmpDir, "keys-initial-symlink"),
+      }), home, { rethrow: false });
+    } finally {
+      recorder.restore();
+    }
+    expect(out.exitCode).toBe(1);
+    expect(out.stderr).toContain("is a symbolic link");
+    expectNoWriteRequest(recorder.all, "initial credential symlink", harper.opsURL);
+    expect(lstatSync(secretPath).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(secretPath)).toBe(referent);
+    expect(readFileSync(referent, "utf8")).toBe(previous);
+    expect(statSync(referent).mode & 0o777).toBe(0o600);
+    expect(readdirSync(secretsDir)).toEqual(["flair-fabric-hdb"]);
+  }, 150_000);
+
+  test.each(["existing", "missing"] as const)("a real deployment refusal with a %s credential stops before password requests", async (state) => {
+    const home = mkdtempSync(join(tmpDir, "home-"));
+    const secretsDir = join(home, ".tps", "secrets");
+    const secretPath = join(secretsDir, "flair-fabric-hdb");
+    const previous = "deployment-previous\n";
+    const chosenPass = "deployment-refused-password";
+    if (state === "existing") {
+      mkdirSync(secretsDir, { recursive: true });
+      writeFileSync(secretPath, previous, { mode: 0o600 });
+    }
+    const recorder = installRecorder(NO_DEPLOY, true);
+    let out: Awaited<ReturnType<typeof runInitAction>>;
+    try {
+      out = await runInitAction(initArgs(harper, {
+        clusterUser: NO_DEPLOY.user,
+        clusterPass: NO_DEPLOY.pass,
+        flairPass: chosenPass,
+        agentId: `agent-deploy-refused-${state}`,
+        keysDir: join(tmpDir, `keys-deploy-refused-${state}`),
+      }), home, { rethrow: false });
+    } finally {
+      recorder.restore();
+    }
+    expect(recorder.all.map((call) => call.operation)).toEqual(["list_users", "deploy_component"]);
+    expect(recorder.deployAuthOk()).toBe(true);
+    expect(out.error).toBeInstanceOf(Error);
+    expect(out.error?.message ?? "").toContain("Ops API call failed (403)");
+    expect(out.error?.message ?? "").toContain("Operation 'deploy_component' is not permitted for this role's operations configuration");
+    expect(out.stderr).toContain("deploy_component");
+    expect(out.stderr).toContain("not permitted for this role's operations configuration");
+    expect(out.stderr).not.toContain("outcome is uncertain");
+    expect(readFileSync(secretPath, "utf8")).toBe(state === "existing" ? previous : chosenPass + "\n");
+    expect(statSync(secretPath).mode & 0o777).toBe(0o600);
+    expect(readdirSync(secretsDir)).toEqual(["flair-fabric-hdb"]);
+  }, 150_000);
 
   test("a failed credential save changes nothing on the cluster", async () => {
     // The seeded admin/test123 account is the cluster state a failed save must
@@ -1375,6 +1443,7 @@ describe("flair#3130 — remote init credential ordering (real Harper)", () => {
 
     expect(out.exitCode, "the action must exit non-zero when the cluster change fails").toBe(1);
     expect(out.stderr, "the failure must name the saved file").toContain(secretPath);
+    expect(recorder.all.filter((call) => call.operation === "add_user" || call.operation === "alter_user").map((call) => call.operation)).toEqual(["add_user"]);
     expect(out.stderr, "init must report the uncertain outcome").toContain("may hold the password saved");
     expect(
       recorder.all.some((call) => call.operation === "deploy_component"),
@@ -1437,6 +1506,7 @@ describe("flair#3130 — remote init credential ordering (real Harper)", () => {
     }
 
     expect(out.exitCode, "the action must exit non-zero when the cluster change fails").toBe(1);
+    expect(recorder.all.filter((call) => call.operation === "add_user" || call.operation === "alter_user").map((call) => call.operation)).toEqual(["add_user"]);
     expect(out.stderr, "init must report the uncertain outcome").toContain("may hold the password");
     expect(recorder.all.some((call) => call.operation === "deploy_component"), "the change was attempted").toBe(true);
 
@@ -1621,7 +1691,7 @@ describe("flair#3130 — remote init credential ordering (real Harper)", () => {
     expect(stagedPath).not.toBe("");
     expect(existsSync(stagedPath)).toBe(false);
     expect(out.exitCode).toBe(1);
-    expect(out.stderr).toContain("No verified copy of the new password remains on this machine");
+    expect(out.stderr).toContain("could not be confirmed");
     expect(out.stderr).toContain("Remedy: re-run the same remote init command");
     expect(out.stderr).not.toContain("Remedy: move");
     expect(readFileSync(secretPath, "utf8")).toBe(previous);
@@ -1631,7 +1701,7 @@ describe("flair#3130 — remote init credential ordering (real Harper)", () => {
     expect(out.stderr).not.toContain(chosenPass);
   }, 150_000);
 
-  test.each(["changed", "removed", "wide"] as const)("a %s stage after acceptance reports password reset and preserves the credential", async (state) => {
+  test.each(["changed", "removed", "wide", "symlink"] as const)("a %s stage after acceptance reports password reset and preserves the credential", async (state) => {
     const home = mkdtempSync(join(tmpDir, "home-"));
     const secretsDir = join(home, ".tps", "secrets");
     const secretPath = join(secretsDir, "flair-fabric-hdb");
@@ -1655,7 +1725,13 @@ describe("flair#3130 — remote init credential ordering (real Harper)", () => {
         stagedPath = join(secretsDir, name);
         if (state === "changed") writeFileSync(stagedPath, "different value\n");
         else if (state === "removed") rmSync(stagedPath);
-        else chmodSync(stagedPath, 0o644);
+        else if (state === "wide") chmodSync(stagedPath, 0o644);
+        else {
+          const referent = join(home, "accepted-password");
+          writeFileSync(referent, chosenPass + "\n", { mode: 0o600 });
+          rmSync(stagedPath);
+          symlinkSync(referent, stagedPath);
+        }
       }
       return res;
     }) as typeof fetch;
@@ -1675,13 +1751,20 @@ describe("flair#3130 — remote init credential ordering (real Harper)", () => {
     expect(accepted, "Harper accepted the password before verification").toBe(true);
     expect(stagedPath).not.toBe("");
     expect(out.exitCode).toBe(1);
-    expect(out.stderr).toContain("No verified copy of the new password remains on this machine");
+    expect(out.stderr).toContain("could not be confirmed");
     expect(out.stderr).toContain(`the saved credential at ${stagedPath} could not be confirmed`);
     expect(out.stderr).toContain("Remedy: re-run the same remote init command");
     expect(out.stderr).not.toContain(`move ${stagedPath} over`);
     expect(out.stderr).not.toContain("Remedy: move");
     expect(readFileSync(secretPath, "utf8")).toBe(previous);
     expect(statSync(secretPath).mode & 0o777).toBe(0o600);
+    if (state === "symlink") {
+      const referent = join(home, "accepted-password");
+      expect(lstatSync(stagedPath).isSymbolicLink()).toBe(true);
+      expect(readlinkSync(stagedPath)).toBe(referent);
+      expect(readFileSync(referent, "utf8")).toBe(chosenPass + "\n");
+      expect(statSync(referent).mode & 0o777).toBe(0o600);
+    }
     const login = await harperOps(harper, "admin", chosenPass, { operation: "list_users" });
     expect(login.status).toBe(200);
     expect(out.stdout).not.toContain(chosenPass);
@@ -1906,6 +1989,66 @@ describe("flair#3130 — remote init credential ordering (real Harper)", () => {
     expect(sha256(after), "the old credential must be unchanged").toBe(previousHash);
     expect(out.stdout, "the password must not reach stdout").not.toContain(chosenPass);
     expect(out.stderr, "the password must not reach stderr").not.toContain(chosenPass);
+  }, 150_000);
+
+  test("a self-reset with failed verification requires administrator recovery", async () => {
+    const home = mkdtempSync(join(tmpDir, "home-"));
+    const secretsDir = join(home, ".tps", "secrets");
+    const secretPath = join(secretsDir, "flair-fabric-hdb");
+    const previous = "self-reset-previous\n";
+    const originalPass = "self-reset-original";
+    const chosenPass = "self-reset-applied";
+    mkdirSync(secretsDir, { recursive: true });
+    writeFileSync(secretPath, previous, { mode: 0o600 });
+    const recovery = await harperOps(harper, WRITER.user, WRITER.pass, {
+      operation: "add_user", username: "self-reset-recovery", password: "self-reset-recovery-pass", role: "super_user", active: true,
+    });
+    expect(recovery.status).toBe(200);
+    const reset = await harperOps(harper, WRITER.user, WRITER.pass, {
+      operation: "alter_user", username: "admin", password: originalPass, role: "writer-role", active: true,
+    });
+    expect(reset.status).toBe(200);
+    expect((await harperOps(harper, "admin", originalPass, { operation: "list_users" })).status).toBe(200);
+    let accepted = false;
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: any, init?: any) => {
+      let operation: string | undefined;
+      try { operation = JSON.parse(init?.body)?.operation; } catch { operation = undefined; }
+      if (operation === "deploy_component") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      const res = await REAL_FETCH(input, init);
+      if (operation === "alter_user" && res.ok) {
+        accepted = true;
+        const stage = readdirSync(secretsDir).find((entry) => entry.startsWith(".flair-fabric-hdb.pending-"));
+        if (stage === undefined) throw new Error("no staged sibling existed after self-reset");
+        writeFileSync(join(secretsDir, stage), "different value\n");
+      }
+      return res;
+    }) as typeof fetch;
+    let out: Awaited<ReturnType<typeof runInitAction>>;
+    try {
+      out = await runInitAction(initArgs(harper, {
+        clusterUser: "admin",
+        clusterPass: originalPass,
+        flairPass: chosenPass,
+        agentId: "agent-self-reset",
+        keysDir: join(tmpDir, "keys-self-reset"),
+      }), home, { rethrow: false });
+    } finally {
+      globalThis.fetch = prevFetch;
+    }
+    expect(accepted).toBe(true);
+    expect(out.exitCode).toBe(1);
+    expect(out.stderr).toContain("could not be confirmed");
+    expect(out.stderr).toContain("The cluster password for 'admin' may already have changed");
+    expect(out.stderr).toContain("recover with a separate administrator credential or Harper's out-of-band administrator recovery before re-running remote init");
+    expect(out.stderr).not.toContain("Remedy: re-run the same remote init command");
+    expect(out.stderr).not.toContain("Remedy: move");
+    expect(readFileSync(secretPath, "utf8")).toBe(previous);
+    expect(statSync(secretPath).mode & 0o777).toBe(0o600);
+    expect((await harperOps(harper, "admin", originalPass, { operation: "list_users" })).status).toBe(401);
+    expect((await harperOps(harper, "admin", chosenPass, { operation: "list_users" })).status).toBe(200);
+    expect(out.stdout).not.toContain(chosenPass);
+    expect(out.stderr).not.toContain(chosenPass);
   }, 150_000);
 });
 
