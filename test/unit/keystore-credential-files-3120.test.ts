@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, fstatSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, fstatSync, linkSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getPassphrase, keystore, keyPath, keysDir } from "../../src/keystore.ts";
 import { tempDir } from "../helpers/temp-dir.ts";
@@ -119,15 +119,40 @@ for (const code of ["ENOTSUP", "ENOSYS", "EPERM", "EXDEV"]) {
 test("passphrase publication retains ENOENT after its stage is absent", () => {
   let staged = "";
   const pp = join(keysDir(), ".passphrase");
-  expect(() => getPassphrase({ link: (source) => {
-    staged = String(source);
-    unlinkSync(staged);
-    throw Object.assign(new Error("link source absent"), { code: "ENOENT" });
-  } })).toThrow(`could not publish the generated passphrase at ${pp} (ENOENT: link source absent)`);
+  let failure: Error | undefined;
+  try {
+    getPassphrase({ link: (source) => {
+      staged = String(source);
+      unlinkSync(staged);
+      throw Object.assign(new Error("link source absent"), { code: "ENOENT" });
+    } });
+  } catch (error) {
+    failure = error as Error;
+  }
+  expect(failure).toBeInstanceOf(Error);
+  expect(failure!.message).toBe(
+    `could not publish the generated passphrase at ${pp} (ENOENT: link source absent); ` +
+      "if the keys dir's volume does not support hard links, set FLAIR_KEY_PASSPHRASE or use a keys dir on a volume that does",
+  );
   expect(staged).not.toBe("");
   expect(existsSync(pp)).toBe(false);
   expect(existsSync(staged)).toBe(false);
   expect(readdirSync(keysDir())).toEqual([]);
+});
+
+test("passphrase publication succeeds after its linked stage is removed", () => {
+  let staged = "";
+  const pp = join(keysDir(), ".passphrase");
+  const passphrase = getPassphrase({ link: (source, destination) => {
+    staged = String(source);
+    linkSync(source, destination);
+    unlinkSync(staged);
+  } });
+  expect(staged).not.toBe("");
+  expect(passphrase).not.toBe("");
+  expect(readFileSync(pp, "utf-8")).toBe(passphrase);
+  expect(existsSync(staged)).toBe(false);
+  expect(readdirSync(keysDir())).toEqual([".passphrase"]);
 });
 
 test("passphrase publication reports link and cleanup failures together", () => {
