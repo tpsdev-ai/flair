@@ -7,8 +7,9 @@
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
 import { Command } from "commander";
-import { resolveAdminUser } from "../lib/auth-resolve.js";
+import { defaultKeysDir, resolveAdminUser } from "../lib/auth-resolve.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
+import { formatKeyModeFinding, keyModeFindings, keyModesUnsupported, KEY_MODES_UNSUPPORTED_MESSAGE, scanKeyDir } from "../lib/key-dir.js";
 import { escapeTerminalText } from "../lib/terminal-text.js";
 import * as render from "../render.js";
 import { checkVersion, formatVersionNudge, FLAIR_PKG_NAME } from "../version-check.js";
@@ -159,6 +160,29 @@ export function localOpsApiWarnings(
     out.push({ level: "warn", message: `${finding.message} — run \`flair doctor\` for the fix` });
   }
   return out;
+}
+
+/**
+ * Local agent-key mode warnings (flair#3077). Read-only, and judged for a
+ * local target only: the keys directory belongs to this host, so a warning
+ * about it under `--target` would be about the wrong machine.
+ */
+export function localKeyModeWarnings(
+  baseUrl: string,
+  keysDir: string = defaultKeysDir(),
+): Array<{ level: string; message: string }> {
+  if (!isLocalhostUrl(baseUrl)) return [];
+  if (keyModesUnsupported()) return [{ level: "info", message: KEY_MODES_UNSUPPORTED_MESSAGE }];
+  const scan = scanKeyDir(keysDir);
+  if (scan.state === "unreadable") {
+    const code = (scan.error as NodeJS.ErrnoException | undefined)?.code;
+    if (code === "ENOENT") return [];
+    return [{ level: "warn", message: `agent key directory ${keysDir} could not be read (${code ?? "error"}) — key file modes not checked` }];
+  }
+  return keyModeFindings(keysDir, scan.entries).map((finding) => ({
+    level: "warn",
+    message: formatKeyModeFinding(finding),
+  }));
 }
 
 function federationPeerCountParts(peers: {
@@ -396,7 +420,7 @@ const statusCmd = program
     // harper-config.yaml; the two commands must not disagree. A bare ops port
     // is Harper's all-interfaces default, so reporting "all checks passing"
     // while it is exposed is a lying green.
-    const localWarnings = localOpsApiWarnings(baseUrl);
+    const localWarnings = [...localOpsApiWarnings(baseUrl), ...localKeyModeWarnings(baseUrl)];
 
     // When unreachable on a localhost URL, probe candidate ports to detect
     // config-vs-daemon port drift. Surface the actually-listening
@@ -957,8 +981,8 @@ statusCmd
     const opts = this.optsWithGlobals();
     const { healthy, baseUrl, healthData } = await fetchHealthDetail(opts);
 
-    // `flair status deep` reports the same local ops API bind warning as plain status.
-    const localWarnings = localOpsApiWarnings(baseUrl);
+    // `flair status deep` reports the same local install warnings as plain status.
+    const localWarnings = [...localOpsApiWarnings(baseUrl), ...localKeyModeWarnings(baseUrl)];
 
     if (!healthy) {
       if (opts.json) {
