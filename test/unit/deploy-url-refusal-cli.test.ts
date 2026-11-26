@@ -1,7 +1,8 @@
 /**
  * deploy-url-refusal-cli.test.ts — `flair deploy` and `flair upgrade --target`
  * check every URL they will use before they print anything: a deploy target or
- * operations API URL (--ops-target / FLAIR_OPS_TARGET) that carries a user
+ * operations API URL (--ops-target / FLAIR_OPS_TARGET), operations endpoint, or
+ * application endpoint that carries a user
  * name, password, query or fragment, has a scheme other than http or https, or
  * names no host is refused, the command exits 1, and nothing it prints
  * contains the refused part. The refusal shows the URL only as scheme, host,
@@ -66,6 +67,8 @@ describe("flair deploy / flair upgrade --target refuse an unsafe URL before prin
     ["upgrade: a javascript: --ops-target", ["upgrade", "--target", "https://flair.example.invalid", "--ops-target", `javascript:${SECRET}`, "--yes"]],
     ["deploy: an empty --ops-target with FLAIR_OPS_TARGET carrying a query", ["deploy", "--target", "https://flair.example.invalid", "--ops-target", "", "--fabric-user", "u", "--fabric-password", "p"], { FLAIR_OPS_TARGET: `https://flair.example.invalid:9925/?key=${SECRET}` }],
     ["upgrade: an empty --ops-target with FLAIR_OPS_TARGET carrying a query", ["upgrade", "--target", "https://flair.example.invalid", "--ops-target", "", "--yes"], { FLAIR_OPS_TARGET: `https://flair.example.invalid:9925/?key=${SECRET}` }],
+    ["deploy: an --operations-endpoint with a user name and password", ["deploy", "--target", "https://flair.example.invalid", "--operations-endpoint", `https://deployer:${SECRET}@flair.example.invalid:9925`, "--fabric-user", "u", "--fabric-password", "p"]],
+    ["upgrade: an --application-endpoint with a query", ["upgrade", "--target", "https://flair.example.invalid", "--application-endpoint", `https://flair.example.invalid/?value=${SECRET}`, "--yes"]],
   ];
   for (const [what, args, env] of cases) {
     test(what, () => {

@@ -143,6 +143,14 @@ describe("flair#1940 round 17 — a non-admin Memory read ignores the caller's s
     expect(body.hostSource).toEqual(POINTER); // assertion: the gated pointer value
   }, 30_000);
 
+  it("collection: limit(1) returns one row when two exist", async () => {
+    const res = await authFetch(harper, reader, "GET", "/Memory/?limit(1)");
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(Array.isArray(body)).toBe(true);
+    expect(body.length).toBe(1);
+  }, 30_000);
+
   it("collection: a request WITH `select(id)` returns FULL rows, and limit still applies", async () => {
     const res = await authFetch(harper, reader, "GET", "/Memory/?select(id)&limit(0,1)&sort(createdAt)");
     const body = await res.json();

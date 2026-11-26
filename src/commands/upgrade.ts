@@ -10,6 +10,7 @@ import { Command } from "commander";
 import { detectWiredFlairMcp } from "../doctor-client.js";
 import { UPGRADE_SNAPSHOT_ROOT, fetchDeclaredHarperVersion, readInstalledHarperVersion } from "../engine-version.js";
 import { fabricUpgrade, type FabricUpgradeOptions } from "../fabric-upgrade.js";
+import { applicationProbeUrl, endpointFlagsWithoutExplicitTarget, explicitEndpoint } from "../lib/ops-url.js";
 import { deployUrlRefusal, safeUrl } from "../mqtt-off-deploy.js";
 import { renderFleetSweepTable, sweepFleet } from "../fleet-verify.js";
 import { resolveNpmGlobalPrefix } from "../install/global-bin-path.js";
@@ -226,11 +227,31 @@ function verifyAuthedGet(...args: any[]): any {
 
 /**
  * The options `flair upgrade --target` hands fabricUpgrade(), from the
- * command's options and resolved credentials. `opsUrl` is what every remote
- * command resolves (`resolveOpsUrl`: --ops-target / FLAIR_OPS_TARGET, else
- * derived from --target); deploy() sends the MQTT-off configuration, restart and read-back
- * there.
+ * command's options and resolved credentials. `opsUrl` is the MQTT-off URL:
+ * --ops-target / FLAIR_OPS_TARGET, else the operations endpoint, else derived
+ * from --target. deploy() sends the MQTT-off configuration, restart and read-back there.
  */
+/** MQTT-off URL for a Fabric upgrade: explicit ops target, else the operations endpoint, else derived from --target. */
+function fabricUpgradeOpsUrl(
+  opts: { target?: string; opsTarget?: string; operationsEndpoint?: string },
+  resolveOpsUrl: (o: { target?: string; opsTarget?: string }) => string | undefined,
+): string | undefined {
+  const explicit = explicitEndpoint(opts.opsTarget) || explicitEndpoint(process.env.FLAIR_OPS_TARGET);
+  if (explicit) return resolveOpsUrl({ target: opts.target, opsTarget: opts.opsTarget });
+  const operations = explicitEndpoint(opts.operationsEndpoint);
+  if (operations) return operations.replace(/\/$/, "");
+  return resolveOpsUrl({ target: opts.target, opsTarget: opts.opsTarget });
+}
+
+/** Refusal when the endpoint flags are set without --target. Null when the command may continue. */
+export function upgradeEndpointFlagsWithoutTarget(opts: {
+  target?: string;
+  operationsEndpoint?: string;
+  applicationEndpoint?: string;
+}): string | null {
+  return endpointFlagsWithoutExplicitTarget("flair upgrade", opts);
+}
+
 export function buildFabricUpgradeOptions(
   opts: any,
   creds: { fabricUser?: string; fabricPassword?: string },
@@ -252,7 +273,9 @@ export function buildFabricUpgradeOptions(
     // --no-verify reaches deploy(): it skips the served-API verification and
     // the post-restart MQTT step there too.
     verify: opts.verify !== false,
-    opsUrl: resolveOpsUrl({ target: opts.target, opsTarget: opts.opsTarget }),
+    opsUrl: fabricUpgradeOpsUrl(opts, resolveOpsUrl),
+    operationsEndpoint: explicitEndpoint(opts.operationsEndpoint),
+    applicationEndpoint: explicitEndpoint(opts.applicationEndpoint),
     // flair#878 — previously unreachable from this command; see
     // FabricUpgradeOptions.
     deployRetries: Number(opts.deployRetries ?? 0),
@@ -299,7 +322,9 @@ async function runFabricUpgrade(opts: any): Promise<void> {
 
   const upgradeOpts = buildFabricUpgradeOptions(opts, { fabricUser, fabricPassword }, cli.resolveEffectiveOpsUrl);
 
-  console.log(`${green("→")} Upgrading Fabric Flair at ${safeUrl(upgradeOpts.target)}`);
+  const applicationUrl = explicitEndpoint(opts.applicationEndpoint) ?? upgradeOpts.target;
+  const operationsUrl = explicitEndpoint(opts.operationsEndpoint) ?? upgradeOpts.target;
+  console.log(`${green("→")} Upgrading Fabric Flair at ${safeUrl(applicationUrl)}`);
   if (check) console.log(dim("  (--check: plan only, no deploy)"));
 
   try {
@@ -311,7 +336,7 @@ async function runFabricUpgrade(opts: any): Promise<void> {
       const rl = createInterface({ input: process.stdin, output: process.stdout });
       const answer: string = await new Promise((res) =>
         rl.question(
-          `Deploy a fresh ${green("@tpsdev-ai/flair")} to ${safeUrl(upgradeOpts.target)}? [y/N] `,
+          `Deploy a fresh ${green("@tpsdev-ai/flair")} to ${safeUrl(operationsUrl)}? [y/N] `,
           (a) => { rl.close(); res(a); },
         ),
       );
@@ -364,7 +389,7 @@ async function runFabricUpgrade(opts: any): Promise<void> {
     } else {
       console.log(`\n${green("→")} Fleet verify`);
       const sweep = await sweepFleet({
-        target: upgradeOpts.target,
+        target: applicationProbeUrl(opts.applicationEndpoint, upgradeOpts.target),
         fabricUser: fabricUser as string,
         fabricPassword: fabricPassword as string,
         expectVersion: result.plan.targetVersion,
@@ -959,6 +984,8 @@ program
   // Harper Fabric URL instead of the local npm install. Reuses `flair deploy`
   // under the hood with the harper pin baked in (flair#513).
   .option("--target <url>", "Upgrade the Flair deployed to this Fabric URL (not the local install)")
+  .option("--operations-endpoint <url>", "For --target: operations endpoint for deploy_component (default: --target)")
+  .option("--application-endpoint <url>", "For --target: application endpoint for migration, discovery, and verification (default: --target)")
   .option("--fabric-user <user>", "Fabric admin username — for --target (env: FABRIC_USER preferred; inline leaks to shell history)")
   .option("--fabric-password <pass>", "Fabric admin password — for --target (prefer FABRIC_PASSWORD env or --fabric-password-file; inline leaks to shell history)")
   .option("--fabric-password-file <path>", "Read the Fabric admin password from a file (chmod 600) — for --target")
@@ -987,6 +1014,12 @@ program
   .option("--no-convergence-check", "For --target: skip the post-replication-error convergence poll and fail on harper's error verbatim (default: poll — Harper replicates asynchronously, so its error is a snapshot, not a verdict; flair#878)")
   .option("--convergence-timeout <ms>", "For --target: how long to wait for peer replication to converge before reporting a replication failure (default: 180000)")
   .action(async (opts) => {
+    const endpointFlags = upgradeEndpointFlagsWithoutTarget(opts);
+    if (endpointFlags) {
+      console.error(endpointFlags);
+      process.exit(1);
+    }
+
     // ── Fabric-upgrade branch ───────────────────────────────────────────────
     if (opts.target) {
       // Every URL the Fabric upgrade takes is checked before anything is
@@ -997,6 +1030,8 @@ program
       const refusal = deployUrlRefusal([
         [opts.target, "deploy target URL (--target)"],
         [opts.opsTarget || process.env.FLAIR_OPS_TARGET, "operations API URL (--ops-target / FLAIR_OPS_TARGET)"],
+        [opts.operationsEndpoint, "operations endpoint (--operations-endpoint)"],
+        [opts.applicationEndpoint, "application endpoint (--application-endpoint)"],
       ]);
       if (refusal) {
         console.error(`\x1b[31m${refusal}\x1b[0m`);

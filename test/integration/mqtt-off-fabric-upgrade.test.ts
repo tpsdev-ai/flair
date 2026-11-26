@@ -100,6 +100,7 @@ describe("fabricUpgrade() into the real deploy() (local staging, real Harper)", 
     expect((await mqttSection())?.webSocket, "mqtt.webSocket before").toBe(true);
     const deployCalls: DeployOptions[] = [];
     const log: string[] = [];
+    let deployedReads = 0;
     const result = await fabricUpgrade(
       {
         target: harper.opsURL,
@@ -112,7 +113,7 @@ describe("fabricUpgrade() into the real deploy() (local staging, real Harper)", 
       {
         fetchLatestFlairVersion: async () => "9.9.9",
         fetchDeclaredHarperVersion: async () => "5.3.1",
-        fetchDeployedVersion: async () => null,
+        fetchDeployedVersion: async () => (++deployedReads === 1 ? null : "9.9.9"),
         npmInstall: (dir: string) => { stagingDirs.push(dir); stageInto(dir); },
         deploy: (opts: DeployOptions) => {
           deployCalls.push(opts);
@@ -144,6 +145,7 @@ describe("fabricUpgrade() into the real deploy() (local staging, real Harper)", 
     const deployCalls: DeployOptions[] = [];
     const log: string[] = [];
     const warnings: string[] = [];
+    let deployedReads = 0;
     const originalWarn = console.warn;
     console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
     let result: Awaited<ReturnType<typeof fabricUpgrade>>;
@@ -161,7 +163,7 @@ describe("fabricUpgrade() into the real deploy() (local staging, real Harper)", 
         {
           fetchLatestFlairVersion: async () => "9.9.9",
           fetchDeclaredHarperVersion: async () => "5.3.1",
-          fetchDeployedVersion: async () => null,
+          fetchDeployedVersion: async () => (++deployedReads === 1 ? null : "9.9.9"),
           npmInstall: (dir: string) => { stagingDirs.push(dir); stageInto(dir); },
           deploy: (opts: DeployOptions) => {
             deployCalls.push(opts);
