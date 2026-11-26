@@ -9,7 +9,7 @@
 import { Command } from "commander";
 import { defaultKeysDir, resolveAdminUser, addAdminPassOptions } from "../lib/auth-resolve.js";
 import * as render from "../render.js";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { writeFilesAtomically } from "../lib/atomic-write.js";
 import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
 
@@ -56,6 +56,37 @@ export function defaultExportOutputPath(
   const dir = resolve(exportsDir);
   const candidate = resolve(dir, `${agentId}-${now}.json`);
   return dirname(candidate) === dir ? candidate : null;
+}
+
+/** The clock the default export name reads. `FLAIR_TEST_EXPORT_CLOCK_MS` fixes
+ *  it so a test can plant a path at the exact default name. */
+function defaultExportClockMs(): number {
+  const raw = process.env.FLAIR_TEST_EXPORT_CLOCK_MS;
+  const parsed = raw === undefined ? NaN : Number(raw);
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
+/** Create `outputPath` exclusively at `mode`, write `content`, fsync and close.
+ *  An existing path — file, symlink or anything else — is refused and nothing
+ *  is written. */
+function writeDefaultExport(outputPath: string, content: string, mode: number): void {
+  let fd: number;
+  try {
+    fd = openSync(outputPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0), mode);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "EEXIST" || code === "ELOOP") {
+      console.error(`Error: refusing to write to existing path ${outputPath}`);
+      process.exit(1);
+    }
+    throw err;
+  }
+  try {
+    writeFileSync(fd, content);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function hasRequiredStringFields(value: unknown, fields: readonly string[]): value is Record<string, unknown> {
@@ -174,7 +205,7 @@ addAdminPassOptions(
       rawOutputPath = opts.output;
     } else {
       const exportsDir = join(resolveHome(), ".flair", "exports");
-      const defaultPath = defaultExportOutputPath(exportsDir, agentId);
+      const defaultPath = defaultExportOutputPath(exportsDir, agentId, defaultExportClockMs());
       if (defaultPath === null) {
         console.error(`Error: refusing to write agent '${agentId}' outside the exports directory ${resolve(exportsDir)}`);
         process.exit(1);
@@ -186,11 +217,15 @@ addAdminPassOptions(
     mkdirSync(join(outputPath, ".."), { recursive: true });
     const fileMode = opts.includeKey ? 0o600 : 0o644;
     const content = JSON.stringify(exportData, null, 2);
-    if (opts.includeKey) {
-      // Stage at 0600 to avoid retaining an existing output file's wider mode.
-      writeFilesAtomically([{ path: outputPath, content, mode: 0o600 }]);
+    if (opts.output !== undefined) {
+      if (opts.includeKey) {
+        // Stage at 0600 to avoid retaining an existing output file's wider mode.
+        writeFilesAtomically([{ path: outputPath, content, mode: 0o600 }]);
+      } else {
+        writeFileSync(outputPath, content, { mode: fileMode });
+      }
     } else {
-      writeFileSync(outputPath, content, { mode: fileMode });
+      writeDefaultExport(outputPath, content, fileMode);
     }
 
     console.log(`\n${render.icons.ok} ${render.wrap(render.c.green, `Agent '${agentId}' exported`)}`);

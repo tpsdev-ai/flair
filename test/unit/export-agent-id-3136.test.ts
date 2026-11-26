@@ -90,7 +90,7 @@ describe("flair export: default output stays inside the exports directory (#3136
     expect(defaultExportOutputPath(exportsDir, "agent-a", 123)).toBe(join(resolve(exportsDir), "agent-a-123.json"));
   });
 
-  test("a default path outside the exports directory is refused", () => {
+  test("the builder returns null for a name whose path leaves the exports directory", () => {
     const exportsDir = join(tmpdir(), "flair-export-3136-helper", ".flair", "exports");
     expect(defaultExportOutputPath(exportsDir, "../escape", 123)).toBeNull();
   });

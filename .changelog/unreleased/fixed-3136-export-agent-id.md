@@ -1,1 +1,1 @@
-- **`flair export` refuses an invalid agent id before any request and keeps its default output inside the exports directory.**
+- **`flair export` refuses an invalid agent id before any request, and its default output is created exclusively: an existing path is refused, not overwritten.**
