@@ -509,6 +509,14 @@ describe("provisionFabric — full happy path", () => {
     ["numeric permission", [{ username: "cluster-admin", role: { permission: { super_user: 1 } } }]],
     ["null permission", [{ username: "cluster-admin", role: { permission: { super_user: null } } }]],
     ["missing permission", [{ username: "cluster-admin", role: { permission: {} } }]],
+    ["admin missing super_user", [
+      { username: "cluster-admin", role: { permission: { super_user: false } } },
+      { username: "admin", role: { permission: {} } },
+    ]],
+    ["admin string super_user", [
+      { username: "cluster-admin", role: { permission: { super_user: false } } },
+      { username: "admin", role: { permission: { super_user: "false" } } },
+    ]],
     ["non-object entry", [null]],
     ["array entry", [[]]],
     ["non-array response", {}],
@@ -540,7 +548,7 @@ describe("provisionFabric — full happy path", () => {
 
     expect(out.error, `init failed to run: ${out.stderr}`).toBeUndefined();
     expect(out.status).toBe(1);
-    const decidingRecord = ["string permission", "numeric permission", "null permission", "missing permission"].includes(_label);
+    const decidingRecord = ["string permission", "numeric permission", "null permission", "missing permission", "admin missing super_user", "admin string super_user"].includes(_label);
     expect(out.stderr).toContain(
       !Array.isArray(response)
         ? "not an array"
