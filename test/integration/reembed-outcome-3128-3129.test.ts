@@ -4,10 +4,10 @@
  * ephemeral Harper (flair#3128, flair#3129).
  *
  * A recording proxy in front of Harper refuses chosen Memory PATCH requests
- * with a per-row status, and can break a row's readback GET, so each path can
- * be run with a failing write or readback: the run exits non-zero and its
- * summary names the count and the reason. A clean run keeps the previous output
- * and exits 0.
+ * with a per-row status, and can fail a row's readback GET or an ops
+ * search_by_id after a successful PATCH, so each path can be run with a
+ * failing write or readback: the run exits non-zero and its summary names the
+ * count and the reason. A clean run exits 0.
  *
  * The all-agent run sends every re-embed PATCH with the administrator
  * credential it lists rows with, so it re-embeds rows whose owner has no local
@@ -22,11 +22,11 @@
  * rows: this file seeds such rows for other agents and asserts the run neither
  * counts nor writes them, and reports the skipped count.
  *
- * Throwaway HOMEs, ephemeral ports, the boot migration trigger omitted, no
- * assertion reads a vector. Each request target is this test's instance: both
- * Harper base URLs are asserted to be 127.0.0.1 on ports other than 9925 and
- * 9926, the CLI's HTTP requests go through the recording proxy, and its ops
- * reads use the instance's ops port.
+ * Throwaway HOMEs, ephemeral ports, the boot migration trigger omitted. Each
+ * request target is this test's instance: both Harper base URLs are asserted
+ * to be 127.0.0.1 on ports other than 9925 and 9926, the CLI's HTTP requests go
+ * through the recording proxy, and its ops reads go through a second proxy to
+ * the instance's ops port.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createServer, type Server } from "node:http";
@@ -64,8 +64,10 @@ let homeAllKeys: string;
 let homeMissingC: string;
 let homeOnlyA: string;
 let proxyPort = 0;
+let opsProxyPort = 0;
 let refusedPatches = new Map<string, number>();
 let refusedReadbacks = new Map<string, number>();
+const refusedOpsSearches = new Set<string>();
 const patchUrls: string[] = [];
 const servers: Server[] = [];
 
@@ -178,6 +180,54 @@ async function startProxy(target: string): Promise<number> {
   return (server.address() as AddressInfo).port;
 }
 
+/** A proxy to the ops port that refuses a chosen row's `search_by_id` readback. */
+async function startOpsProxy(target: string): Promise<number> {
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", async () => {
+      const payload = Buffer.concat(chunks);
+      if (req.method === "POST") {
+        let body: { operation?: unknown; ids?: unknown } | undefined;
+        try {
+          body = JSON.parse(payload.toString());
+        } catch {
+          body = undefined;
+        }
+        if (
+          body?.operation === "search_by_id"
+          && Array.isArray(body.ids)
+          && body.ids.some((id) => refusedOpsSearches.has(String(id)))
+        ) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "refused by the test proxy" }));
+          return;
+        }
+      }
+      const headers: Record<string, string> = {};
+      if (req.headers["content-type"]) headers["content-type"] = String(req.headers["content-type"]);
+      if (req.headers.authorization) headers.authorization = String(req.headers.authorization);
+      try {
+        const upstream = await fetch(`${target}${req.url}`, {
+          method: req.method,
+          headers,
+          body: payload.length > 0 ? payload : undefined,
+          signal: AbortSignal.timeout(120_000),
+        });
+        const upstreamBody = Buffer.from(await upstream.arrayBuffer());
+        res.writeHead(upstream.status, { "Content-Type": upstream.headers.get("content-type") ?? "application/json" });
+        res.end(upstreamBody);
+      } catch {
+        res.writeHead(502, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "proxy upstream failed" }));
+      }
+    });
+  });
+  servers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return (server.address() as AddressInfo).port;
+}
+
 function makeHome(label: string, agents: Agent[]): string {
   const home = mkdtempSync(join(tmpdir(), `flair-${label}-home-`));
   const keysDir = join(home, ".flair", "keys");
@@ -228,6 +278,7 @@ beforeAll(async () => {
   );
   if (seeded.kind !== "ok") throw new Error(`skill seed failed: ${JSON.stringify(seeded)}`);
   proxyPort = await startProxy(harper.httpURL);
+  opsProxyPort = await startOpsProxy(harper.opsURL);
 }, 300_000);
 
 afterAll(async () => {
@@ -245,7 +296,7 @@ async function runReembed(args: string[], home: string, admin: boolean | string)
   const env: Record<string, string | undefined> = {
     ...base,
     HOME: home,
-    FLAIR_OPS_PORT: new URL(harper.opsURL).port,
+    FLAIR_OPS_PORT: String(opsProxyPort),
     NO_COLOR: "1",
   };
   if (admin) {
@@ -270,9 +321,10 @@ async function runReembed(args: string[], home: string, admin: boolean | string)
 function resetRefusals(): void {
   refusedPatches = new Map();
   refusedReadbacks = new Map();
+  refusedOpsSearches.clear();
 }
 
-test("a clean all-agent run exits 0 with the unchanged summary", async () => {
+test("a clean all-agent run exits 0 and keeps the success marker", async () => {
   resetRefusals();
   const { code, stdout, stderr } = await runReembed(["reembed"], homeAllKeys, true);
   expect(code, stderr.slice(0, 800)).toBe(0);
@@ -318,9 +370,10 @@ test("the summary reports each distinct failure reason once with its row count",
   const { code, stdout, stderr } = await runReembed(["reembed"], homeAllKeys, true);
   expect(code, stderr.slice(0, 800)).toBe(1);
   expect(stdout).toContain("❌ Re-embedding complete: 4 updated, 3 errors");
-  expect(stdout).toContain("2 row(s) not updated: HTTP 500");
-  expect(stdout).toContain("1 row(s) not updated: HTTP 503");
-  expect(stdout).not.toContain("3 row(s) not updated");
+  const reasonLines = stdout.split("\n").map((line) => line.trim()).filter((line) => line.includes("row(s) not updated:"));
+  expect(reasonLines).toHaveLength(2);
+  expect(reasonLines.filter((line) => line.startsWith("❌ 2 row(s) not updated: HTTP 500"))).toHaveLength(1);
+  expect(reasonLines.filter((line) => line.startsWith("❌ 1 row(s) not updated: HTTP 503"))).toHaveLength(1);
   expect(stdout).not.toContain("✅ Re-embedding complete");
 }, 240_000);
 
@@ -333,6 +386,17 @@ test("a successful PATCH whose readback fails exits non-zero and does not count 
   expect(stdout).toContain("1 row(s) not updated: stored model read failed: HTTP 500");
   expect(stdout).not.toContain("✅ Re-embedding complete");
   expect((await rowState(A_ROWS[0])).embeddingModel).toBe(getModelId());
+}, 240_000);
+
+test("a successful all-agent PATCH whose ops readback fails exits non-zero and does not count the row", async () => {
+  resetRefusals();
+  refusedOpsSearches.add(REFUSED_ROW);
+  const { code, stdout, stderr } = await runReembed(["reembed"], homeAllKeys, true);
+  expect(code, stderr.slice(0, 800)).toBe(1);
+  expect(stdout).toContain("❌ Re-embedding complete: 6 updated, 1 errors");
+  expect(stdout).toContain("1 row(s) not updated: stored model read failed: HTTP 500");
+  expect(stdout).not.toContain("✅ Re-embedding complete");
+  expect(patchUrls).toContain(rowPath(REFUSED_ROW));
 }, 240_000);
 
 test("the admin all-agent run re-embeds rows whose owners have no key and leaves their identity fields byte-identical", async () => {

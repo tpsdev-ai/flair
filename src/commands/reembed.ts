@@ -234,8 +234,8 @@ export function agentStoredModelReader(baseUrl: string, agentId: string, keyPath
  * re-embedded when that response names this row and the stored row then
  * carries `intendedModel`, read with `readStoredModel`.
  *
- * flair#3128: `reembedRowOutcome` also returns a short reason label (HTTP
- * status or error message) that the command counts once per distinct value.
+ * flair#3128: `reembedRowOutcome` also returns a reason label (HTTP status or
+ * error message) that the command counts once per distinct value.
  */
 export type ReembedRowOutcome = { ok: boolean; reason?: string };
 
@@ -313,7 +313,7 @@ async function reembedOutcomeFromResponse(
   return { ok: false, reason: `stored embeddingModel is ${typeof stored === "string" && stored.length > 0 ? stored : "missing"}` };
 }
 
-/** `reembedRow` as a boolean: true when the row's stored stamp names `intendedModel`. */
+/** `reembedRow` as a boolean: true when the PATCH succeeded, the response names the row, and the stored stamp matches. */
 export async function reembedRow(
   baseUrl: string,
   agentId: string,
@@ -629,8 +629,10 @@ program
 
     // flair#3129: the keyless listing's read scope includes every other agent's
     // non-private rows (resources/memory-read-scope.ts). Only this agent's rows
-    // are candidates — a PATCH as this agent to another agent's row is refused
-    // — so drop the others before the candidate and up-to-date counts.
+    // are candidates — a PATCH as a non-admin agent to another agent's row is
+    // refused (an admin agent's signed PATCH passes the owner guard; the CLI
+    // filter still applies) — so drop the others before the candidate and
+    // up-to-date counts.
     const keylessListed = allMemories.length;
     let otherAgentRows = 0;
     if (!adminPassSingle) {

@@ -317,10 +317,10 @@ describe("flair#2296: flair reembed", () => {
   test("single-agent path without administrator credentials, including a skill row", async () => {
     // Listed through POST /SemanticSearch as the agent, which returns rows that
     // are not archived; each re-embedded row's model is read with a signed GET.
-    const live = { archived: false, archivedAt: null, archivedBy: null, validTo: null };
+    const live = { archived: false, archivedAt: null, archivedBy: null, validTo: null, expiresAt: null };
     const before = await seedRows([
       fixtureRow("one-e", agentE.id, live),
-      { ...skillFixtureRow("one-e-skill", agentE.id) },
+      { ...skillFixtureRow("one-e-skill", agentE.id), expiresAt: null },
     ]);
     const r = runReembed(["--agent", agentE.id, "--batch-size", "1", "--delay-ms", "0"], { admin: false });
     expect(r.code, r.out).toBe(0);
