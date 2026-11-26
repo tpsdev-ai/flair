@@ -4214,29 +4214,28 @@ export async function provisionFabric(
   }
   const users = userInfo;
   const usernames: string[] = [];
+  const superUsers: boolean[] = [];
   for (const record of users) {
     const username =
-      record !== null && typeof record === "object"
+      record !== null && typeof record === "object" && !Array.isArray(record)
         ? typeof record.username === "string"
           ? record.username
           : typeof record.user?.username === "string"
             ? record.user.username
             : undefined
         : undefined;
-    if (username === undefined || username === "") {
+    const permission = record?.role?.permission ?? record?.permission;
+    const superUser = permission?.super_user;
+    if (username === undefined || username === "" || typeof superUser !== "boolean") {
       throw new Error(
         "The cluster's list_users response contained a malformed record, so provisioning refused to change anything",
       );
     }
     usernames.push(username);
+    superUsers.push(superUser);
   }
   const clusterAdminIndex = usernames.indexOf(clusterAdminUser);
-  const adminRecord = clusterAdminIndex === -1 ? undefined : users[clusterAdminIndex];
-  const clusterAdminIsSuperUser = !!(
-    adminRecord?.role?.permission?.super_user ??
-    adminRecord?.permission?.super_user ??
-    false
-  );
+  const clusterAdminIsSuperUser = clusterAdminIndex !== -1 && superUsers[clusterAdminIndex] === true;
   const adminExists = usernames.includes(DEFAULT_ADMIN_USER);
 
   if (!clusterAdminIsSuperUser) {

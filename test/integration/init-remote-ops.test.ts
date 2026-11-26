@@ -2,15 +2,16 @@
  * init-remote-ops.test.ts — Integration tests for the atomic
  * `flair init --remote` provisioning flow.
  *
- * Hermetic cases mock fetch() for the tarball, ops-call and provisioning
- * mechanics; the provisioning branches and the init action also run against a
- * spawned Harper. Verifies operation ordering, idempotence, timeout handling,
+ * Hermetic cases build a real tarball from temporary files and mock the ops
+ * upload and REST responses; provisioning branches and the init action also run
+ * against a spawned Harper. Verifies operation ordering, idempotence, timeout handling,
  * the secret-file write and remote-init refusals.
  */
 
 import { describe, test, expect, beforeAll, beforeEach, afterEach, afterAll, mock } from "bun:test";
 import { existsSync, readFileSync, readdirSync, readlinkSync, lstatSync, symlinkSync, rmSync, mkdirSync, writeFileSync, mkdtempSync, chmodSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "node:http";
@@ -457,34 +458,55 @@ describe("provisionFabric — full happy path", () => {
     expect(alterUserCalled).toBe(false);
   });
 
-  test("refuses a malformed list_users record before any write", async () => {
-    const writes: string[] = [];
+  test.each([
+    ["missing username", [
+      { username: "cluster-admin", role: { permission: { super_user: false } } },
+      { role: { permission: { super_user: false } } },
+    ]],
+    ["empty username", [{ username: "", role: { permission: { super_user: false } } }]],
+    ["string permission", [{ username: "cluster-admin", role: { permission: { super_user: "false" } } }]],
+    ["numeric permission", [{ username: "cluster-admin", role: { permission: { super_user: 1 } } }]],
+    ["null permission", [{ username: "cluster-admin", role: { permission: { super_user: null } } }]],
+    ["missing permission", [{ username: "cluster-admin", role: { permission: {} } }]],
+    ["non-object entry", [null]],
+    ["array entry", [[]]],
+    ["non-array response", {}],
+  ])("init refuses list_users with %s before credential staging or write requests", async (_label, response) => {
+    const home = mkdtempSync(join(tmpDir, "home-"));
+    const secretsDir = join(home, ".tps", "secrets");
+    const requestsPath = join(tmpDir, "requests.jsonl");
+    const preloadPath = join(tmpDir, "ops-preload.ts");
+    writeFileSync(preloadPath, `
+      import { appendFileSync } from "node:fs";
+      globalThis.fetch = async (input, opts) => {
+        const url = String(input);
+        const operation = opts?.body ? JSON.parse(opts.body).operation : undefined;
+        appendFileSync(${JSON.stringify(requestsPath)}, JSON.stringify({ url, method: opts?.method ?? "GET", operation }) + "\\n");
+        if (operation !== "list_users") throw new Error("unexpected request after list_users");
+        return new Response(${JSON.stringify(JSON.stringify(response))}, { status: 200 });
+      };
+    `);
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+      !/^(FLAIR_|HARPER_|HDB_|FABRIC_|ROOTPATH$)/.test(key),
+    ));
+    const out = spawnSync(process.execPath, [
+      "--preload", preloadPath, join(originalCwd, "src", "cli.ts"), "init",
+      "--target", TEST_OPTS.target, "--ops-target", TEST_OPTS.opsTarget,
+      "--force", "--cluster-admin-user", TEST_OPTS.clusterAdminUser,
+      "--cluster-admin-pass", TEST_OPTS.clusterAdminPass,
+      "--flair-admin-pass", TEST_OPTS.flairAdminPass,
+    ], { env: { ...env, HOME: home, USERPROFILE: home }, encoding: "utf8", timeout: 10_000 });
 
-    globalThis.fetch = mock(async (url: string, opts?: any) => {
-      const parsed = new URL(url);
-      if (parsed.port === "19925") {
-        const body = JSON.parse(opts.body);
-        if (body.operation === "list_users") {
-          return new Response(JSON.stringify([
-            { username: "cluster-admin", role: { permission: { super_user: false } } },
-            { role: { permission: { super_user: false } } },
-          ]), { status: 200 });
-        }
-        if (body.operation !== undefined) writes.push(body.operation);
-        return new Response(JSON.stringify({ ok: true }), { status: 200 });
-      }
-      return new Response(JSON.stringify({ error: "instanceId and publicKey required" }), { status: 400 });
-    });
-
-    await expect(provisionFabric(
-      TEST_OPTS.target,
-      TEST_OPTS.opsTarget,
-      TEST_OPTS.clusterAdminUser,
-      TEST_OPTS.clusterAdminPass,
-      TEST_OPTS.flairAdminPass,
-    )).rejects.toThrow("malformed record");
-    expect(writes).toEqual([]);
-  });
+    expect(out.error, `init failed to run: ${out.stderr}`).toBeUndefined();
+    expect(out.status).toBe(1);
+    expect(out.stderr).toContain(Array.isArray(response) ? "malformed record" : "not an array");
+    expect(out.stderr).toContain("provisioning refused to change anything");
+    const seen = readFileSync(requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    expectNoWriteRequest(seen, "malformed list_users", TEST_OPTS.opsTarget);
+    expect(seen.map((call: { operation?: string }) => call.operation)).toEqual(["list_users"]);
+    expect(existsSync(join(secretsDir, "flair-fabric-hdb"))).toBe(false);
+    expect(existsSync(secretsDir) ? readdirSync(secretsDir) : []).toEqual([]);
+  }, 15_000);
 });
 
 describe("CLI --force + --cluster-admin-user validation", () => {
@@ -1192,6 +1214,8 @@ describe("flair#3106 — created admin branch (real Harper)", () => {
       expect(out.stdout).toContain("Admin user: admin");
       expect(out.stderr, "the reused branch must warn about the existing credential file").toContain(secretPath);
       expect(out.stderr).toContain("neither changed nor verified");
+      expect(out.stderr).toContain("Verify it by authenticating to the instance with the password it holds before relying on it.");
+      expect(out.stderr.split("this run reused an existing super_user cluster administrator").length - 1).toBe(1);
     } finally {
       recorder.restore();
     }
