@@ -19,8 +19,10 @@
  * key: a registered agent without a key file, the `skill:using-flair` row the
  * skill seed writes as the administrator, and rows of an owner with no Agent
  * row. The success case compares the full stored state of the initial Memory
- * rows read through the ops API before and after: the model stamp is new, while
- * agentId and every provenance/authority field are byte-identical.
+ * rows read through the ops API before and after: the model stamp is the
+ * current model, while agentId and every provenance/authority field are
+ * byte-identical; the later admin all-agent case checks the same identity
+ * fields for rows whose owners have no key.
  *
  * Without FLAIR_ADMIN_PASS, `reembed --agent <id>` lists rows with
  * POST /SemanticSearch, whose read scope includes other agents' non-private

@@ -580,7 +580,7 @@ export function register(program: Command): void {
 program
   .command("reembed")
   .description("Re-generate embeddings for memories with stale or missing model tags")
-  .option("--agent <id>", "Agent ID to re-embed memories for (defaults to all agents with stale rows)")
+  .option("--agent <id>", "Agent ID to re-embed memories for (defaults to all agents; add --stale-only to skip up-to-date rows)")
   .option("--stale-only", "Only re-embed memories with mismatched model tag")
   .option("--dry-run", "Show count without modifying")
   .option("--port <port>", "Harper HTTP port")
@@ -680,7 +680,7 @@ program
     if (agentId) {
       console.log(`Re-embedding memories for agent: ${agentId}`);
     } else {
-      console.log("Re-embedding memories for all agents with stale rows");
+      console.log("Re-embedding memories for all agents");
     }
     console.log(`Current model: ${currentModel}`);
     if (staleOnly) console.log("Mode: stale-only (skipping up-to-date memories)");

@@ -1816,7 +1816,7 @@ flair reembed
   usage: [options]
   options:
     --agent <id>
-      description: Agent ID to re-embed memories for (defaults to all agents with stale rows)
+      description: Agent ID to re-embed memories for (defaults to all agents; add --stale-only to skip up-to-date rows)
       attr: agent
     --stale-only
       description: Only re-embed memories with mismatched model tag
@@ -5308,8 +5308,8 @@ Usage: flair reembed [options]
 Re-generate embeddings for memories with stale or missing model tags
 
 Options:
-  --agent <id>       Agent ID to re-embed memories for (defaults to all agents
-                     with stale rows)
+  --agent <id>       Agent ID to re-embed memories for (defaults to all agents;
+                     add --stale-only to skip up-to-date rows)
   --stale-only       Only re-embed memories with mismatched model tag
   --dry-run          Show count without modifying
   --port <port>      Harper HTTP port
