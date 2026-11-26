@@ -30,10 +30,11 @@
  *
  * Throwaway HOMEs, ephemeral ports, the boot migration trigger omitted. The
  * Harper instance's base URLs are asserted to be 127.0.0.1 on ports other than
- * 9925 and 9926. Two cases point `--port` at a separate listener that
+ * 9925 and 9926. Three cases point `--port` at a separate listener that
  * advertises the re-embed capability: an unrecorded pair refuses and the
- * listener sees no Authorization header or PATCH, and a configured pair whose
- * HTTP port is that listener refuses for the ops port's proven HTTP port.
+ * listener sees no Authorization header or PATCH; a configured pair whose
+ * HTTP port is that listener refuses for the ops port's proven HTTP port; and
+ * an equal HTTP/ops port pair refuses before any request reaches it.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createServer, type Server } from "node:http";

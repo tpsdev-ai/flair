@@ -465,7 +465,7 @@ export type ReembedTargetRefusalReason =
   | { kind: "equal-ports" }
   | { kind: "unproven"; remedy: string | undefined };
 
-/** Picks the remedy for every target-pair refusal; one remedy per condition. */
+/** Picks the remedy for each ReembedTargetRefusalReason; one remedy per condition. (A conflict raised while resolving the target exits through the resolver's own error.) */
 export function reembedTargetRefusalRemedy(reason: ReembedTargetRefusalReason): string {
   switch (reason.kind) {
     case "one-sided":
@@ -492,8 +492,9 @@ export function reembedTargetRefusalRemedy(reason: ReembedTargetRefusalReason): 
  * HTTP port this run targets. This runs before any request to the HTTP port, so
  * every refusal precedes any PATCH. After the proof, the two endpoints'
  * reported instance identities are a second check: two different ids refuse.
- * `source` names where the target came from, so a proven-pair mismatch gets the
- * remedy for that source (flair#3128).
+ * `source` is the remedy classification (configuration-bound, named and
+ * unbound, or derived), so a proven-pair mismatch gets the remedy for that
+ * classification (flair#3128).
  */
 async function reembedTargetPairRefusal(
   target: { httpPort: number; opsPort: number },
