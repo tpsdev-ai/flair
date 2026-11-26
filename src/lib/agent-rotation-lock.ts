@@ -1,25 +1,31 @@
 /**
- * agent-rotation-lock.ts — one exclusive per-agent lock for
- * `flair agent rotate-key` (flair#3151).
+ * agent-rotation-lock.ts — a rotation lock for one agent in one keys directory,
+ * for `flair agent rotate-key` (flair#3151).
  *
- * Two rotations of the same agent used to interleave: each read the current
- * key, staged its own, sent the ops `update`, then renamed its staged key over
- * the current one. The stored public key could end up matching neither private
- * key on disk. This lock is taken BEFORE the current key is read and held
- * through the read-back check, the rename and the public-key write.
+ * Two rotations of one agent that use the same keys directory used to
+ * interleave: each read the current key, staged its own, sent the ops `update`,
+ * then renamed its staged key over the current one. The stored public key could
+ * end up matching neither private key on disk. The lock serializes rotations of
+ * one agent that use the same keys directory; it is taken BEFORE the current
+ * key is read and held through the read-back check, the rename and the
+ * public-key write. Rotations that use different keys directories do not share
+ * it, and a server-side compare-and-set for the Agent row is out of scope.
  *
  * Conventions follow src/lib/config-critical-section.ts:
  *   - the lock is an `O_EXCL` create of a file in the keys dir named for the
  *     agent; its content is `<pid> <iso> <hostname>` for diagnosis only and is
  *     never an authorization input (a blank or partial record refuses).
- *   - acquisition retries a bounded number of times, then refuses with a NAMED
- *     message that names the lock file and says to remove it only once no
- *     rotation of that agent is running.
+ *   - acquisition retries a bounded number of times, then refuses, if the lock
+ *     is still held after the retries, with a NAMED message that names the lock
+ *     file and says to remove it only once no rotation of that agent is running.
+ *   - a lock path that is not a regular file (a FIFO, a directory, a symlink)
+ *     is refused at once, before it is read.
  *   - there is no reclaim, no age-out and no pid-liveness shortcut: a lock left
  *     by a killed run keeps refusing until an operator removes it.
- *   - release removes only the lock file this run created: the device and inode
- *     recorded at create must match at release. A leaked lock refuses the next
- *     rotation; it never corrupts a key file.
+ *   - release removes the lock file when the file at that path still has the
+ *     device and inode recorded at create. That is an lstat then unlink, not an
+ *     atomic remove. A leaked lock refuses the next rotation; it never corrupts
+ *     a key file.
  *
  * Release runs from an explicit `release()` and from a `process.once("exit")`
  * listener registered with the lock. `flair agent rotate-key` exits with
@@ -31,6 +37,7 @@
  */
 import {
   closeSync,
+  constants,
   existsSync,
   fstatSync,
   lstatSync,
@@ -87,6 +94,53 @@ function parseLockHolder(raw: string | null): { pid: string; timestamp: string; 
   return { pid: m[1]!, timestamp: m[2]!, host: m[3]! };
 }
 
+/** What an existing entry at the lock path is, by lstat alone (never a read). */
+function lockPathKind(lockPath: string): string {
+  try {
+    const st = lstatSync(lockPath);
+    if (st.isFile()) return "regular";
+    if (st.isDirectory()) return "a directory";
+    if (st.isSymbolicLink()) return "a symlink";
+    if (st.isFIFO()) return "a FIFO";
+    if (st.isSocket()) return "a socket";
+    if (st.isCharacterDevice()) return "a character device";
+    if (st.isBlockDevice()) return "a block device";
+    return "a non-regular file";
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return "missing";
+    return `unreadable (${message(err)})`;
+  }
+}
+
+function nonRegularLockRefusal(lockPath: string, id: string, kind: string): string {
+  return (
+    `refusing to rotate agent '${id}': the rotation lock path ${lockPath} is not a regular file (lstat reports ${kind}). ` +
+    `Remove ${lockPath} only once no rotation of that agent is running.`
+  );
+}
+
+/** Read the diagnostic holder record from a regular lock file only. */
+function readLockHolder(lockPath: string): string | null {
+  let fd: number;
+  try {
+    fd = openSync(lockPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch {
+    return null;
+  }
+  try {
+    if (!fstatSync(fd).isFile()) return null;
+    return readFileSync(fd, "utf-8");
+  } catch {
+    return null;
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+      // already closed
+    }
+  }
+}
+
 function refusalLine(lockPath: string, id: string, holder: string | null): string {
   const parsed = parseLockHolder(holder);
   const who = parsed
@@ -136,6 +190,10 @@ export function acquireAgentRotationLock(opts: AgentRotationLockOptions): AgentR
           message: `could not create the rotation lock ${lockPath} (${message(err)}); no key file was changed`,
         };
       }
+      const kind = lockPathKind(lockPath);
+      if (kind !== "regular" && kind !== "missing") {
+        return { ok: false, message: nonRegularLockRefusal(lockPath, opts.id, kind) };
+      }
       if (i < retry.attempts - 1) sleepSync(retry.delayMs);
       continue;
     }
@@ -158,12 +216,11 @@ export function acquireAgentRotationLock(opts: AgentRotationLockOptions): AgentR
       }
     }
   }
-  let holder: string | null = null;
-  try {
-    holder = readFileSync(lockPath, "utf-8");
-  } catch {
-    holder = null;
+  const kind = lockPathKind(lockPath);
+  if (kind !== "regular" && kind !== "missing") {
+    return { ok: false, message: nonRegularLockRefusal(lockPath, opts.id, kind) };
   }
+  const holder = kind === "regular" ? readLockHolder(lockPath) : null;
   return { ok: false, message: refusalLine(lockPath, opts.id, holder) };
 }
 

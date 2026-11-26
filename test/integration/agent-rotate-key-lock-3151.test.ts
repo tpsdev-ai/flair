@@ -1,10 +1,11 @@
 // agent-rotate-key-lock-3151.test.ts — flair#3151 against a REAL Harper.
 //
-// Two `flair agent rotate-key` runs of ONE agent: the first stalls between the
-// ops update and the rename (env-gated pause). The second must wait within the
-// lock bound and then refuse, and after both finish the stored public key must
-// match the private key on disk. A second case proves rotations of DIFFERENT
-// agents do not block each other.
+// Two `flair agent rotate-key` runs of ONE agent: the first pauses after it
+// writes the public key (env-gated pause) and still holds the lock, so the
+// second must wait within the lock bound and then refuse; after both finish the
+// stored public key must match the private key on disk. A second case puts two
+// agents' keys in the SAME directory and proves agent-c's rotation finishes
+// while agent-b's is paused under its own lock.
 //
 // Build prerequisite: dist/resources/*.js (`bun run build`).
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
@@ -67,10 +68,15 @@ async function storedPublicKey(id: string): Promise<string | undefined> {
   return row?.publicKey;
 }
 
-/** Make a keys dir with one seeded private key and an Agent row for it. */
-function seedAgent(id: string): { keysDir: string; keyPath: string } {
+/** Make one temp root; the keys directory is shared by the agents seeded in it. */
+function makeRoot(): string {
   const root = mkdtempSync(join(tmpdir(), "flair-3151-lock-"));
   cleanup.push(() => rmSync(root, { recursive: true, force: true }));
+  return root;
+}
+
+/** Make a keys dir under `root` with one seeded private key for `id`. */
+function seedAgent(root: string, id: string): { keysDir: string; keyPath: string } {
   const keysDir = join(root, "keys");
   mkdirSync(keysDir, { recursive: true });
   const kp = nacl.sign.keyPair();
@@ -126,11 +132,11 @@ afterAll(async () => {
 }, HARPER_STOP_BUDGET_MS);
 
 describe("flair#3151 — rotate-key holds a per-agent lock from key read to install", () => {
-  test("(a) a second rotation of the same agent refuses while the first is stalled; the final key matches the stored public key", async () => {
+  test("(a) a second rotation of the same agent refuses while the first is paused; the lock is still held after the public-key write", async () => {
     const id = "agent-a";
     const home = mkdtempSync(join(tmpdir(), "flair-3151-home-"));
     cleanup.push(() => rmSync(home, { recursive: true, force: true }));
-    const { keysDir, keyPath } = seedAgent(id);
+    const { keysDir, keyPath } = seedAgent(makeRoot(), id);
     const seed = readFileSync(keyPath);
     await ops({
       operation: "insert",
@@ -141,10 +147,18 @@ describe("flair#3151 — rotate-key holds a per-agent lock from key read to inst
       }],
     });
     const lockPath = join(keysDir, `${id}.rotate-key.lock`);
+    const pubPath = join(keysDir, `${id}.pub`);
     const base = join(home, "pause-a");
 
     const first = spawnRotate(id, keysDir, home, { FLAIR_TEST_ROTATE_KEY_PAUSE: base });
     await waitForFile(`${base}.ready`, 30_000);
+
+    // The pause is AFTER the public-key write: the lock is still held and the
+    // .pub file already carries the key Flair stored.
+    expect(existsSync(lockPath)).toBe(true);
+    const storedAtPause = await storedPublicKey(id);
+    expect(typeof storedAtPause).toBe("string");
+    expect(b64url(readFileSync(pubPath))).toBe(storedAtPause!);
 
     const second = spawnRotate(id, keysDir, home);
     const secondCode = await second.proc.exited;
@@ -165,11 +179,13 @@ describe("flair#3151 — rotate-key holds a per-agent lock from key read to inst
     expect(existsSync(lockPath)).toBe(false);
   }, 180_000);
 
-  test("(b) rotations of different agents do not block each other", async () => {
+  test("(b) two agents' keys in the SAME directory: agent-c rotates while agent-b holds its paused lock", async () => {
     const home = mkdtempSync(join(tmpdir(), "flair-3151-home-"));
     cleanup.push(() => rmSync(home, { recursive: true, force: true }));
-    const stalled = seedAgent("agent-b");
-    const other = seedAgent("agent-c");
+    const root = makeRoot();
+    const stalled = seedAgent(root, "agent-b");
+    const other = seedAgent(root, "agent-c");
+    expect(other.keysDir).toBe(stalled.keysDir);
     for (const [id, keyPath] of [["agent-b", stalled.keyPath], ["agent-c", other.keyPath]] as const) {
       await ops({
         operation: "insert",
@@ -184,8 +200,9 @@ describe("flair#3151 — rotate-key holds a per-agent lock from key read to inst
 
     const first = spawnRotate("agent-b", stalled.keysDir, home, { FLAIR_TEST_ROTATE_KEY_PAUSE: base });
     await waitForFile(`${base}.ready`, 30_000);
+    expect(existsSync(join(stalled.keysDir, "agent-b.rotate-key.lock"))).toBe(true);
 
-    // agent-c's rotation completes while agent-b's is stalled under its lock.
+    // agent-c's rotation FINISHES while agent-b's is paused under its lock.
     const second = spawnRotate("agent-c", other.keysDir, home);
     const secondCode = await second.proc.exited;
     expect(secondCode, (await second.stderr).slice(0, 800)).toBe(0);

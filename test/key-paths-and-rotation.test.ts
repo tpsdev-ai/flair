@@ -947,4 +947,24 @@ describe("agent rotate-key (real command, POSIX)", () => {
     expect(existsSync(lockPath)).toBe(true);
   }, 20_000);
 
+  it("with the lock already held, a rotation reads no key and sends no request", async () => {
+    const oldSeed = seedCurrentKey();
+    const lockPath = join(keysDir, `${id}.rotate-key.lock`);
+    writeFileSync(lockPath, `999999 ${new Date().toISOString()} host-a\n`);
+    let keyRead = false;
+    setAgentKeyFileTestHooks({ beforeKeyRead: () => { keyRead = true; } });
+
+    const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("another rotation of agent");
+    expect(result.stderr).toContain(lockPath);
+    expect(keyRead).toBe(false);
+    expect(requestCount).toBe(0);
+    expect(readFileSync(privPath).equals(oldSeed)).toBe(true);
+    expect(stagedOf(keysDir)).toEqual([]);
+    expect(backupsOf(keysDir, id)).toEqual([]);
+    expect(existsSync(lockPath)).toBe(true);
+  }, 20_000);
+
 });

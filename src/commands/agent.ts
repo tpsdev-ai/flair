@@ -723,10 +723,12 @@ export function register(program: Command): void {
         }
         throw err;
       }
-      // flair#3151 — one exclusive per-agent lock, taken before the current
-      // key is read and held through the read-back check, the rename and the
-      // public-key write. A second rotation of this agent refuses here;
-      // rotations of different agents use their own lock file.
+      // flair#3151 — the lock serializes rotations of this agent that use this
+      // keys directory. It is taken before the current key is read and held
+      // through the read-back check, the rename and the public-key write. A
+      // second rotation of this agent in this keys directory retries and, if the
+      // lock is still held, refuses here; a rotation in a different keys
+      // directory uses a different lock file.
       const lockResult = acquireAgentRotationLock({ id, keysDir });
       if (lockResult.ok === false) {
         console.error(`Error: ${lockResult.message}`);
@@ -835,8 +837,6 @@ export function register(program: Command): void {
           process.exit(1);
         }
 
-        await agentRotationTestPause();
-
         // Replace the current key by rename. A failed rename keeps the staged file.
         try {
           replaceAgentKeyFile(currentPrivPath, stagedPrivPath);
@@ -856,6 +856,8 @@ export function register(program: Command): void {
           process.exit(1);
         }
         console.log(`New private key written: ${currentPrivPath} ✓`);
+
+        await agentRotationTestPause();
 
         // Verify new key works
         console.log(`Verifying new Ed25519 auth...`);
