@@ -1,6 +1,7 @@
 /**
- * A non-2xx ops API response is classified internally and reported as a fixed,
- * code-defined description; Harper's response text is never echoed (issue
+ * `callOpsApi` classifies a non-2xx ops API response internally and reports it
+ * as a fixed, code-defined description; its thrown message omits Harper's
+ * response text (issue
  * #3144). The echo stubs build their answer from the request they actually
  * received, so the echo is the real submitted value; the classification stubs
  * return fixed responses. Every echo case checks the thrown message directly
