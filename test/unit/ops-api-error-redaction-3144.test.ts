@@ -44,12 +44,14 @@ type Mode =
 let server: ReturnType<typeof Bun.serve>;
 let mode: Mode;
 let statusOverride: number | undefined;
+let refusalAffix: "prefix" | "suffix" | undefined;
 /** The last credential the stub actually received, for the assertions. */
 let received: { password?: string; authorization?: string; payload?: string };
 
 beforeEach(() => {
   mode = "unclassified";
   statusOverride = undefined;
+  refusalAffix = undefined;
   received = {};
   server = Bun.serve({
     port: 0,
@@ -136,6 +138,10 @@ beforeEach(() => {
           return new Response(`invalid password: ${password}`, { status: 400 });
         default:
           payload = { error: "some unclassified refusal" };
+      }
+      if (refusalAffix && typeof (payload as { error?: unknown }).error === "string") {
+        const refusal = (payload as { error: string }).error;
+        payload = { error: refusalAffix === "prefix" ? `context: ${refusal}` : `${refusal} (context)` };
       }
       return new Response(JSON.stringify(payload), { status: statusOverride ?? status, headers: { "content-type": "application/json" } });
     },
@@ -235,6 +241,24 @@ describe("callOpsApi fixed error descriptions (#3144)", () => {
     expectStatusAndOperation(error.message, status);
     expect(error.message).toContain("the ops API refused the request (details withheld)");
   });
+
+  test.each([
+    { refusal: "already-exists" as const, status: 409 },
+    { refusal: "not-permitted" as const, status: 403 },
+    { refusal: "authentication-failed" as const, status: 401 },
+  ].flatMap((entry) => (["prefix", "suffix"] as const).map((affix) => ({ ...entry, affix }))))(
+    "withholds a complete $refusal refusal with a $affix",
+    async ({ refusal, status, affix }) => {
+      mode = refusal;
+      refusalAffix = affix;
+      const error = await thrownError(addUserBody());
+
+      expect(error).toBeInstanceOf(OpsApiError);
+      expect((error as OpsApiError).category).toBeNull();
+      expectStatusAndOperation(error.message, status);
+      expect(error.message).toBe(`Ops API call failed (${status}) for 'add_user': the ops API refused the request (details withheld)`);
+    },
+  );
 
   test("withholds a 409 duplicate answering list_users", async () => {
     mode = "already-exists";
@@ -401,55 +425,24 @@ describe("callOpsApi fixed error descriptions (#3144)", () => {
     expect(message).not.toContain("withheld");
   });
 
-  test("drives the alter_user fallback from the classification, not the message text", async () => {
-    const root = mkdtempSync(join(tmpdir(), "flair-unit-3144-"));
-    const originalCwd = process.cwd();
-    const calls: string[] = [];
-    server.stop(true);
-    server = Bun.serve({
-      port: 0,
-      hostname: "127.0.0.1",
-      async fetch(req) {
-        const url = new URL(req.url);
-        if (url.pathname === "/FederationPair") {
-          return new Response(JSON.stringify({ error: "instanceId and publicKey required" }), { status: 400 });
-        }
-        const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
-        calls.push(String(body.operation));
-        switch (body.operation) {
-          case "list_users":
-            return new Response(JSON.stringify([
-              { username: USER, role: { permission: { super_user: false } } },
-            ]), { status: 200 });
-          case "deploy_component":
-            return new Response(JSON.stringify({ ok: true }), { status: 200 });
-          case "add_user":
-            return new Response(JSON.stringify({ error: "User admin already exists" }), { status: 409 });
-          case "alter_user":
-            return new Response(JSON.stringify({ ok: true }), { status: 200 });
-          default:
-            return new Response(JSON.stringify({ error: "unknown" }), { status: 400 });
-        }
-      },
+  test("propagates an already-exists refusal when list_users has no admin", async () => {
+    const run = await provisionAgainst(() => new Response(
+      JSON.stringify({ error: "User admin already exists" }),
+      { status: 409, headers: { "content-type": "application/json" } },
+    ));
+
+    expect(run.error).toBeInstanceOf(OpsApiError);
+    expect(run.error).toMatchObject({
+      category: "already-exists",
+      status: 409,
+      operation: "add_user",
+      message: "Ops API call failed (409) for 'add_user': the user already exists",
     });
-    try {
-      writeFileSync(join(root, "package.json"), "{}");
-      writeFileSync(join(root, "config.yaml"), "restart: rolling\n");
-      mkdirSync(join(root, "dist"));
-      mkdirSync(join(root, "schemas"));
-      for (const name of ["LICENSE", "README.md", "SECURITY.md"]) writeFileSync(join(root, name), "fixture\n");
-      chdir(root);
-      const origin = `http://127.0.0.1:${server.port}`;
-      const principal = await provisionFabric(origin, origin, USER, PASS, "flair-admin-3144");
-      expect(principal).toEqual({ username: "admin", password: "flair-admin-3144", created: true });
-      expect(calls).toEqual(["list_users", "deploy_component", "add_user", "alter_user"]);
-    } finally {
-      chdir(originalCwd);
-      rmSync(root, { recursive: true, force: true });
-    }
+    expect(run.calls).toEqual(["list_users", "deploy_component", "add_user"]);
+    expect(run.calls).not.toContain("alter_user");
   });
 
-  async function provisionAgainst(addUserResponse: () => Response): Promise<{ calls: string[]; message: string }> {
+  async function provisionAgainst(addUserResponse: () => Response): Promise<{ calls: string[]; message: string; error: unknown }> {
     const root = mkdtempSync(join(tmpdir(), "flair-unit-3144-"));
     const originalCwd = process.cwd();
     const calls: string[] = [];
@@ -481,6 +474,7 @@ describe("callOpsApi fixed error descriptions (#3144)", () => {
       },
     });
     let message = "";
+    let error: unknown;
     try {
       writeFileSync(join(root, "package.json"), "{}");
       writeFileSync(join(root, "config.yaml"), "restart: rolling\n");
@@ -492,9 +486,10 @@ describe("callOpsApi fixed error descriptions (#3144)", () => {
       try {
         await provisionFabric(origin, origin, USER, PASS, "flair-admin-3144");
       } catch (err: unknown) {
+        error = err;
         message = err instanceof Error ? err.message : String(err);
       }
-      return { calls, message };
+      return { calls, message, error };
     } finally {
       chdir(originalCwd);
       rmSync(root, { recursive: true, force: true });

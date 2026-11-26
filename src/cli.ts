@@ -4006,7 +4006,7 @@ async function assertSingleInstanceRowAfterWrite(endpoint: OpsEndpoint, expected
 // creates the super_user admin account.
 
 /**
- * Categories of ops API refusal that callers act on. `callOpsApi` reads the
+ * Categories of ops API refusal that select fixed descriptions. `callOpsApi` reads the
  * parsed body's `error` string, or `message` only when the body has no `error`
  * key at all, classifies it only when the response's status (and, for
  * already-exists, operation) is the one that category describes, and throws a
@@ -4091,8 +4091,7 @@ function classifyOpsApiError(
     const match = pattern.exec(value);
     if (match === null) continue;
     if (category === "already-exists") {
-      // The fallback sets THIS user's password, so the captured name must be the
-      // username this request submitted; any other name is unclassified.
+      // Match the submitted username, not another user named by the response.
       if (typeof body.username !== "string" || match[1] !== body.username) return null;
     }
     return category;

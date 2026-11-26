@@ -452,13 +452,20 @@ describe("provisionFabric — full happy path", () => {
       return new Response(JSON.stringify({ error: "instanceId and publicKey required" }), { status: 400 });
     });
 
-    await expect(provisionFabric(
+    const error = await provisionFabric(
       TEST_OPTS.target,
       TEST_OPTS.opsTarget,
       TEST_OPTS.clusterAdminUser,
       TEST_OPTS.clusterAdminPass,
       TEST_OPTS.flairAdminPass,
-    )).rejects.toThrow("the cluster is read-only");
+    ).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(OpsApiError);
+    expect(error).toMatchObject({
+      status: 500,
+      operation: "add_user",
+      category: null,
+      message: "Ops API call failed (500) for 'add_user': the ops API refused the request (details withheld)",
+    });
     expect(alterUserCalled).toBe(false);
   });
 
@@ -807,7 +814,7 @@ describe("callOpsApi on a real Harper (#3144)", () => {
     expect(opsError.message).not.toContain(basicHeader);
   }, 30_000);
 
-  test("an add_user failure carries the fixed description, and the fallback branch is selected", async () => {
+  test("a duplicate add_user failure carries the fixed description", async () => {
     const err = await callOpsApi(harper.opsURL, {
       operation: "add_user", username: DUPLICATE_USER, password: SUBMITTED_PASSWORD, role: "super_user", active: true,
     }, "admin", "test123").then(
@@ -823,7 +830,7 @@ describe("callOpsApi on a real Harper (#3144)", () => {
     expect(message).not.toContain(DUPLICATE_USER);
     expect(message).not.toContain(SUBMITTED_PASSWORD);
     expect(message).not.toContain(Buffer.from(SUBMITTED_PASSWORD).toString("base64"));
-    expect(err instanceof OpsApiError && err.category === "already-exists", "the alter_user fallback is selected by this category").toBe(true);
+    expect(err instanceof OpsApiError && err.category === "already-exists").toBe(true);
   }, 30_000);
 });
 
