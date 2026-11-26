@@ -9,7 +9,7 @@
 import { Command } from "commander";
 import { defaultKeysDir, resolveAdminUser, addAdminPassOptions } from "../lib/auth-resolve.js";
 import * as render from "../render.js";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { writeFilesAtomically } from "../lib/atomic-write.js";
 
 import { join, resolve } from "node:path";
@@ -40,6 +40,10 @@ const AGENT_REQUIRED_FIELDS = ["id", "name", "publicKey", "createdAt"] as const;
 const MEMORY_REQUIRED_FIELDS = ["id", "agentId", "content", "createdAt"] as const;
 const SOUL_REQUIRED_FIELDS = ["id", "agentId", "key", "value", "createdAt"] as const;
 const GRANT_REQUIRED_FIELDS = ["id", "ownerId", "granteeId", "scope"] as const;
+
+export function exportFileMode(outputPath: string, platform: NodeJS.Platform = process.platform): string {
+  return platform === "win32" ? "mode bits are not enforced on Windows" : (statSync(outputPath).mode & 0o7777).toString(8);
+}
 
 function hasRequiredStringFields(value: unknown, fields: readonly string[]): value is Record<string, unknown> {
   return !!value
@@ -154,8 +158,7 @@ addAdminPassOptions(
     const fileMode = opts.includeKey ? 0o600 : 0o644;
     const content = JSON.stringify(exportData, null, 2);
     if (opts.includeKey) {
-      // An existing output file's wider mode never applies to the new contents:
-      // the bytes go to a 0600 temp file and are renamed over the target.
+      // Stage at 0600 to avoid retaining an existing output file's wider mode.
       writeFilesAtomically([{ path: outputPath, content, mode: 0o600 }]);
     } else {
       writeFileSync(outputPath, content, { mode: fileMode });
@@ -169,7 +172,7 @@ addAdminPassOptions(
       ? `${render.wrap(render.c.magenta, "included")} ${render.wrap(render.c.red, "(UNENCRYPTED — protect this file)")}`
       : render.wrap(render.c.dim, "not included");
     console.log(render.kv("Key", keyText));
-    console.log(render.kv("Mode", `${fileMode.toString(8)} ${render.wrap(render.c.dim, `(${opts.includeKey ? "owner-only" : "standard"})`)}`));
+    console.log(render.kv("Mode", exportFileMode(outputPath)));
     console.log(render.kv("Output", render.wrap(render.c.dim, outputPath)));
   });
 

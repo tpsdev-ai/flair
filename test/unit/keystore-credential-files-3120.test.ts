@@ -98,6 +98,33 @@ test("interleaved first uses return the stored passphrase", () => {
   expect(readdirSync(keysDir())).toEqual([".passphrase"]);
 });
 
+for (const code of ["ENOTSUP", "ENOSYS"]) {
+  test(`passphrase publication refuses ${code} and removes its stage`, () => {
+    let staged = "";
+    expect(() => getPassphrase({ link: (source, destination) => {
+      staged = String(source);
+      expect(destination).toBe(join(keysDir(), ".passphrase"));
+      expect(readFileSync(staged, "utf8")).not.toBe("");
+      throw Object.assign(new Error("unsupported link"), { code });
+    } })).toThrow(`keys dir ${keysDir()} does not support hard links; set FLAIR_KEY_PASSPHRASE or use a keys dir on a volume that does`);
+    expect(staged).not.toBe("");
+    expect(existsSync(staged)).toBe(false);
+    expect(readdirSync(keysDir())).toEqual([]);
+  });
+}
+
+for (const content of ["", " \n\t"]) {
+  test(`an empty trimmed passphrase (${JSON.stringify(content)}) refuses seed encryption`, () => {
+    mkdirSync(keysDir(), { recursive: true, mode: 0o700 });
+    const pp = join(keysDir(), ".passphrase");
+    writeFileSync(pp, content, { mode: 0o600 });
+    expect(statSync(pp).mode & 0o777).toBe(0o600);
+    expect(() => keystore.setPrivateKeySeed("instance-empty", new Uint8Array(32))).toThrow(`passphrase file ${pp} is empty`);
+    expect(readFileSync(pp, "utf8")).toBe(content);
+    expect(readdirSync(keysDir())).toEqual([".passphrase"]);
+  });
+}
+
 test("a wide passphrase is refused without reading bytes", () => {
   mkdirSync(keysDir(), { recursive: true });
   const pp = join(keysDir(), ".passphrase");

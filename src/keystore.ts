@@ -57,6 +57,7 @@ function passphrasePath(): string {
 
 interface PassphraseHooks {
   beforePublish?: () => void;
+  link?: typeof linkSync;
   fstat?: (fd: number) => Stats;
   read?: (source: string | number) => string;
 }
@@ -68,8 +69,13 @@ interface PassphraseHooks {
  */
 function readPassphraseFile(pp: string, hooks: PassphraseHooks): string {
   const read = hooks.read ?? ((source: string | number) => readFileSync(source, "utf-8"));
+  const checked = (source: string | number): string => {
+    const passphrase = read(source).trim();
+    if (!passphrase) throw new Error(`passphrase file ${pp} is empty`);
+    return passphrase;
+  };
   if (process.platform === "win32") {
-    return read(pp).trim();
+    return checked(pp);
   }
   const fd = openSync(pp, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
@@ -80,7 +86,7 @@ function readPassphraseFile(pp: string, hooks: PassphraseHooks): string {
           `run chmod 600 ${pp} to make it owner-only`,
       );
     }
-    return read(fd).trim();
+    return checked(fd);
   } finally {
     closeSync(fd);
   }
@@ -117,11 +123,15 @@ function getPassphrase(hooks: PassphraseHooks = {}): string {
   writeFilesAtomically([{ path: staged, content: generated, mode: 0o600 }]);
   try {
     hooks.beforePublish?.();
-    // Preserve a competing passphrase; reread it on conflict.
+    // Link the complete file without replacing a competing passphrase; reread on conflict.
     try {
-      linkSync(staged, pp);
+      (hooks.link ?? linkSync)(staged, pp);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") throw error;
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code === "ENOTSUP" || code === "ENOSYS") {
+        throw new Error(`keys dir ${dir} does not support hard links; set FLAIR_KEY_PASSPHRASE or use a keys dir on a volume that does`);
+      }
+      if (code !== "EEXIST") throw error;
       return readPassphraseFile(pp, hooks);
     }
     return generated;

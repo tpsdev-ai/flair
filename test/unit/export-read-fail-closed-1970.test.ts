@@ -12,6 +12,7 @@ import { pathToFileURL } from "node:url";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
 import { nodeBin } from "../helpers/node-runtime.js";
+import { exportFileMode } from "../../src/commands/export.js";
 
 const CHILD_DEADLINE_MS = 20_000;
 const CLI_PATH = join(import.meta.dirname ?? __dirname, "..", "..", "dist", "cli.js");
@@ -54,6 +55,10 @@ describe("flair export: failed reads never create a complete-looking file (#1970
     scratch = mkdtempSync(join(tmpdir(), "flair-export-1970-home-"));
   }, 120_000);
   afterAll(() => { if (scratch) rmSync(scratch, { recursive: true, force: true }); });
+
+  test("Windows mode output states that mode bits are not enforced", () => {
+    expect(exportFileMode(join(scratch, "absent.json"), "win32")).toBe("mode bits are not enforced on Windows");
+  });
 
   test("a 5xx Agent read reports the failure and writes no file", async () => {
     const output = join(scratch, "failed-agent-500.json");
@@ -130,7 +135,7 @@ describe("flair export: failed reads never create a complete-looking file (#1970
     chmodSync(output, 0o644);
     const inodeBefore = statSync(output).ino;
 
-    const { code, stderr } = await runCli(
+    const { code, stdout, stderr } = await runCli(
       ["export", "agent-a", "--url", URL, "--admin-pass", "test-pass-1970", "--output", output, "--include-key", "--keys-dir", keysDir],
       { MOCK_AGENT_STATUS: "200", MOCK_AGENT_ID: "agent-a" }, scratch,
     );
@@ -140,6 +145,8 @@ describe("flair export: failed reads never create a complete-looking file (#1970
     const st = statSync(output);
     expect(data.privateKey).toBe("test-key-material");
     expect(st.mode & 0o777).toBe(0o600);
+    expect(stdout).toMatch(/Mode\s+600\b/);
+    expect(stdout).not.toContain("owner-only");
     // The replacement has a new inode.
     expect(st.ino).not.toBe(inodeBefore);
   }, 25_000);
@@ -177,6 +184,21 @@ describe("flair export: failed reads never create a complete-looking file (#1970
     expect(data.agent.id).toBe("agent-a");
     expect(st.mode & 0o777).toBe(0o644);
     expect(st.ino).toBe(inodeBefore);
+  }, 25_000);
+
+  test("an export without --include-key reports and retains an existing 0600 mode", async () => {
+    const output = join(scratch, "existing-private.json");
+    writeFileSync(output, "old", { mode: 0o600 });
+    const inodeBefore = statSync(output).ino;
+    const { code, stdout } = await runCli(
+      ["export", "agent-a", "--url", URL, "--admin-pass", "test-pass-1970", "--output", output],
+      { MOCK_AGENT_STATUS: "200", MOCK_AGENT_ID: "agent-a" }, scratch,
+    );
+    expect(code).toBe(0);
+    expect(statSync(output).mode & 0o777).toBe(0o600);
+    expect(statSync(output).ino).toBe(inodeBefore);
+    expect(stdout).toMatch(/Mode\s+600\b/);
+    expect(stdout).not.toContain("standard");
   }, 25_000);
 
   for (const [name, path] of [["memories", "/Memory/"], ["souls", "/Soul/"], ["grants", "/MemoryGrant/"]] as const) {
