@@ -80,8 +80,7 @@ export function setAgentKeyFileTestHooks(hooks: AgentKeyFileTestHooks | undefine
  * still names the file this grant created; a path swapped between that check
  * and the unlink can still be removed, which a POSIX unlink by name cannot
  * prevent. On POSIX the keys directory is owner-only (0700, or narrower if it
- * already was), so only its owning user or a privileged process can make that
- * swap.
+ * already was).
  */
 export interface KeyFileIdentity {
   dev: number;

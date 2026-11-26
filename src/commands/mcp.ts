@@ -399,15 +399,15 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
     const config = buildMcpGrantConfig({ name, resource, keyFile: privPath });
     return { entry, config };
   } catch (error) {
-    // Remove the key files this call created on failure. File identity decides
+    // On failure, try to remove the key files this call created. File identity decides
     // eligibility at the check: a path is removed (by path) only if, when
     // checked, it still names the file this grant created. A path replaced
     // between that check and the unlink can still be removed; a POSIX unlink by
     // name cannot close that window. On POSIX the keys directory is owner-only
-    // (0700, or narrower if it already was), so only its owning user or a
-    // privileged process can make that swap. A path that fails the check, or
-    // whose unlink fails, is named in the error; a created file moved to
-    // another name is not tracked.
+    // (0700, or narrower if it already was). A path that no longer names the
+    // created file, or whose check or unlink fails with an error other than
+    // ENOENT, is named in the error; a created file moved to another name is
+    // not tracked.
     if (createdKeyFiles.length > 0) {
       const leftBehind: string[] = [];
       for (const created of createdKeyFiles) {
