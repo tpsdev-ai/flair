@@ -122,6 +122,8 @@ function getPassphrase(hooks: PassphraseHooks = {}): string {
   const generated = randomBytes(32).toString("base64url");
   const staged = join(dir, `.passphrase.${process.pid}.${randomBytes(8).toString("hex")}.tmp`);
   writeFilesAtomically([{ path: staged, content: generated, mode: 0o600 }]);
+  let passphrase = generated;
+  let failure: { error: unknown } | undefined;
   try {
     hooks.beforePublish?.();
     // Link the complete file without replacing a competing passphrase; reread on conflict.
@@ -135,12 +137,24 @@ function getPassphrase(hooks: PassphraseHooks = {}): string {
             "if the keys dir's volume does not support hard links, set FLAIR_KEY_PASSPHRASE or use a keys dir on a volume that does",
         );
       }
-      return readPassphraseFile(pp, hooks);
+      passphrase = readPassphraseFile(pp, hooks);
     }
-    return generated;
-  } finally {
-    unlinkSync(staged);
+  } catch (error) {
+    failure = { error };
   }
+  try {
+    unlinkSync(staged);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      const cleanup = `could not remove staged passphrase ${staged} (${(error as NodeJS.ErrnoException)?.code}: ${(error as Error).message})`;
+      throw new Error(
+        `${failure ? (failure.error as Error).message : `passphrase at ${pp}`}; ${cleanup}`,
+        { cause: failure ? failure.error : error },
+      );
+    }
+  }
+  if (failure) throw failure.error;
+  return passphrase;
 }
 
 /**

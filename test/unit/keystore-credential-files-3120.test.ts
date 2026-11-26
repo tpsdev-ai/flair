@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, fstatSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, fstatSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getPassphrase, keystore, keyPath, keysDir } from "../../src/keystore.ts";
 import { tempDir } from "../helpers/temp-dir.ts";
@@ -115,6 +115,44 @@ for (const code of ["ENOTSUP", "ENOSYS", "EPERM", "EXDEV"]) {
     expect(readdirSync(keysDir())).toEqual([]);
   });
 }
+
+test("passphrase publication retains ENOENT after its stage is absent", () => {
+  let staged = "";
+  const pp = join(keysDir(), ".passphrase");
+  expect(() => getPassphrase({ link: (source) => {
+    staged = String(source);
+    unlinkSync(staged);
+    throw Object.assign(new Error("link source absent"), { code: "ENOENT" });
+  } })).toThrow(`could not publish the generated passphrase at ${pp} (ENOENT: link source absent)`);
+  expect(staged).not.toBe("");
+  expect(existsSync(pp)).toBe(false);
+  expect(existsSync(staged)).toBe(false);
+  expect(readdirSync(keysDir())).toEqual([]);
+});
+
+test("passphrase publication reports link and cleanup failures together", () => {
+  let staged = "";
+  const pp = join(keysDir(), ".passphrase");
+  let failure: Error | undefined;
+  try {
+    getPassphrase({ link: (source) => {
+      staged = String(source);
+      unlinkSync(staged);
+      mkdirSync(staged);
+      throw Object.assign(new Error("link refused"), { code: "EXDEV" });
+    } });
+  } catch (error) {
+    failure = error as Error;
+  }
+  expect(staged).not.toBe("");
+  expect(failure).toBeInstanceOf(Error);
+  expect(failure!.message).toContain(`could not publish the generated passphrase at ${pp} (EXDEV: link refused)`);
+  expect(failure!.message).toContain(`could not remove staged passphrase ${staged} (`);
+  expect(failure!.message).toMatch(/\((?:EPERM|EISDIR):/);
+  expect((failure!.cause as Error).message).toContain(`could not publish the generated passphrase at ${pp} (EXDEV: link refused)`);
+  expect(existsSync(pp)).toBe(false);
+  expect(statSync(staged).isDirectory()).toBe(true);
+});
 
 for (const content of ["", " \n\t"]) {
   test(`an empty trimmed passphrase (${JSON.stringify(content)}) refuses seed encryption`, () => {
