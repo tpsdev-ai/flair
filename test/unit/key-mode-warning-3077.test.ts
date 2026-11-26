@@ -7,8 +7,7 @@
  * checked and its target is not read for a mode. Neither command changes a
  * key file's bytes or mode.
  *
- * Each case runs the real CLI from source on a throwaway HOME; status talks to
- * an in-process mock of /Health and /HealthDetail so no instance is needed.
+ * Cases run the source CLI on a throwaway HOME with fixture health responses.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
@@ -23,7 +22,6 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { childOverranDeadline } from "../helpers/child-deadline.js";
@@ -34,8 +32,7 @@ const CLI = join(__dirname, "..", "..", "src", "cli.ts");
 const POSIX_ONLY = process.platform === "win32";
 
 let scratch: string;
-let server: Server;
-let url = "";
+const url = "http://127.0.0.1:19999";
 
 function makeHome(name: string): string {
   const home = join(scratch, name);
@@ -51,10 +48,22 @@ function writeKey(home: string, id: string, mode: number): string {
 }
 
 /** Async on purpose: the mock instance answers on this process's event loop. */
-function runCli(args: string[], home: string): Promise<{ output: string; status: number | null }> {
+function runCli(args: string[], home: string, windows = false): Promise<{ output: string; status: number | null }> {
+  const preload = join(home, "health-fixture.cjs");
+  writeFileSync(preload, `${windows ? 'Object.defineProperty(process, "platform", { value: "win32" });' : ""}
+    globalThis.fetch = async (input) => {
+      const target = String(input);
+      if ((target.startsWith(${JSON.stringify(url)}) || target.startsWith("https://remote.example")) && /\\/Health(?:Detail)?$/.test(target)) {
+        return new Response(JSON.stringify({ ok: true, version: "0.0.0", pid: 1, uptimeSeconds: 1, warnings: [],
+          agents: { total: 1, names: ["agent-a"], perAgent: [{ id: "agent-a", memoryCount: 0 }] } }),
+          { headers: { "Content-Type": "application/json" } });
+      }
+      throw new Error("offline fixture");
+    };
+  `);
   const startedAt = Date.now();
-  const child = spawn("bun", [CLI, ...args], {
-    env: { HOME: home, PATH: process.env.PATH ?? "", TERM: "dumb", TMPDIR: tmpdir() },
+  const child = spawn("bun", ["--preload", preload, CLI, ...args], {
+    env: { HOME: home, USERPROFILE: home, PATH: process.env.PATH ?? "", TERM: "dumb", TMPDIR: tmpdir() },
     timeout: 30_000,
     killSignal: "SIGTERM",
     stdio: ["ignore", "pipe", "pipe"],
@@ -83,29 +92,11 @@ function runCli(args: string[], home: string): Promise<{ output: string; status:
   });
 }
 
-beforeAll(async () => {
+beforeAll(() => {
   scratch = mkdtempSync(join(tmpdir(), "flair-3077-key-mode-"));
-  server = createServer((req, res) => {
-    if (req.url === "/Health") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, version: "0.0.0" }));
-      return;
-    }
-    if (req.url === "/HealthDetail") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ version: "0.0.0", pid: 1, uptimeSeconds: 1, warnings: [] }));
-      return;
-    }
-    res.writeHead(404, { "Content-Type": "application/json" });
-    res.end("{}");
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  url = `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
 });
 
-afterAll(async () => {
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+afterAll(() => {
   rmSync(scratch, { recursive: true, force: true });
 });
 
@@ -129,9 +120,11 @@ describe("agent key file modes are reported by doctor and status", () => {
 
     expect(readFileSync(wide, "utf8")).toBe("seed-agent-a-3077");
     expect(readFileSync(narrow, "utf8")).toBe("seed-agent-b-3077");
+    expect(readFileSync(group, "utf8")).toBe("seed-agent-c-3077");
     expect(readlinkSync(link)).toBe(narrow);
     expect(statSync(wide).mode & 0o777).toBe(0o644);
     expect(statSync(narrow).mode & 0o777).toBe(0o600);
+    expect(statSync(group).mode & 0o777).toBe(0o640);
   }, 60_000);
 
   test.skipIf(POSIX_ONLY)("status prints the same warnings one line each and leaves the files alone", async () => {
@@ -154,8 +147,10 @@ describe("agent key file modes are reported by doctor and status", () => {
 
     expect(readFileSync(wide, "utf8")).toBe("seed-agent-a-3077");
     expect(readFileSync(narrow, "utf8")).toBe("seed-agent-b-3077");
+    expect(readFileSync(group, "utf8")).toBe("seed-agent-c-3077");
     expect(statSync(wide).mode & 0o777).toBe(0o644);
     expect(statSync(narrow).mode & 0o777).toBe(0o600);
+    expect(statSync(group).mode & 0o777).toBe(0o640);
   }, 60_000);
 
   test.skipIf(POSIX_ONLY)("doctor says nothing about a 0600 key", async () => {
@@ -177,3 +172,111 @@ describe("agent key file modes are reported by doctor and status", () => {
     expect(output).not.toContain("agent key file");
   }, 60_000);
 });
+
+
+test.skipIf(POSIX_ONLY)("valid node-shaped id without a public sibling warns in doctor and status", async () => {
+  const home = makeHome("node-shaped");
+  const key = writeKey(home, "flair_deadbeef", 0o644);
+  const invalid = writeKey(home, "invalid.id", 0o644);
+  for (const args of [["doctor"], ["status", "--url", url]]) {
+    const { output } = await runCli(args, home);
+    expect(output).toContain(`agent key file ${key} has mode 0644`);
+    expect(output).not.toContain(`agent key file ${invalid}`);
+  }
+}, 60_000);
+
+test.skipIf(POSIX_ONLY)("status retains host warnings with an agent filter and in deep output", async () => {
+  const home = makeHome("agent-filter");
+  const key = writeKey(home, "agent-a", 0o644);
+  for (const args of [["status", "--url", url, "--agent", "agent-a"], ["status", "--url", url, "deep"]]) {
+    const { output, status } = await runCli(args, home);
+    expect(status).toBe(0);
+    expect(output).toContain(`agent key file ${key} has mode 0644`);
+  }
+}, 60_000);
+
+test.skipIf(POSIX_ONLY)("unreachable local status renders host warnings in plain and deep output", async () => {
+  const home = makeHome("unreachable");
+  const key = writeKey(home, "agent-a", 0o644);
+  for (const tail of [[], ["deep"], ["--json"], ["--json", "deep"]]) {
+    const { output, status } = await runCli(["status", "--url", "http://127.0.0.1:9", ...tail], home);
+    expect(status).toBe(1);
+    if (tail.includes("--json")) expect(JSON.parse(output).healthy).toBe(false);
+    else expect(output).toContain("unreachable");
+    expect(output).toContain(`agent key file ${key} has mode 0644`);
+  }
+}, 120_000);
+
+test.skipIf(POSIX_ONLY)("doctor issue count increases by its mode findings", async () => {
+  const home = makeHome("issue-count");
+  const a = writeKey(home, "agent-a", 0o600);
+  const b = writeKey(home, "agent-b", 0o600);
+  const before = await runCli(["doctor"], home);
+  chmodSync(a, 0o644);
+  chmodSync(b, 0o640);
+  symlinkSync(a, join(home, ".flair", "keys", "agent-link.key"));
+  mkdirSync(join(home, ".flair", "keys", "agent-dir.key"));
+  const after = await runCli(["doctor"], home);
+  const count = (output: string) => {
+    const match = output.match(/(\d+) issues? found/);
+    expect(match).not.toBeNull();
+    return Number(match![1]);
+  };
+  expect(count(after.output) - count(before.output)).toBe(4);
+}, 60_000);
+
+test.skipIf(POSIX_ONLY)("unreadable keys directory is named by doctor and status", async () => {
+  const home = makeHome("not-directory");
+  const keys = join(home, ".flair", "keys");
+  rmSync(keys, { recursive: true });
+  writeFileSync(keys, "not a directory");
+  const doctor = await runCli(["doctor"], home);
+  expect(doctor.output).toContain(`Keys directory could not be read: ${keys} — key checks skipped`);
+  for (const tail of [[], ["deep"]]) {
+    const { output } = await runCli(["status", "--url", url, ...tail], home);
+    expect(output).toContain(`agent key directory ${keys} could not be read (ENOTDIR) — key file modes not checked`);
+  }
+}, 90_000);
+
+test.skipIf(POSIX_ONLY)("remote status omits local key warnings in plain and deep output", async () => {
+  const home = makeHome("remote");
+  const key = writeKey(home, "agent-a", 0o644);
+  for (const tail of [[], ["deep"]]) {
+    const { output, status } = await runCli(["status", "--url", "https://remote.example", ...tail], home);
+    expect(status).toBe(0);
+    expect(output).not.toContain(key);
+    expect(output).not.toContain("agent key file");
+  }
+}, 60_000);
+
+test("Windows mode notice appears with readable, absent and unreadable key directories", async () => {
+  for (const state of ["readable", "absent", "unreadable"]) {
+    const home = makeHome(`windows-${state}`);
+    const keys = join(home, ".flair", "keys");
+    if (state !== "readable") rmSync(keys, { recursive: true });
+    if (state === "unreadable") writeFileSync(keys, "not a directory");
+    for (const args of [["doctor"], ["status", "--url", url]]) {
+      const { output } = await runCli(args, home, true);
+      expect(output.split("key file modes are not checked on Windows")).toHaveLength(2);
+    }
+  }
+}, 210_000);
+
+test.skipIf(POSIX_ONLY)("key directories are not checked and a symlinked keys directory is read", async () => {
+  const home = makeHome("directory-link");
+  const keys = join(home, ".flair", "keys");
+  const key = writeKey(home, "agent-a", 0o644);
+  const dirKey = join(keys, "agent-dir.key");
+  mkdirSync(dirKey);
+  const linkedHome = makeHome("linked-home");
+  const linkedKeys = join(linkedHome, ".flair", "keys");
+  rmSync(linkedKeys, { recursive: true });
+  symlinkSync(keys, linkedKeys);
+  for (const args of [["doctor"], ["status", "--url", url]]) {
+    const direct = await runCli(args, home);
+    expect(direct.output).toContain(`agent key file ${dirKey} not checked (not a regular file)`);
+    const linked = await runCli(args, linkedHome);
+    expect(linked.output).toContain(`agent key file ${join(linkedKeys, "agent-a.key")} has mode 0644`);
+  }
+  expect(readFileSync(key, "utf8")).toBe("seed-agent-a-3077");
+}, 120_000);

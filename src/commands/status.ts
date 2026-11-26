@@ -164,8 +164,7 @@ export function localOpsApiWarnings(
 
 /**
  * Local agent-key mode warnings (flair#3077). Read-only, and judged for a
- * local target only: the keys directory belongs to this host, so a warning
- * about it under `--target` would be about the wrong machine.
+ * loopback URL only: the keys directory belongs to this host.
  */
 export function localKeyModeWarnings(
   baseUrl: string,
@@ -488,6 +487,7 @@ const statusCmd = program
     if (!healthy) {
       console.log(`Flair v${__pkgVersion} — 🔴 unreachable`);
       console.log(`  URL:  ${baseUrl}`);
+      for (const warning of localWarnings) console.log(`  ⚠ ${warning.message}`);
       if (registryNotice.line) console.log(`  ${registryNotice.line}`);
       if (registryNotice.error) console.log(`  ⚠ ${registryNotice.error}`);
       if (discoveredPort != null) {
@@ -526,12 +526,10 @@ const statusCmd = program
     const pid = healthData?.pid ?? "";
     const agents = healthData?.agents;
     const memories = healthData?.memories;
-    const warnings: Array<{ level: string; message: string }> = [
-      ...localWarnings,
-      ...(Array.isArray(healthData?.warnings) ? healthData.warnings : []),
-    ];
+    const warnings: Array<{ level: string; message: string }> =
+      Array.isArray(healthData?.warnings) ? healthData.warnings : [];
     // Scope warnings to the filtered agent if --agent is set
-    const scopedWarnings = opts.agent && healthData?.agents?.perAgent
+    const scopedWarnings = [...localWarnings, ...(opts.agent && healthData?.agents?.perAgent
       ? warnings.filter((w: any) => {
           // Hash-fallback warnings contain agent-specific counts
           if (w.message.includes("hash-fallback")) {
@@ -558,7 +556,7 @@ const statusCmd = program
           // Default: keep fleet-wide warnings
           return !w.message.includes(opts.agent);
         })
-      : warnings;
+      : warnings)];
 
     const hasWarn = scopedWarnings.some((w) => w.level === "warn");
     const headerIcon = hasWarn ? render.icons.warn : render.icons.ok;
@@ -986,10 +984,11 @@ statusCmd
 
     if (!healthy) {
       if (opts.json) {
-        console.log(JSON.stringify({ healthy: false, url: baseUrl, error: "unreachable" }, null, 2));
+        console.log(JSON.stringify({ healthy: false, url: baseUrl, error: "unreachable", warnings: localWarnings }, null, 2));
       } else {
         console.log(`Flair v${__pkgVersion} — 🔴 unreachable`);
         console.log(`  URL:  ${baseUrl}`);
+        for (const warning of localWarnings) console.log(`  ⚠ ${warning.message}`);
         console.log(`\n  Run: flair start  or  flair doctor`);
       }
       process.exit(1);

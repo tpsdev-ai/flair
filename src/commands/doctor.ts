@@ -965,6 +965,9 @@ program
 
     // 2. Keys directory
     const keysDir = defaultKeysDir();
+    if (keyModesUnsupported()) {
+      console.log(`  ${render.icons.info} ${render.wrap(render.c.dim, KEY_MODES_UNSUPPORTED_MESSAGE)}`);
+    }
     if (existsSync(keysDir)) {
       const keyScan = scanKeyDir(keysDir);
       if (keyScan.state === "unreadable") {
@@ -1005,9 +1008,7 @@ program
 
         // Agent key files must be owner-only on POSIX (flair#3077). Read-only:
         // this never changes a file.
-        if (keyModesUnsupported()) {
-          console.log(`  ${render.icons.info} ${render.wrap(render.c.dim, KEY_MODES_UNSUPPORTED_MESSAGE)}`);
-        } else {
+        if (!keyModesUnsupported()) {
           for (const finding of keyModeFindings(keysDir, keyScan.entries)) {
             issues++;
             console.log(`  ${render.icons.warn} ${render.wrap(render.c.yellow, formatKeyModeFinding(finding))}`);

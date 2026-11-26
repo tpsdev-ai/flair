@@ -2,13 +2,12 @@
  * key-dir.ts — the keys-directory walk shared by `flair keys prune`,
  * `flair doctor` and `flair status` (flair#3077).
  *
- * `keys prune` classifies every entry; doctor and status only need the agent
- * key files. Sharing the walk keeps those three from disagreeing about what a
- * key file is: a directory is not a key, a name must end in `.key`, and a
- * node-scoped federation key is not an agent key (flair#1193).
+ * Prune retains its entry classification; mode checks use the Agent ID rule
+ * because signing can read a .key without a .pub sibling.
  */
 import { existsSync, lstatSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { isValidAgentId } from "./agent-id-rule.js";
 import { resolveHome } from "./home.js";
 
 export type KeyDirEntryKind = "dir" | "other" | "key";
@@ -22,7 +21,7 @@ export type KeyDirScan =
   | { state: "ok"; entries: KeyDirEntry[] }
   | { state: "unreadable"; error: unknown };
 
-/** Read the keys directory without following anything. The caller owns the
+/** Read the keys directory, following a symlink at keysDir. The caller owns the
  *  "directory absent" decision; this reports only what readdir returned. */
 export function scanKeyDir(keysDir: string): KeyDirScan {
   let dirents;
@@ -52,16 +51,15 @@ function errorCode(error: unknown): string {
   return typeof code === "string" ? code : "lstat failed";
 }
 
-/** Mode findings for the agent key files in one scan. Reads only: lstat and
- *  never a chmod. A non-regular entry is reported, never followed. */
+/** After the directory read, lstat each valid-id .key, including directories.
+ * Non-regular entries are reported as not checked; entry symlinks are not
+ * followed. No key content is read and no file is changed. */
 export function keyModeFindings(keysDir: string, entries: KeyDirEntry[]): KeyModeFinding[] {
-  const names = entries.filter((e) => e.kind === "key").map((e) => e.name).sort();
-  const agentIds = new Set(
-    partitionKeyIds(names.map((name) => name.slice(0, -KEY_SUFFIX.length)), keysDir).agentKeyIds,
-  );
+  const names = entries.map((e) => e.name).filter((name) =>
+    name.endsWith(KEY_SUFFIX) && isValidAgentId(name.slice(0, -KEY_SUFFIX.length)),
+  ).sort();
   const findings: KeyModeFinding[] = [];
   for (const name of names) {
-    if (!agentIds.has(name.slice(0, -KEY_SUFFIX.length))) continue;
     const path = join(keysDir, name);
     let stats;
     try {
