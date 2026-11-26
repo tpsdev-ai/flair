@@ -72,6 +72,12 @@ export function setAgentKeyFileTestHooks(hooks: AgentKeyFileTestHooks | undefine
   testHooks = hooks;
 }
 
+/** Device + inode of a key file, as recorded when this process created it. */
+export interface KeyFileIdentity {
+  dev: number;
+  ino: number;
+}
+
 export interface AgentKeyFileContents {
   /** The raw bytes stored in (or read from) the key file. */
   bytes: Uint8Array;
@@ -281,7 +287,11 @@ export function readAgentKeyForRotation(privateKeyPath: string): AgentKeyForRota
  * from creation and fsynced, and return the temp path. The temp file is this
  * call's to hand on: the caller publishes or removes it.
  */
-function writeAgentKeyTemp(privateKeyPath: string, bytes: Buffer, onCreated?: (path: string) => void): string {
+function writeAgentKeyTemp(
+  privateKeyPath: string,
+  bytes: Buffer,
+  onCreated?: (path: string, identity: KeyFileIdentity) => void,
+): string {
   const tempPrefix = `.${basename(privateKeyPath)}.tmp-`;
   const maxTempAttempts = 5;
   let fd: number | undefined;
@@ -301,7 +311,8 @@ function writeAgentKeyTemp(privateKeyPath: string, bytes: Buffer, onCreated?: (p
     }
   }
   try {
-    onCreated?.(tempPath);
+    const created = fstatSync(fd);
+    onCreated?.(tempPath, { dev: created.dev, ino: created.ino });
     // The open mode is narrowed by the umask; set it exactly, still before the
     // first byte, so the protection is the mode the file is created with.
     fchmodSync(fd, 0o600);
@@ -348,13 +359,20 @@ function writeAgentKeyTemp(privateKeyPath: string, bytes: Buffer, onCreated?: (p
  * occupying entry is left untouched. On failure the temp file this call
  * created is removed, best effort.
  */
-export function createAgentKeyFile(privateKeyPath: string, data: string | Uint8Array, onCreated?: (path: string) => void): void {
+export function createAgentKeyFile(
+  privateKeyPath: string,
+  data: string | Uint8Array,
+  onCreated?: (path: string, identity: KeyFileIdentity) => void,
+): void {
   const tempPath = writeAgentKeyTemp(privateKeyPath, Buffer.from(data), onCreated);
   try {
     testHooks?.beforePublish?.(tempPath, privateKeyPath);
     // linkSync fails with EEXIST when the final path appears before publication.
     linkSync(tempPath, privateKeyPath);
-    onCreated?.(privateKeyPath);
+    // The published name is a hard link to the temp file; record the identity
+    // of what is actually at the path now, right after publication.
+    const published = lstatSync(privateKeyPath);
+    onCreated?.(privateKeyPath, { dev: published.dev, ino: published.ino });
   } catch (error) {
     try {
       unlinkSync(tempPath);

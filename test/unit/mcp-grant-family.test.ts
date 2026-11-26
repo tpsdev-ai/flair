@@ -16,7 +16,7 @@
  *   - no key material ever reaches stdout/console output
  */
 import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, existsSync, fstatSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, existsSync, fstatSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { Command } from "commander";
 import nacl from "tweetnacl";
 import { register } from "../../src/commands/mcp.ts";
@@ -389,6 +389,33 @@ describe("grantMcpClient — key files", () => {
     )).rejects.toThrow("injected partial write; removed the key files this call created");
     expect(readdirSync(keysDir)).toEqual([]);
     expect(calls.some(call => call.operation === "insert")).toBe(false);
+  });
+
+  test("cleanup leaves a replaced private key file in place and names it", async () => {
+    const privPath = join(keysDir, "replaced.key");
+    const pubPath = join(keysDir, "replaced.pub");
+    setAgentKeyFileTestHooks({ beforePublish: (_temp, finalPath) => {
+      if (finalPath !== pubPath) return;
+      // After the private key was published: put a different file at its path,
+      // then occupy the public path so publication fails.
+      const replacement = join(dir, "replacement-bytes");
+      writeFileSync(replacement, "replacement private bytes");
+      renameSync(replacement, privPath);
+      writeFileSync(pubPath, "peer bytes");
+    } });
+    const { fetchImpl, calls } = mockOpsFetch();
+    let message = "";
+    try {
+      await grantMcpClient(
+        { name: "replaced", keysDir, manifestPath, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "fixture" },
+        { fetchImpl },
+      );
+    } catch (error) { message = (error as Error).message; }
+    expect(calls.some(call => call.operation === "insert")).toBe(false);
+    expect(readFileSync(privPath, "utf8")).toBe("replacement private bytes");
+    expect(readFileSync(pubPath, "utf8")).toBe("peer bytes");
+    expect(message).toContain(privPath);
+    expect(message).toContain("no longer names the file this grant created");
   });
 
   test.each([false, true])("manifest write failure after insert reports cleanup (unlink fails=%s)", async (failUnlink) => {

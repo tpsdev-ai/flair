@@ -13,7 +13,7 @@
  * non-strict entry into the strict check.
  */
 import { Command } from "commander";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSync, type Stats } from "node:fs";
 
 import { dirname, join } from "node:path";
 import nacl from "tweetnacl";
@@ -55,7 +55,7 @@ import {
 import { resolveHome } from "../lib/home.js";
 import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
 import { agentHomeEndpoint, resolveTargetInstanceId } from "../lib/agent-home.js";
-import { createAgentKeyFile, ensureAgentKeysDir } from "../lib/agent-key-file.js";
+import { createAgentKeyFile, ensureAgentKeysDir, type KeyFileIdentity } from "../lib/agent-key-file.js";
 
 export type McpCli = {
   resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
@@ -250,6 +250,8 @@ export interface McpGrantDeps {
   /** Injectable Ed25519 keypair generator (tests only; defaults to tweetnacl). */
   generateKeyPair?: () => { publicKey: Uint8Array; secretKey: Uint8Array };
   unlinkKeyFile?: (path: string) => void;
+  /** Injectable lstat for the pre-removal identity check (tests only). */
+  lstatKeyFile?: (path: string) => Stats;
 }
 
 export interface McpGrantResult {
@@ -339,11 +341,13 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
   const seed = kp.secretKey.slice(0, 32);
   const pubKeyB64url = b64url(kp.publicKey);
 
-  const createdKeyPaths: string[] = [];
-  const trackKeyPath = (path: string) => { createdKeyPaths.push(path); };
+  const createdKeyFiles: Array<{ path: string; dev: number; ino: number }> = [];
+  const trackKeyFile = (path: string, identity: KeyFileIdentity) => {
+    createdKeyFiles.push({ path, dev: identity.dev, ino: identity.ino });
+  };
   try {
-    createAgentKeyFile(privPath, Buffer.from(seed), trackKeyPath);
-    createAgentKeyFile(pubPath, Buffer.from(kp.publicKey), trackKeyPath);
+    createAgentKeyFile(privPath, Buffer.from(seed), trackKeyFile);
+    createAgentKeyFile(pubPath, Buffer.from(kp.publicKey), trackKeyFile);
 
     const nowIso = now();
     // flair#2433 — the new Agent row's home is THIS instance's federation id,
@@ -395,21 +399,38 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
     const config = buildMcpGrantConfig({ name, resource, keyFile: privPath });
     return { entry, config };
   } catch (error) {
-    // Remove the key files this call created on failure; any that remain are
-    // named in the error.
-    if (createdKeyPaths.length > 0) {
+    // Remove the key files this call created on failure. Cleanup is keyed by
+    // file identity, never by name: a path is removed only while it still
+    // names the same regular file this grant created. Anything left is named
+    // in the error with the reason.
+    if (createdKeyFiles.length > 0) {
       const leftBehind: string[] = [];
-      for (const path of createdKeyPaths) {
+      for (const created of createdKeyFiles) {
+        let current: Stats;
         try {
-          (deps.unlinkKeyFile ?? unlinkSync)(path);
+          current = (deps.lstatKeyFile ?? (lstatSync as (path: string) => Stats))(created.path);
+        } catch (statError) {
+          const code = (statError as NodeJS.ErrnoException).code;
+          if (code !== "ENOENT") {
+            leftBehind.push(`${created.path} (not removed: could not check it (${code ?? "lstat failed"}))`);
+          }
+          continue;
+        }
+        if (!current.isFile() || current.dev !== created.dev || current.ino !== created.ino) {
+          leftBehind.push(`${created.path} (not removed: the path no longer names the file this grant created)`);
+          continue;
+        }
+        try {
+          (deps.unlinkKeyFile ?? unlinkSync)(created.path);
         } catch (cleanupError) {
-          if ((cleanupError as NodeJS.ErrnoException).code !== "ENOENT") leftBehind.push(path);
+          const code = (cleanupError as NodeJS.ErrnoException).code;
+          if (code !== "ENOENT") leftBehind.push(`${created.path} (not removed: ${code ?? "unlink failed"})`);
         }
       }
       const message = error instanceof Error ? error.message : String(error);
       const cleanup = leftBehind.length === 0
         ? "removed the key files this call created"
-        : `could not remove key file(s) ${leftBehind.join(", ")}`;
+        : `could not remove key file(s): ${leftBehind.join("; ")}`;
       throw new Error(`${message}; ${cleanup}`, { cause: error });
     }
     throw error;
