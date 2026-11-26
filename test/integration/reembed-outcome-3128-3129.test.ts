@@ -18,11 +18,11 @@
  * credential it lists rows with, so it re-embeds rows whose owner has no local
  * key: a registered agent without a key file, the `skill:using-flair` row the
  * skill seed writes as the administrator, and rows of an owner with no Agent
- * row. The success case compares the full stored state of the initial Memory
- * rows read through the ops API before and after: the model stamp is the
- * current model, while agentId and every provenance/authority field are
- * byte-identical; the later admin all-agent case checks the same identity
- * fields for rows whose owners have no key.
+ * row. The configuration-bound success case checks the exit status and the
+ * summary. The admin all-agent case reads the full stored state of the
+ * initial Memory rows, including those whose owners have no key, through the
+ * ops API before and after: the model stamp is the current model, while
+ * agentId and every provenance/authority field are byte-identical.
  *
  * Without FLAIR_ADMIN_PASS, `reembed --agent <id>` lists rows with
  * POST /SemanticSearch, whose read scope includes other agents' non-private
@@ -553,7 +553,7 @@ test("the admin all-agent run re-embeds rows whose owners have no key and leaves
   for (const id of ids) {
     const prior = before.get(id)!;
     const after = await rowState(id);
-    expect(after.embeddingModel, `${id}: new model stamp`).toBe(getModelId());
+    expect(after.embeddingModel, `${id}: current model stamp`).toBe(getModelId());
     for (const field of FIELDS_THAT_MUST_NOT_MOVE) {
       expect(after[field], `${id}: ${field} unchanged`).toBe(prior[field]);
     }
