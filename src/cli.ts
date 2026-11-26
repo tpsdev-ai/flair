@@ -4007,10 +4007,12 @@ async function assertSingleInstanceRowAfterWrite(endpoint: OpsEndpoint, expected
 
 /**
  * Categories of ops API refusal that callers act on. `callOpsApi` reads the
- * parsed body's `error` string (or `message` when `error` is absent), classifies
- * it only when the response's status (and, for already-exists, operation) is the
- * one that category describes, and throws a fixed, code-defined description; the
- * body itself never reaches the message, in any encoding (issue #3144).
+ * parsed body's `error` string, or `message` only when the body has no `error`
+ * key at all, classifies it only when the response's status (and, for
+ * already-exists, operation) is the one that category describes, and throws a
+ * fixed, code-defined description; the body itself never reaches the message, in
+ * any encoding (issue #3144). already-exists requires the captured name to equal
+ * the username this request submitted.
  */
 export type OpsApiErrorCategory = "already-exists" | "not-permitted" | "authentication-failed";
 
@@ -4028,7 +4030,7 @@ const OPS_API_REFUSAL_DESCRIPTION = "the ops API refused the request (details wi
  * into a message.
  */
 const OPS_API_ERROR_PATTERNS: ReadonlyArray<readonly [OpsApiErrorCategory, RegExp]> = [
-  ["already-exists", /^User .+ already exists$/],
+  ["already-exists", /^User (.+) already exists$/],
   ["not-permitted", /^This operation is not authorized due to role restrictions and\/or invalid database items$/],
   ["authentication-failed", /^Login failed$/],
 ];
@@ -4063,12 +4065,17 @@ export class OpsApiError extends Error {
   }
 }
 
-function classifyOpsApiError(status: number, operation: string, text: string): OpsApiErrorCategory | null {
-  // Classify the parsed body's `error` string, or `message` when `error` is
-  // absent, and only when the status (and, for already-exists, operation) is the
-  // category's own. Anything else — a non-JSON body, a body with neither string,
-  // another field, another status or operation — is unclassified. The value is
-  // never returned or printed.
+function classifyOpsApiError(
+  status: number,
+  operation: string,
+  body: Record<string, unknown>,
+  text: string,
+): OpsApiErrorCategory | null {
+  // Classify the parsed body's `error` string, or `message` only when the body
+  // has no `error` key at all, and only when the status (and, for already-exists,
+  // operation) is the category's own. Anything else — a non-JSON body, a value
+  // that is not a string, another field, another status or operation — is
+  // unclassified. The value is never returned or printed.
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -4077,10 +4084,18 @@ function classifyOpsApiError(status: number, operation: string, text: string): O
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
   const record = parsed as Record<string, unknown>;
-  const value = typeof record.error === "string" ? record.error : record.message;
+  const value = "error" in record ? record.error : record.message;
   if (typeof value !== "string") return null;
   for (const [category, pattern] of OPS_API_ERROR_PATTERNS) {
-    if (categoryMatches(category, status, operation) && pattern.test(value)) return category;
+    if (!categoryMatches(category, status, operation)) continue;
+    const match = pattern.exec(value);
+    if (match === null) continue;
+    if (category === "already-exists") {
+      // The fallback sets THIS user's password, so the captured name must be the
+      // username this request submitted; any other name is unclassified.
+      if (typeof body.username !== "string" || match[1] !== body.username) return null;
+    }
+    return category;
   }
   return null;
 }
@@ -4112,7 +4127,7 @@ export async function callOpsApi(
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     const operation = typeof body.operation === "string" ? body.operation : "unknown";
-    throw new OpsApiError(res.status, operation, classifyOpsApiError(res.status, operation, text));
+    throw new OpsApiError(res.status, operation, classifyOpsApiError(res.status, operation, body, text));
   }
   return res.json();
 }

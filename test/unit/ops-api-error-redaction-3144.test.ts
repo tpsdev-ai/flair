@@ -34,6 +34,8 @@ type Mode =
   | "error-echoes-deploy-payload"
   | "error-echoes-body-under-other-field"
   | "already-exists-in-received"
+  | "already-exists-other-name"
+  | "error-not-a-string"
   | "invalid-password-with-already-exists"
   | "not-authorized-401"
   | "already-exists-message-only"
@@ -99,7 +101,7 @@ beforeEach(() => {
           payload = { error: `rejected credential: ${authorization} ${password}` };
           break;
         case "error-echoes-deploy-payload":
-          payload = { error: `deploy rejected: ${(received.payload ?? "").slice(0, 120)}` };
+          payload = { error: `deploy rejected: ${received.payload ?? ""}` };
           break;
         case "error-echoes-body-under-other-field":
           payload = { error: "refused", received: body };
@@ -107,6 +109,14 @@ beforeEach(() => {
         case "already-exists-in-received":
           status = 409;
           payload = { received: { password: "already exists" } };
+          break;
+        case "already-exists-other-name":
+          status = 409;
+          payload = { error: "User other already exists" };
+          break;
+        case "error-not-a-string":
+          status = 409;
+          payload = { error: 42, message: "User admin already exists" };
           break;
         case "invalid-password-with-already-exists":
           status = 409;
@@ -328,6 +338,24 @@ describe("callOpsApi fixed error descriptions (#3144)", () => {
     expect(message).not.toContain("the user already exists");
   });
 
+  test("does not classify a duplicate naming another user", async () => {
+    mode = "already-exists-other-name";
+    const message = (await thrownError(addUserBody())).message;
+
+    expectStatusAndOperation(message, 409);
+    expect(message).toContain("withheld");
+    expect(message).not.toContain("the user already exists");
+  });
+
+  test("does not fall back to message when error is present but not a string", async () => {
+    mode = "error-not-a-string";
+    const message = (await thrownError(addUserBody())).message;
+
+    expectStatusAndOperation(message, 409);
+    expect(message).toContain("withheld");
+    expect(message).not.toContain("the user already exists");
+  });
+
   test("does not classify a 401 refusal as a role refusal", async () => {
     mode = "not-authorized-401";
     const message = (await thrownError(addUserBody())).message;
@@ -392,5 +420,77 @@ describe("callOpsApi fixed error descriptions (#3144)", () => {
       chdir(originalCwd);
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  async function provisionAgainst(addUserResponse: () => Response): Promise<{ calls: string[]; message: string }> {
+    const root = mkdtempSync(join(tmpdir(), "flair-unit-3144-"));
+    const originalCwd = process.cwd();
+    const calls: string[] = [];
+    server.stop(true);
+    server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      async fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === "/FederationPair") {
+          return new Response(JSON.stringify({ error: "instanceId and publicKey required" }), { status: 400 });
+        }
+        const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+        calls.push(String(body.operation));
+        switch (body.operation) {
+          case "list_users":
+            return new Response(JSON.stringify([
+              { username: USER, role: { permission: { super_user: false } } },
+            ]), { status: 200 });
+          case "deploy_component":
+            return new Response(JSON.stringify({ ok: true }), { status: 200 });
+          case "add_user":
+            return addUserResponse();
+          case "alter_user":
+            return new Response(JSON.stringify({ ok: true }), { status: 200 });
+          default:
+            return new Response(JSON.stringify({ error: "unknown" }), { status: 400 });
+        }
+      },
+    });
+    let message = "";
+    try {
+      writeFileSync(join(root, "package.json"), "{}");
+      writeFileSync(join(root, "config.yaml"), "restart: rolling\n");
+      mkdirSync(join(root, "dist"));
+      mkdirSync(join(root, "schemas"));
+      for (const name of ["LICENSE", "README.md", "SECURITY.md"]) writeFileSync(join(root, name), "fixture\n");
+      chdir(root);
+      const origin = `http://127.0.0.1:${server.port}`;
+      try {
+        await provisionFabric(origin, origin, USER, PASS, "flair-admin-3144");
+      } catch (err: unknown) {
+        message = err instanceof Error ? err.message : String(err);
+      }
+      return { calls, message };
+    } finally {
+      chdir(originalCwd);
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  test("does not alter a password after a non-duplicate refusal", async () => {
+    const run = await provisionAgainst(() => new Response(
+      JSON.stringify({ error: "This operation is not authorized due to role restrictions and/or invalid database items" }),
+      { status: 403, headers: { "content-type": "application/json" } },
+    ));
+
+    expect(run.calls).toEqual(["list_users", "deploy_component", "add_user"]);
+    expect(run.message).toContain("the operation is not permitted for this role");
+  });
+
+  test("does not alter a password after a duplicate naming another user", async () => {
+    const run = await provisionAgainst(() => new Response(
+      JSON.stringify({ error: "User other already exists" }),
+      { status: 409, headers: { "content-type": "application/json" } },
+    ));
+
+    expect(run.calls).toEqual(["list_users", "deploy_component", "add_user"]);
+    expect(run.message).toContain("withheld");
   });
 });

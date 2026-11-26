@@ -1405,8 +1405,7 @@ describe("flair#3130 — remote init credential ordering (real Harper)", () => {
     expect(recorder.deployAuthOk()).toBe(true);
     expect(out.error).toBeInstanceOf(Error);
     expect(out.error?.message ?? "").toContain("Ops API call failed (403) for 'deploy_component'");
-    // The refusal is reported as the fixed description; Harper's body, including
-    // the submitted password and the Basic credential, never reaches the message.
+    // The thrown message lacks the submitted password and the Basic credential.
     expect(out.error?.message ?? "").toContain("the operation is not permitted for this role");
     expect(out.error?.message ?? "").not.toContain("withheld");
     expect((out.error?.message ?? "").includes("unauthorized_access")).toBe(false);
