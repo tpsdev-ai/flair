@@ -5,12 +5,13 @@
  *
  * Memory is seeded with 2,004 rows in one operations insert: 2,000 already
  * current rows for the tested agent, 3 stale rows for it whose ids sort last
- * (page 3 of 3), and 1 stale row for a second agent. A recording proxy sits
- * between the CLI and Harper, so the test can assert each operations read
- * body (conditions, sort, projection, page limit, cursor), the printed read and
- * skipped counts, that the stale rows are re-embedded, that the second agent's
- * stale row is untouched on the single-agent run, and that all three
- * operations page reads arrive before the first Memory PATCH.
+ * (page 3 of 3), and 1 stale row for a second agent. The CLI runs against the
+ * instance's real HTTP and ops ports and loads a preload that records every
+ * fetch, so the test can assert each operations read body (conditions, sort,
+ * projection, page limit, cursor), the printed read and skipped counts, that
+ * the stale rows are re-embedded, that the second agent's stale row is
+ * re-embedded on the all-agent run and untouched on the single-agent run, and
+ * that all three operations page reads arrive before the first Memory PATCH.
  *
  * Throwaway HOME + data dir, ephemeral ports; the administrator password is
  * never printed. Each request target is asserted to be this test's instance.
@@ -18,9 +19,7 @@
  * migration cannot re-embed the seeded stale rows during the test.
  */
 import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
-import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
@@ -102,62 +101,7 @@ type Recorded = {
   response: unknown;
 };
 const events: Recorded[] = [];
-const servers: Server[] = [];
-
-/** A recording reverse proxy: forwards to `target`, notes request and response. */
-async function startProxy(target: string): Promise<number> {
-  const server = createServer((req, res) => {
-    const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => chunks.push(chunk));
-    req.on("end", async () => {
-      const payload = Buffer.concat(chunks);
-      let request: unknown = null;
-      if (req.method === "POST") {
-        try {
-          request = JSON.parse(payload.toString("utf8"));
-        } catch {
-          /* not a JSON operations request */
-        }
-      }
-      const operation = (request as { operation?: unknown } | null)?.operation;
-      const kind: Recorded["kind"] = operation === "search_by_conditions"
-        ? "read"
-        : req.method === "PATCH" && req.url?.startsWith("/Memory/")
-          ? "write"
-          : "other";
-      const event: Recorded = {
-        seq: events.length + 1, kind, method: req.method ?? "", url: req.url ?? "", request, response: null,
-      };
-      events.push(event);
-
-      const headers: Record<string, string> = {};
-      if (req.headers["content-type"]) headers["content-type"] = String(req.headers["content-type"]);
-      if (req.headers.authorization) headers.authorization = String(req.headers.authorization);
-      try {
-        const upstream = await fetch(`${target}${req.url}`, {
-          method: req.method,
-          headers,
-          body: payload.length > 0 ? payload : undefined,
-          signal: AbortSignal.timeout(120_000),
-        });
-        const upstreamBody = Buffer.from(await upstream.arrayBuffer());
-        try {
-          event.response = JSON.parse(upstreamBody.toString("utf8"));
-        } catch {
-          event.response = upstreamBody.toString("utf8");
-        }
-        res.writeHead(upstream.status, { "Content-Type": upstream.headers.get("content-type") ?? "application/json" });
-        res.end(upstreamBody);
-      } catch {
-        res.writeHead(502, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "proxy upstream failed" }));
-      }
-    });
-  });
-  servers.push(server);
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  return (server.address() as AddressInfo).port;
-}
+const PRELOAD = join(import.meta.dirname, "..", "helpers", "reembed-fault-preload.ts");
 
 beforeAll(async () => {
   if (process.env.HARPER_HTTP_URL) throw new Error("requires an isolated Harper; unset HARPER_HTTP_URL");
@@ -172,6 +116,12 @@ beforeAll(async () => {
     expect(url.hostname).toBe("127.0.0.1");
     expect(["9925", "9926"]).not.toContain(url.port);
   }
+  // This fixture records the instance's port pair in config so the all-agent
+  // run addresses this instance.
+  writeFileSync(
+    join(home, ".flair", "config.yaml"),
+    `port: ${new URL(harper.httpURL).port}\nopsPort: ${new URL(harper.opsURL).port}\n`,
+  );
   await op({
     operation: "upsert",
     database: "flair",
@@ -188,7 +138,6 @@ beforeAll(async () => {
 }, 240_000);
 
 afterAll(async () => {
-  for (const server of servers) await new Promise<void>((resolve) => server.close(() => resolve()));
   if (harper) await stopHarper(harper);
   component?.cleanup();
   if (home) rmSync(home, { recursive: true, force: true });
@@ -198,27 +147,24 @@ afterEach(() => {
   events.length = 0;
 });
 
-let httpProxyPort = 0;
-let opsProxyPort = 0;
+const eventsFile = () => join(home, "fetch-events.jsonl");
 
 async function runReembed(agentId?: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  if (!httpProxyPort) {
-    httpProxyPort = await startProxy(harper.httpURL);
-    opsProxyPort = await startProxy(harper.opsURL);
-  }
   events.length = 0;
   await resetStaleRows();
-  const args = ["reembed", "--stale-only", "--port", String(httpProxyPort)];
+  writeFileSync(eventsFile(), "");
+  const args = ["reembed", "--stale-only", "--port", new URL(harper.httpURL).port];
   if (agentId) args.push("--agent", agentId);
   const env = {
     ...process.env,
     HOME: home,
-    FLAIR_OPS_PORT: String(opsProxyPort),
+    FLAIR_OPS_PORT: new URL(harper.opsURL).port,
     FLAIR_ADMIN_USER: harper.admin.username,
     FLAIR_ADMIN_PASS: harper.admin.password,
+    FLAIR_TEST_FETCH_EVENTS: eventsFile(),
     NO_COLOR: "1",
   };
-  const child = spawnCli(args, { env, timeout: 180_000 });
+  const child = spawnCli(args, { env, timeout: 180_000, preload: PRELOAD });
   let stdout = "";
   let stderr = "";
   child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
@@ -227,6 +173,22 @@ async function runReembed(agentId?: string): Promise<{ code: number | null; stdo
     child.on("error", reject);
     child.on("close", (exitCode) => resolve(exitCode));
   });
+  const recorded = readFileSync(eventsFile(), "utf-8")
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as { seq: number; method: string; path: string; request: unknown; response: unknown });
+  events.push(...recorded.map((entry): Recorded => ({
+    seq: entry.seq,
+    kind: (entry.request as { operation?: unknown } | null)?.operation === "search_by_conditions"
+      ? "read"
+      : entry.method === "PATCH" && entry.path.startsWith("/Memory/")
+        ? "write"
+        : "other",
+    method: entry.method,
+    url: entry.path,
+    request: entry.request,
+    response: entry.response,
+  })));
   return { code, stdout, stderr };
 }
 
@@ -283,8 +245,10 @@ function assertReadBodies(agentId: string | undefined): void {
 }
 
 for (const path of [{ name: "all-agent", agentId: undefined }, { name: "single-agent with an admin password", agentId: AGENT_ID }]) {
-  test(`the ${path.name} path reads its rows in 3 pages and re-embeds the 3 stale rows`, async () => {
+  test(`the ${path.name} path reads its rows in 3 pages and re-embeds its stale rows`, async () => {
     const { code, stdout, stderr } = await runReembed(path.agentId);
+    // The all-agent run sends each PATCH with the administrator credential it
+    // listed rows with, so this HOME's single key does not matter.
     expect(code, stderr.slice(0, 800)).toBe(0);
     assertReadsBeforeFirstPatch(PAGES);
     assertReadBodies(path.agentId);
@@ -298,6 +262,6 @@ for (const path of [{ name: "all-agent", agentId: undefined }, { name: "single-a
       expect(stdout).not.toContain("Candidates for re-embedding");
     }
     for (const id of STALE_IDS) expect(await storedStamp(id)).toBe(CURRENT_MODEL_ID);
-    if (path.agentId) expect(await storedStamp(OTHER_STALE_ID)).toBe("old-model");
+    expect(await storedStamp(OTHER_STALE_ID)).toBe(path.agentId ? "old-model" : CURRENT_MODEL_ID);
   }, 300_000);
 }

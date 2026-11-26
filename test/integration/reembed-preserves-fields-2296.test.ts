@@ -257,6 +257,12 @@ beforeAll(async () => {
   }
   const keysDir = join(home, ".flair", "keys");
   mkdirSync(keysDir, { recursive: true });
+  // This fixture records the instance's port pair in config so the all-agent
+  // run addresses this instance.
+  writeFileSync(
+    join(home, ".flair", "config.yaml"),
+    `port: ${new URL(harper.httpURL).port}\nopsPort: ${new URL(harper.opsURL).port}\n`,
+  );
   for (const agent of [agentA, agentB, agentC, agentE, unregistered]) {
     writeFileSync(join(keysDir, `${agent.id}.key`), agent.secretKey.slice(0, 32), { mode: 0o600 });
   }
@@ -281,23 +287,24 @@ describe("flair#2296: flair reembed", () => {
     expect(Object.keys(fixtureRow("x", "y")).sort()).toEqual([...MEMORY_ATTRIBUTES].sort());
   });
 
-  test("all-agents path; --dry-run writes nothing; a refused row is counted as an error", async () => {
+  test("all-agents path; --dry-run writes nothing; an owner with no Agent row is re-embedded", async () => {
     const before = await seedRows([fixtureRow("all-a", agentA.id), fixtureRow("all-b", agentB.id)]);
-    const refused = await seedRows([fixtureRow("all-d", unregistered.id)]);
+    const noAgentRow = await seedRows([fixtureRow("all-d", unregistered.id)]);
 
     const dry = runReembed(["--dry-run"]);
     expect(dry.code, dry.out).toBe(0);
     expect(dry.out).toContain(`Agent 1/3: ${agentA.id}`);
-    for (const row of [...before.values(), ...refused.values()]) expect(await read(row.id)).toEqual(row);
+    for (const row of [...before.values(), ...noAgentRow.values()]) expect(await read(row.id)).toEqual(row);
 
     const r = runReembed(["--batch-size", "1", "--delay-ms", "0"]);
     expect(r.code, r.out).toBe(0);
     expect(r.out).toContain(`✅ Agent ${agentA.id}: 1 updated, 0 errors`);
     expect(r.out).toContain(`✅ Agent ${agentB.id}: 1 updated, 0 errors`);
-    expect(r.out).toContain(`✅ Agent ${unregistered.id}: 0 updated, 1 errors`);
-    expect(r.out).toContain("Re-embedding complete: 2 updated, 1 errors");
+    expect(r.out).toContain(`✅ Agent ${unregistered.id}: 1 updated, 0 errors`);
+    expect(r.out).toContain("✅ Re-embedding complete: 3 updated, 0 errors");
+    expect(r.out).not.toContain("row(s) update unconfirmed");
     for (const row of before.values()) await expectOnlyEmbeddingChanged(row);
-    for (const row of refused.values()) expect(await read(row.id)).toEqual(row);
+    for (const row of noAgentRow.values()) await expectOnlyEmbeddingChanged(row);
   }, 240_000);
 
   test("single-agent path, including a skill row; --dry-run writes nothing", async () => {
@@ -316,10 +323,10 @@ describe("flair#2296: flair reembed", () => {
   test("single-agent path without administrator credentials, including a skill row", async () => {
     // Listed through POST /SemanticSearch as the agent, which returns rows that
     // are not archived; each re-embedded row's model is read with a signed GET.
-    const live = { archived: false, archivedAt: null, archivedBy: null, validTo: null };
+    const live = { archived: false, archivedAt: null, archivedBy: null, validTo: null, expiresAt: null };
     const before = await seedRows([
       fixtureRow("one-e", agentE.id, live),
-      { ...skillFixtureRow("one-e-skill", agentE.id) },
+      { ...skillFixtureRow("one-e-skill", agentE.id), expiresAt: null },
     ]);
     const r = runReembed(["--agent", agentE.id, "--batch-size", "1", "--delay-ms", "0"], { admin: false });
     expect(r.code, r.out).toBe(0);
