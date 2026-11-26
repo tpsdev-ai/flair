@@ -6,15 +6,25 @@
  * The ordering is the whole point: the credential file is written first, so a
  * write failure aborts with nothing changed on the cluster; the cluster change
  * runs second; the file is confirmed last. When a credential file already
- * exists it is replaced only after the cluster change succeeds — the new value
- * is staged in a mode-0600 temp file in the same directory and renamed over the
- * target, so a failed cluster change leaves the existing file byte-for-byte
- * unchanged. A run that had no credential file keeps the saved value on a
- * cluster failure, so the value can be supplied to a later run.
+ * exists the new value is staged in a mode-0600 sibling in the same directory
+ * and renamed over the target on success, so a failed cluster change leaves the
+ * existing file byte-for-byte unchanged and `abort()` removes the sibling.
+ * Once the cluster has accepted the password, a failed rename or verify keeps
+ * the sibling, because the new value may already be on the cluster.
  *
  * The file bytes are never printed by this module; messages name the path only.
  */
-import { lstatSync, readFileSync, renameSync, unlinkSync, type Stats } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  type Stats,
+} from "node:fs";
 import { randomBytes } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 
@@ -34,6 +44,8 @@ export interface RemoteAdminPassStage {
   readonly path: string;
   /** True when a file was already present and must stay unchanged on failure. */
   readonly hadExistingFile: boolean;
+  /** The staged sibling holding the new value, or null when the value went to `path` directly. */
+  readonly stagedPath: string | null;
   /** Publish a staged value (existing-file case) and verify the final bytes. */
   confirm(): void;
   /** Remove only the staged copy; a newly saved file is kept. */
@@ -44,6 +56,9 @@ function errnoCode(error: unknown): string | undefined {
   const code = (error as NodeJS.ErrnoException)?.code;
   return typeof code === "string" ? code : undefined;
 }
+
+const NOFOLLOW = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
+const O_NONBLOCK = process.platform === "win32" ? 0 : constants.O_NONBLOCK;
 
 function currentUid(): number | undefined {
   return typeof process.getuid === "function" ? process.getuid() : undefined;
@@ -84,26 +99,39 @@ function readTarget(path: string): Stats | null {
 
 /** The file must hold exactly the saved bytes and be owner-only. */
 function verifySaved(path: string, expected: string): void {
-  // Read first, stat second: the mode is checked on the path the bytes came
-  // from, and no check-then-use window is introduced.
-  const actual = readFileSync(path, "utf8");
-  const st = lstatSync(path);
-  if (st.isSymbolicLink() || !st.isFile()) {
-    throw new RemoteAdminPassError(`credential file ${path} is not a regular file after saving`);
+  // One open, no-follow; the descriptor is what gets stat'ed and read, the same
+  // shape agent-key-file.ts uses for key files.
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | NOFOLLOW | O_NONBLOCK);
+  } catch (error) {
+    if (errnoCode(error) === "ELOOP") {
+      throw new RemoteAdminPassError(
+        `credential file ${path} is a symbolic link after saving; replace it with a real regular file you own`,
+      );
+    }
+    throw error;
   }
-  const uid = currentUid();
-  if (uid !== undefined && st.uid !== uid) {
-    throw new RemoteAdminPassError(`credential file ${path} is owned by another user after saving`);
-  }
-  if ((st.mode & 0o077) !== 0) {
-    throw new RemoteAdminPassError(
-      `credential file ${path} is accessible to other users after saving (mode ${modeText(st.mode)}); run chmod 600 ${path}`,
-    );
-  }
-  if (actual !== expected) {
-    throw new RemoteAdminPassError(
-      `credential file ${path} does not hold the saved value after saving; write the password to ${path} (mode 0600) and run init again`,
-    );
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) {
+      throw new RemoteAdminPassError(`credential file ${path} is not a regular file after saving`);
+    }
+    const uid = currentUid();
+    if (uid !== undefined && st.uid !== uid) {
+      throw new RemoteAdminPassError(`credential file ${path} is owned by another user after saving`);
+    }
+    if ((st.mode & 0o077) !== 0) {
+      throw new RemoteAdminPassError(
+        `credential file ${path} is accessible to other users after saving (mode ${modeText(st.mode)}); run chmod 600 ${path}`,
+      );
+    }
+    const actual = readFileSync(fd, "utf8");
+    if (actual !== expected) {
+      throw new RemoteAdminPassError(`credential file ${path} does not hold the saved value after saving`);
+    }
+  } finally {
+    closeSync(fd);
   }
 }
 
@@ -129,6 +157,7 @@ export function stageRemoteAdminPassword(
     return {
       path,
       hadExistingFile: false,
+      stagedPath: null,
       confirm: () => verifySaved(path, content),
       abort: () => {
         /* the freshly saved value is kept for the next run */
@@ -146,18 +175,14 @@ export function stageRemoteAdminPassword(
   return {
     path,
     hadExistingFile: true,
+    stagedPath: pending,
     confirm: () => {
-      try {
-        renameSync(pending, path);
-      } catch (error) {
-        try {
-          unlinkSync(pending);
-        } catch {
-          /* best effort: remove only the staged file this call created */
-        }
-        throw error;
-      }
-      verifySaved(path, content);
+      // Verify the staged file before publishing it: a verify or rename
+      // failure then leaves the staged copy in place, because the new value
+      // may already be on the cluster. A rename within one directory keeps the
+      // verified bytes at `path`.
+      verifySaved(pending, content);
+      renameSync(pending, path);
     },
     abort: () => {
       try {

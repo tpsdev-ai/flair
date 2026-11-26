@@ -652,8 +652,8 @@ addAdminPassOptions(
           flairAdminPass = randomBytes(24).toString("base64url");
         }
 
-        // Atomic provisioning: save the credential, deploy + wait, provision
-        // user. The returned principal is the one this run set up: the existing
+        // Provisioning: save the credential, deploy + wait, provision user.
+        // The returned principal is the one this run set up: the existing
         // super_user cluster administrator when list_users reports the
         // operator's cluster admin as a super_user, else the `admin` user this
         // run created (or updated).
@@ -661,6 +661,7 @@ addAdminPassOptions(
         let stagedAdminPass: RemoteAdminPassStage | undefined;
         let saveAttempted = false;
         let saveApplied = false;
+        let requestSent = false;
         let provisioned: RemoteInitPrincipal;
         try {
           provisioned = await provisionFabric(baseUrl, opsUrl, clusterAdminUser, clusterAdminPass, flairAdminPass, {
@@ -669,6 +670,9 @@ addAdminPassOptions(
             beforeAdminPasswordApplied: () => {
               saveAttempted = true;
               stagedAdminPass = stageRemoteAdminPassword(secretPath, flairAdminPass!, writeAdminPassFile);
+            },
+            adminPasswordRequestSent: () => {
+              requestSent = true;
             },
             afterAdminPasswordApplied: () => {
               saveApplied = true;
@@ -684,14 +688,40 @@ addAdminPassOptions(
             process.exit(1);
           }
           if (saveApplied) {
-            console.error(`Error: the cluster was changed but the saved credential at ${secretPath} could not be confirmed: ${message}`);
-            console.error(`  Remedy: write the Flair administrator password to ${secretPath} (mode 0600), then run init again.`);
+            const held = stagedAdminPass!.stagedPath;
+            if (held !== null) {
+              console.error(`Error: the cluster accepted the Flair administrator password, but ${held} could not be moved into place: ${message}`);
+              console.error(`  The cluster now holds the password in ${held}.`);
+              console.error(`  Remedy: move ${held} over ${secretPath} with mode 0600.`);
+            } else {
+              console.error(`Error: the cluster accepted the Flair administrator password, but the saved credential at ${secretPath} could not be confirmed: ${message}`);
+              console.error(`  The cluster now holds the password in ${secretPath}.`);
+            }
+            process.exit(1);
+          }
+          if (stagedAdminPass && requestSent) {
+            const held = stagedAdminPass.stagedPath;
+            console.error(`Error: Fabric provisioning failed after the add/alter request was sent, so the outcome is uncertain: ${message}`);
+            if (held !== null) {
+              console.error(`  The cluster may hold the password in ${held}.`);
+              console.error(`  If that password logs in, move ${held} over ${secretPath} with mode 0600; if it does not, delete ${held}.`);
+            } else {
+              console.error(`  The cluster may hold the password saved at ${secretPath}.`);
+            }
             process.exit(1);
           }
           if (stagedAdminPass) {
-            stagedAdminPass.abort();
+            const stage = stagedAdminPass;
+            try {
+              stage.abort();
+            } catch (cleanupErr) {
+              const cleanupMessage = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr);
+              console.error(`Error: Fabric provisioning failed after the Flair administrator password was saved: ${message}`);
+              console.error(`Error: could not remove the staged credential ${stage.stagedPath}: ${cleanupMessage}`);
+              process.exit(1);
+            }
             console.error(`Error: Fabric provisioning failed after the Flair administrator password was saved: ${message}`);
-            if (stagedAdminPass.hadExistingFile) {
+            if (stage.hadExistingFile) {
               console.error(`  The existing credential file at ${secretPath} was left unchanged.`);
             } else {
               console.error(`  The saved password is kept at ${secretPath}; reuse it on the next run.`);

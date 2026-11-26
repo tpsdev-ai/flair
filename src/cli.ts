@@ -4168,6 +4168,12 @@ export interface FabricProvisionHooks {
    * changed on the cluster.
    */
   beforeAdminPasswordApplied?: () => void;
+  /**
+   * Runs immediately before the add_user/alter_user request that sets
+   * `admin`'s password is sent. A failure after this point may have reached
+   * the cluster even when this function throws.
+   */
+  adminPasswordRequestSent?: () => void;
   /** Runs after add_user/alter_user for `admin` succeeded. */
   afterAdminPasswordApplied?: () => void;
 }
@@ -4198,8 +4204,15 @@ export async function provisionFabric(
       `Could not read the cluster's existing users, so provisioning refused to change anything: ${message}`,
     );
   }
-  // list_users returns an array of user objects with role/permission info
-  const users = Array.isArray(userInfo) ? userInfo : [];
+  // list_users returns an array of user objects with role/permission info.
+  // A success response of any other shape is unknown, and an unknown is never
+  // "no super_user": refuse before the password is saved or anything is written.
+  if (!Array.isArray(userInfo)) {
+    throw new Error(
+      "The cluster's list_users response was not an array, so provisioning refused to change anything",
+    );
+  }
+  const users = userInfo;
   const adminRecord = users.find(
     (u: any) => u.username === clusterAdminUser || u.user?.username === clusterAdminUser,
   );
@@ -4246,6 +4259,7 @@ export async function provisionFabric(
   } else {
     console.log(`Provisioning Harper user 'admin' as super_user...`);
     try {
+      hooks.adminPasswordRequestSent?.();
       await callOpsApi(opsTarget, {
         operation: "add_user",
         username: "admin",
