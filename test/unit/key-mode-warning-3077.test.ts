@@ -358,6 +358,30 @@ test.skipIf(POSIX_ONLY)("a key reached through FLAIR_KEY_DIR and the default dir
   }
 }, 60_000);
 
+describe("the mode scan's location results", () => {
+  test("an absent location is silent", () => {
+    const root = mkdtempSync(join(scratch, "absent-"));
+    const scan = scanAgentKeyModes([
+      { dir: join(root, "no-such-keys"), suffix: ".key" },
+      { dir: join(root, "no-such-legacy"), suffix: "-priv.key" },
+    ]);
+    expect(scan.unreadable).toEqual([]);
+    expect(scan.findings).toEqual([]);
+  });
+
+  test("an unreadable directory listed under two locations is reported once", () => {
+    const root = mkdtempSync(join(scratch, "dup-unreadable-"));
+    const notADir = join(root, "keys");
+    writeFileSync(notADir, "not a directory");
+    const scan = scanAgentKeyModes([
+      { dir: notADir, suffix: ".key" },
+      { dir: notADir, suffix: "-priv.key" },
+    ]);
+    expect(scan.unreadable).toHaveLength(1);
+    expect(scan.unreadable[0].dir).toBe(notADir);
+  });
+});
+
 describe("the mode scan reads no key contents", () => {
   test.skipIf(POSIX_ONLY)("scanAgentKeyModes lstats keys in its standard locations without opening or reading them", () => {
     const home = makeHome("no-read");
