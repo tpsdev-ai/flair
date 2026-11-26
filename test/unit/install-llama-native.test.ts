@@ -37,6 +37,22 @@ describe("install-llama-native", () => {
     expect(messages.join("\n")).toContain(`command "bun" "add" "--no-save" "@node-llama-cpp/linux-x64@${version}"; cwd ${cwd}`);
   });
 
+  test("checkout selects the requested platform pin from the lockfile", () => {
+    const cwd = fixture();
+    const lockfile = join(cwd, "bun.lock");
+    writeFileSync(lockfile, JSON.stringify({ packages: { "harper-fabric-embeddings": [
+      "harper-fabric-embeddings@0.5.0", "", { optionalDependencies: {
+        "@node-llama-cpp/linux-x64": "3.22.3",
+        "@node-llama-cpp/mac-arm64-metal": "3.17.2",
+      } },
+    ] } }));
+    const { calls, runner } = recordingRunner();
+    const result = installLlamaNative(["--platform", "mac-arm64-metal"], { cwd, runner, log, lockfile });
+    expect(result.version).toBe("3.17.2");
+    expect(result.argv).toEqual(["add", "--no-save", "@node-llama-cpp/mac-arm64-metal@3.17.2"]);
+    expect(calls).toEqual([["bun", ["add", "--no-save", "@node-llama-cpp/mac-arm64-metal@3.17.2"], { cwd, shell: false, stdio: "inherit" }]]);
+  });
+
   test("installed mode runs npm in the selected directory and reports its manifest", () => {
     const cwd = fixture();
     const dir = join(cwd, "installed tree");
