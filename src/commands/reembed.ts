@@ -430,7 +430,7 @@ export async function reembedServerSupportError(baseUrl: string): Promise<string
 /** The remedy for a one-sided target: which side was supplied, which is missing (flair#3128). */
 function oneSidedTargetRemedy(supplied: "HTTP" | "ops", missing: "HTTP" | "ops"): string {
   return `Only the ${supplied} port was supplied; the ${missing} port is missing. `
-    + "Pass both ports for one instance (--port and --ops-port, or FLAIR_URL with FLAIR_OPS_PORT), or complete ~/.flair/config.yaml.";
+    + "Pass the other port too (--port or FLAIR_URL with FLAIR_OPS_PORT), or complete ~/.flair/config.yaml.";
 }
 
 const REEMBED_LISTENER_UNAVAILABLE_REMEDY =
