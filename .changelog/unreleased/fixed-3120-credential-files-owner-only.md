@@ -1,0 +1,1 @@
+- **`flair export --include-key`, the node keystore seed and its generated passphrase file stay owner-only when the file already exists.** Each write stages the bytes in a `0600` temp file and renames it over the target, and an existing passphrase file with group or world bits is refused before it is read with `chmod 600 <path>`. On Windows the mode bits do not apply.

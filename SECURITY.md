@@ -153,6 +153,13 @@ narrower), and an owned directory with group or world bits is tightened to
 neither checks nor sets it. Legacy path
 `~/.tps/secrets/flair/<agentId>-priv.key` is also supported.
 
+`flair export --include-key` publishes its output through a `0600` temp file
+renamed over the target, so an existing output file's wider mode does not apply
+to the new contents. The keystore seed file and its generated passphrase file
+are written the same way, and an existing passphrase file with group or world
+bits is refused before it is read, with `chmod 600 <path>`. On Windows the mode
+bits do not apply.
+
 ### Key Generation
 
 Keys are generated during `flair agent add` using Ed25519 (via tweetnacl).

@@ -141,6 +141,7 @@ Treat `~/.flair/keys/<agent>.key` like an SSH private key:
 
 - **Stays on the host that owns the agent.** If your agent runs on a given host, the key lives on that host. If you spin up the same agent on another machine, **don't copy the key** — register a new agent identity (`flair agent add <id>-on-<other-host>`) on that machine. Different identities, same Flair instance can store memories for both, you decide cross-agent visibility.
 - **On POSIX, created owner-only (`0600`) from the first byte** by `flair agent add`, `flair init`, `flair principal add`, and `flair import`; an existing key with group or world bits is refused, not changed (`chmod 600 <path>`). Don't relax it.
+- **Export output and the keystore's own files follow the same rule.** `flair export --include-key` publishes its output through a `0600` temp file renamed over the target, so an existing output file's wider mode does not apply to the new contents. The keystore seed file and its generated passphrase file are written the same way, and an existing passphrase file with group or world bits is refused before it is read (`chmod 600 <path>`). On Windows the mode bits do not apply.
 - **Don't check it into git.** `.gitignore` should already exclude `~/.flair/keys/`; if you're ever tempted to share keys for "convenience," rotate first (`flair agent rotate-key <id>`).
 - **Backup separately**, encrypted. The `flair backup` command excludes private keys by default. Roll your own backup of `~/.flair/keys/` via age-encrypted archive if you want offsite recovery.
 

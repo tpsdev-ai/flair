@@ -9,7 +9,7 @@
  * (mode 0600). Never falls back to guessable data.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveHome } from "./lib/home.js";
 import { writeFilesAtomically } from "./lib/atomic-write.js";
@@ -56,6 +56,30 @@ function passphrasePath(): string {
 }
 
 /**
+ * Read the auto-generated passphrase through one no-follow descriptor, after
+ * refusing a file wider than owner-only. On Windows the mode check is skipped
+ * and the file is read by path.
+ */
+function readPassphraseFile(pp: string): string {
+  if (process.platform === "win32") {
+    return readFileSync(pp, "utf-8").trim();
+  }
+  const fd = openSync(pp, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const st = fstatSync(fd);
+    if ((st.mode & 0o077) !== 0) {
+      throw new Error(
+        `passphrase file ${pp} is accessible to other users (mode ${(st.mode & 0o777).toString(8).padStart(3, "0")}); ` +
+          `run chmod 600 ${pp} to make it owner-only`,
+      );
+    }
+    return readFileSync(fd, "utf-8").trim();
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
  * Get or create the keystore passphrase.
  * Priority: FLAIR_KEY_PASSPHRASE env var > auto-generated file.
  * Never falls back to guessable data (hostname, username, etc.).
@@ -68,9 +92,12 @@ function getPassphrase(): string {
 
   const pp = passphrasePath();
 
-  // Read existing auto-generated passphrase
-  if (existsSync(pp)) {
-    return readFileSync(pp, "utf-8").trim();
+  // Read existing auto-generated passphrase; a missing file falls through to
+  // generation, and any other open/read failure propagates.
+  try {
+    return readPassphraseFile(pp);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
   }
 
   // Generate a cryptographically random passphrase and persist it
@@ -79,7 +106,7 @@ function getPassphrase(): string {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
   const generated = randomBytes(32).toString("base64url");
-  writeFileSync(pp, generated, { mode: 0o600 });
+  writeFilesAtomically([{ path: pp, content: generated, mode: 0o600 }]);
   return generated;
 }
 
@@ -144,7 +171,7 @@ class FileKeyStore implements KeyStore {
     }
     const p = keyPath(instanceId);
     const encrypted = encryptSeed(seed);
-    writeFileSync(p, encrypted, { mode: 0o600 });
+    writeFilesAtomically([{ path: p, content: encrypted, mode: 0o600 }]);
   }
 }
 

@@ -9,7 +9,8 @@
 import { Command } from "commander";
 import { defaultKeysDir, resolveAdminUser, addAdminPassOptions } from "../lib/auth-resolve.js";
 import * as render from "../render.js";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { writeFilesAtomically } from "../lib/atomic-write.js";
 
 import { join, resolve } from "node:path";
 import { resolveHome } from "../lib/home.js";
@@ -151,8 +152,14 @@ addAdminPassOptions(
     const outputPath = resolve(rawOutputPath);
     mkdirSync(join(outputPath, ".."), { recursive: true });
     const fileMode = privateKey ? 0o600 : 0o644;
-    writeFileSync(outputPath, JSON.stringify(exportData, null, 2), { mode: fileMode });
-    if (privateKey) chmodSync(outputPath, 0o600); // enforce even if umask is permissive
+    const content = JSON.stringify(exportData, null, 2);
+    if (privateKey) {
+      // An existing output file's wider mode never applies to the new contents:
+      // the bytes go to a 0600 temp file and are renamed over the target.
+      writeFilesAtomically([{ path: outputPath, content, mode: 0o600 }]);
+    } else {
+      writeFileSync(outputPath, content, { mode: fileMode });
+    }
 
     console.log(`\n${render.icons.ok} ${render.wrap(render.c.green, `Agent '${agentId}' exported`)}`);
     console.log(render.kv("Memories", render.wrap(render.c.bold, String(memories.length))));
