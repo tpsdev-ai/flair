@@ -9,13 +9,13 @@
  *
  * Runs the real command in-process with a stubbed fetch and a captured exit.
  */
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { Command } from "commander";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import nacl from "tweetnacl";
 import { tempDir } from "../helpers/temp-dir";
-import { KEYLESS_SEARCH_LIMIT, bindCli, register } from "../../src/commands/reembed.ts";
+import { KEYLESS_SEARCH_LIMIT, bindCli, register, reembedTargetRefusalRemedy } from "../../src/commands/reembed.ts";
 import { resolveAgentHomeTarget } from "../../src/cli.js";
 import { setInstancePairOsReadsForTests } from "../../src/lib/local-instance-pair.ts";
 import { SIMULATED_LISTENER_TABLE } from "../helpers/simulated-instance-pair";
@@ -127,7 +127,7 @@ test("without --dry-run the limit still processes its candidate, prints the noti
   expect(exitCode).toBe(1);
 }, 30_000);
 
-for (const scenario of ["missing HTTP", "missing ops", "missing both", "unavailable listener table", "different proven pair", "override-named different proven pair"] as const) {
+for (const scenario of ["missing HTTP", "missing ops", "missing both", "unavailable listener table", "different proven pair", "override-named different proven pair", "derived target with no configured pair"] as const) {
   test(`the ${scenario} refusal prints its corresponding remedy`, async () => {
     const requests: string[] = [];
     setInstancePairOsReadsForTests(scenario === "unavailable listener table" ? {
@@ -141,9 +141,9 @@ for (const scenario of ["missing HTTP", "missing ops", "missing both", "unavaila
     const home = tempDir("reembed-target-3135-");
     const dataDir = join(home, ".flair", "data");
     mkdirSync(dataDir, { recursive: true });
-    const configuredHttp = scenario === "missing HTTP" || scenario === "missing both" ? null
+    const configuredHttp = scenario === "missing HTTP" || scenario === "missing both" || scenario === "derived target with no configured pair" ? null
       : scenario === "different proven pair" ? 8926 : scenario === "override-named different proven pair" ? 6926 : 7926;
-    const configuredOps = scenario === "missing ops" || scenario === "missing both" ? null
+    const configuredOps = scenario === "missing ops" || scenario === "missing both" || scenario === "derived target with no configured pair" ? null
       : scenario === "override-named different proven pair" ? 6925 : 7925;
     writeFileSync(join(dataDir, "harper-config.yaml"), [
       configuredHttp === null ? "" : `http:\n  port: ${configuredHttp}\n`,
@@ -153,11 +153,13 @@ for (const scenario of ["missing HTTP", "missing ops", "missing both", "unavaila
       privKeyPath: () => { throw new Error("unexpected key read"); },
       resolveHttpPort: () => 8926,
       resolveOpsPort: () => 7925,
-      resolveAgentHomeTarget: () => resolveAgentHomeTarget({
-        dataDir,
-        ...(scenario === "missing HTTP" ? {} : { port: scenario === "unavailable listener table" ? 7926 : 8926 }),
-        ...(scenario === "missing ops" || scenario === "missing both" ? {} : { opsPort: 7925 }),
-      }),
+      resolveAgentHomeTarget: () => scenario === "derived target with no configured pair"
+        ? { httpPort: 8926, opsPort: 7925, pairBound: false }
+        : resolveAgentHomeTarget({
+          dataDir,
+          ...(scenario === "missing HTTP" ? {} : { port: scenario === "unavailable listener table" ? 7926 : 8926 }),
+          ...(scenario === "missing ops" || scenario === "missing both" ? {} : { opsPort: 7925 }),
+        }),
       ambiguousInstanceTargetError: "ambiguous_instance_target",
     });
     const logs: string[] = [];
@@ -167,15 +169,18 @@ for (const scenario of ["missing HTTP", "missing ops", "missing both", "unavaila
       pass: process.env.FLAIR_ADMIN_PASS, hdb: process.env.HDB_ADMIN_PASSWORD,
       url: process.env.FLAIR_URL, ops: process.env.FLAIR_OPS_PORT, home: process.env.HOME,
     };
+    const namedHttp = scenario !== "missing HTTP" && scenario !== "derived target with no configured pair";
+    const namedOps = scenario !== "missing ops" && scenario !== "missing both" && scenario !== "derived target with no configured pair";
     process.env.HOME = home;
     delete process.env.FLAIR_URL;
-    delete process.env.FLAIR_OPS_PORT;
+    if (namedOps) process.env.FLAIR_OPS_PORT = "7925"; else delete process.env.FLAIR_OPS_PORT;
     process.env.FLAIR_ADMIN_PASS = "stub-admin-pass";
     delete process.env.HDB_ADMIN_PASSWORD;
     try {
       const program = new Command().exitOverride();
       register(program);
-      await expect(program.parseAsync(["reembed"], { from: "user" })).rejects.toThrow("EXIT:1");
+      const args = ["reembed", ...(namedHttp ? ["--port", "8926"] : [])];
+      await expect(program.parseAsync(args, { from: "user" })).rejects.toThrow("EXIT:1");
     } finally {
       if (saved.pass === undefined) delete process.env.FLAIR_ADMIN_PASS; else process.env.FLAIR_ADMIN_PASS = saved.pass;
       if (saved.hdb === undefined) delete process.env.HDB_ADMIN_PASSWORD; else process.env.HDB_ADMIN_PASSWORD = saved.hdb;
@@ -185,22 +190,22 @@ for (const scenario of ["missing HTTP", "missing ops", "missing both", "unavaila
     }
     const output = logs.join("\n");
     expect(output).toContain("ambiguous_instance_target");
+    // One remedy per condition: each case asserts its own and none of the others'.
     const remedies = [
-      "configure the missing port settings",
+      `Only the ${scenario === "missing HTTP" ? "ops" : "HTTP"} port was supplied; the ${scenario === "missing HTTP" ? "HTTP" : "ops"} port is missing.`,
       "run flair reembed where it can read Harper's listeners",
-      "check ~/.flair/config.yaml",
-      "Remove or correct the --port or FLAIR_URL override",
+      "The configured pair does not match the running instance",
+      "The named ports do not match the running instance",
+      "No port was named and the configuration names no complete pair",
     ];
     const expected = scenario.startsWith("missing") ? 0 : scenario === "unavailable listener table" ? 1
-      : scenario === "different proven pair" ? 2 : 3;
+      : scenario === "different proven pair" ? 2 : scenario === "override-named different proven pair" ? 3 : 4;
     for (const [index, remedy] of remedies.entries()) {
       if (index === expected) expect(output).toContain(remedy);
       else expect(output).not.toContain(remedy);
     }
     if (expected === 0) {
-      const side = scenario === "missing both" ? "HTTP and ops" : scenario.slice("missing ".length);
-      expect(output).toContain(`missing ${side} port settings`);
-      for (const override of ["--port", "FLAIR_URL", "FLAIR_OPS_PORT"]) expect(output).toContain(override);
+      expect(output).not.toContain("different instance ids");
       expect(requests).toEqual([]);
     } else {
       expect(requests).toEqual(["http://127.0.0.1:7925/"]);
@@ -209,6 +214,31 @@ for (const scenario of ["missing HTTP", "missing ops", "missing both", "unavaila
       expect(output).toContain("could not read the OS listener table");
       expect(output).not.toContain("does not match");
     }
-    if (expected === 2) expect(output).toContain("configured pair does not match the running instance");
+    if (expected === 2) expect(output).toContain("check ~/.flair/config.yaml");
   }, 10_000);
 }
+
+describe("reembedTargetRefusalRemedy — one remedy per condition (flair#3128)", () => {
+  test("(a) a derived target with no complete configured pair never names an override the operator did not pass", () => {
+    const remedy = reembedTargetRefusalRemedy({ kind: "pair-mismatch", source: "derived" });
+    expect(remedy).toContain("No port was named and the configuration names no complete pair");
+    expect(remedy).toContain("complete ~/.flair/config.yaml");
+    expect(remedy).not.toContain("Only the");
+    expect(remedy).not.toContain("different instance ids");
+  });
+
+  test("(b) a one-sided target names the supplied side and the missing side", () => {
+    const remedy = reembedTargetRefusalRemedy({ kind: "one-sided", supplied: "ops", missing: "HTTP" });
+    expect(remedy).toContain("Only the ops port was supplied; the HTTP port is missing");
+    expect(remedy).not.toContain("No port was named");
+    expect(remedy).not.toContain("different instance ids");
+  });
+
+  test("(c) an instance-id disagreement points both ports at one instance", () => {
+    const remedy = reembedTargetRefusalRemedy({ kind: "identity-mismatch" });
+    expect(remedy).toContain("report different instance ids; point both at one instance");
+    expect(remedy).not.toContain("No port was named");
+    expect(remedy).not.toContain("Only the");
+    expect(remedy).not.toContain("configured pair");
+  });
+});

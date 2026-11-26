@@ -72,11 +72,11 @@ export type LocalInstancePairProof =
   | { kind: "unproven"; status: number | null; detail: string; remedy?: string; reason?: "listener-table-unavailable" };
 
 export class IncompleteInstancePairError extends Error {
-  readonly reason: { kind: "incomplete-config"; missing: string };
+  readonly reason: { kind: "one-sided"; supplied: "HTTP" | "ops"; missing: "HTTP" | "ops" };
 
-  constructor(message: string, missing: string) {
+  constructor(message: string, supplied: "HTTP" | "ops", missing: "HTTP" | "ops") {
     super(message);
-    this.reason = { kind: "incomplete-config", missing };
+    this.reason = { kind: "one-sided", supplied, missing };
   }
 }
 

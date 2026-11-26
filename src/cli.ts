@@ -1611,11 +1611,12 @@ export function decideAgentHomeTarget(i: AgentHomeTargetInputs): AgentHomeTarget
   }
   const opsNamed = namedOps !== null;
   if (httpNamed !== opsNamed) {
-    const [named, namedPort, other] = httpNamed ? ["HTTP", httpPort, "ops"] : ["ops", namedOps, "HTTP"];
+    const [named, namedPort, other]: ["HTTP" | "ops", number, "HTTP" | "ops"] = httpNamed ? ["HTTP", httpPort, "ops"] : ["ops", namedOps!, "HTTP"];
     throw new IncompleteInstancePairError(
       `${AMBIGUOUS_INSTANCE_TARGET_ERROR}: only the ${named} port (${namedPort}) was named, and no complete port pair could be resolved from config `
         + `(HTTP ${configuredHttp ?? "none"}, ops ${configuredOps ?? "none"}) to take the ${other} port from, so the two ports could address different instances. ${remedy}`,
-      [configuredHttp === null ? "HTTP" : null, configuredOps === null ? "ops" : null].filter(Boolean).join(" and "),
+      named,
+      other,
     );
   }
   if (namedOps !== null) return { httpPort, opsPort: namedOps, pairBound: false };

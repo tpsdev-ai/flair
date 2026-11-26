@@ -98,9 +98,9 @@ test.each([
   await expect(opsStoredModelReader(1, "Basic abc")("x")).rejects.toThrow();
 }, 10_000);
 
-test("opsStoredModelReader answers undefined for an empty result", async () => {
+test("opsStoredModelReader throws for an empty result, naming the id", async () => {
   stubFetch(() => Response.json([]));
-  expect(await opsStoredModelReader(1, "Basic abc")("x")).toBeUndefined();
+  await expect(opsStoredModelReader(1, "Basic abc")("x")).rejects.toThrow("answered an empty row array for id x");
 }, 10_000);
 
 test.each([

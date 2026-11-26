@@ -64,11 +64,11 @@ function ambiguousInstanceTargetError(): string {
 }
 
 /**
- * flair#2561: reads the `embeddingModel` stored on Memory row `id`, resolving
- * undefined when the answer is an empty result, and throwing when the request,
- * its JSON, or its shape fails, so a failed read is not reported as a missing
- * stamp. `flair reembed` reads the stamp from the stored row after each
- * re-embed PATCH, because the PATCH response carries no embedding field.
+ * flair#2561: reads the `embeddingModel` stored on Memory row `id`, throwing
+ * when the request, its JSON, its shape, or an empty answer for a row this run
+ * just wrote fails, so a failed read is not reported as a missing stamp.
+ * `flair reembed` reads the stamp from the stored row after each re-embed
+ * PATCH, because the PATCH response carries no embedding field.
  */
 export type StoredModelReader = (id: string) => Promise<unknown>;
 
@@ -96,7 +96,9 @@ export function opsStoredModelReader(opsPort: string | number, opsAuth: string):
     if (!Array.isArray(rows)) {
       throw new Error(`search_by_id answered ${describeJsonShape(rows)}, not a row array`);
     }
-    if (rows.length === 0) return undefined;
+    if (rows.length === 0) {
+      throw new Error(`search_by_id answered an empty row array for id ${id}`);
+    }
     const row = rows.find((r) => (r as { id?: unknown } | null)?.id === id);
     if (row === undefined) {
       throw new Error(`search_by_id answered ${rows.length} row(s) without the requested id`);
@@ -425,39 +427,52 @@ export async function reembedServerSupportError(baseUrl: string): Promise<string
   return reembedUnsupportedMessage(healthVersion(body));
 }
 
-const REEMBED_INCOMPLETE_PAIR_REMEDY =
-  "configure the missing port settings in ~/.flair/config.yaml (or the data directory's harper-config.yaml), or correct the HTTP override (--port or FLAIR_URL) and the ops override (FLAIR_OPS_PORT).";
+/** The remedy for a one-sided target: which side was supplied, which is missing (flair#3128). */
+function oneSidedTargetRemedy(supplied: "HTTP" | "ops", missing: "HTTP" | "ops"): string {
+  return `Only the ${supplied} port was supplied; the ${missing} port is missing. `
+    + "Pass both ports for one instance (--port and --ops-port, or FLAIR_URL with FLAIR_OPS_PORT), or complete ~/.flair/config.yaml.";
+}
 
 const REEMBED_LISTENER_UNAVAILABLE_REMEDY =
   "This CLI could not read the OS listener table; run flair reembed where it can read Harper's listeners.";
 
-/** The remedy appended to a target-pair refusal for an unbound pair (flair#3135). */
-const REEMBED_UNBOUND_TARGET_REMEDY =
-  "Remove or correct the --port or FLAIR_URL override and the FLAIR_OPS_PORT override so the instance's configured pair is used.";
-
-/** The remedy appended to a target-pair refusal for a configured pair (flair#3135). */
+/** The remedy for a proven pair that differs from a target configuration bound (flair#3135). */
 const REEMBED_PAIR_MISMATCH_REMEDY =
   "The configured pair does not match the running instance; check ~/.flair/config.yaml (or the data directory's harper-config.yaml).";
 
-/** Why the all-agent run refused its target pair (flair#3135). */
-type ReembedTargetRefusalReason =
-  | { kind: "incomplete-config" }
+/** The remedy for a proven pair that differs from two named ports (flair#3135). */
+const REEMBED_NAMED_PAIR_REMEDY =
+  "The named ports do not match the running instance; correct the --port or FLAIR_URL and FLAIR_OPS_PORT overrides.";
+
+/** The remedy for a proven pair that differs from a derived target (flair#3128). */
+const REEMBED_DERIVED_TARGET_REMEDY =
+  "No port was named and the configuration names no complete pair; name the instance (--port or FLAIR_URL with FLAIR_OPS_PORT) or complete ~/.flair/config.yaml.";
+
+/** The remedy for two ports that report different instance ids (flair#3128). */
+const REEMBED_IDENTITY_MISMATCH_REMEDY =
+  "The two ports report different instance ids; point both at one instance.";
+
+/** Why the all-agent run refused its target pair (flair#3135); one reason per condition (flair#3128). */
+export type ReembedTargetRefusalReason =
+  | { kind: "one-sided"; supplied: "HTTP" | "ops"; missing: "HTTP" | "ops" }
   | { kind: "listener-table-unavailable" }
-  | { kind: "pair-mismatch"; pairBound: boolean }
+  | { kind: "pair-mismatch"; source: "configured" | "named" | "derived" }
   | { kind: "identity-mismatch" }
   | { kind: "unproven"; remedy: string | undefined };
 
-/** Picks the remedy for every target-pair refusal; only a proven-pair mismatch reads `pairBound`. */
-function reembedTargetRefusalRemedy(reason: ReembedTargetRefusalReason): string {
+/** Picks the remedy for every target-pair refusal; one remedy per condition. */
+export function reembedTargetRefusalRemedy(reason: ReembedTargetRefusalReason): string {
   switch (reason.kind) {
-    case "incomplete-config":
-      return REEMBED_INCOMPLETE_PAIR_REMEDY;
+    case "one-sided":
+      return oneSidedTargetRemedy(reason.supplied, reason.missing);
     case "listener-table-unavailable":
       return REEMBED_LISTENER_UNAVAILABLE_REMEDY;
     case "pair-mismatch":
-      return reason.pairBound ? REEMBED_PAIR_MISMATCH_REMEDY : REEMBED_UNBOUND_TARGET_REMEDY;
+      return reason.source === "configured" ? REEMBED_PAIR_MISMATCH_REMEDY
+        : reason.source === "named" ? REEMBED_NAMED_PAIR_REMEDY
+          : REEMBED_DERIVED_TARGET_REMEDY;
     case "identity-mismatch":
-      return REEMBED_PAIR_MISMATCH_REMEDY;
+      return REEMBED_IDENTITY_MISMATCH_REMEDY;
     case "unproven":
       return reason.remedy ?? "This CLI could not prove the local port pair; check the ops endpoint's configuration and listener visibility.";
   }
@@ -470,11 +485,14 @@ function reembedTargetRefusalRemedy(reason: ReembedTargetRefusalReason): string 
  * HTTP port this run targets. This runs before any request to the HTTP port, so
  * every refusal precedes any PATCH. After the proof, the two endpoints'
  * reported instance identities are a second check: two different ids refuse.
+ * `source` names where the target came from, so a proven-pair mismatch gets the
+ * remedy for that source (flair#3128).
  */
 async function reembedTargetPairRefusal(
-  target: { httpPort: number; opsPort: number; pairBound: boolean },
+  target: { httpPort: number; opsPort: number },
   adminUser: string,
   adminPass: string,
+  source: "configured" | "named" | "derived",
 ): Promise<string | null> {
   const refusal = (detail: string, reason: ReembedTargetRefusalReason): string =>
     `❌ flair reembed stopped before its first write: ${ambiguousInstanceTargetError()} — ${detail}\n   ${reembedTargetRefusalRemedy(reason)}`;
@@ -489,7 +507,7 @@ async function reembedTargetPairRefusal(
   if (proof.httpPort !== target.httpPort) {
     return refusal(
       `the ops port ${target.opsPort} is proven to pair with HTTP port ${proof.httpPort}, not ${target.httpPort}`,
-      { kind: "pair-mismatch", pairBound: target.pairBound },
+      { kind: "pair-mismatch", source },
     );
   }
   const [httpIdentity, opsIdentity] = await Promise.all([
@@ -501,6 +519,13 @@ async function reembedTargetPairRefusal(
     return refusal(`the HTTP port reports instance ${decision.httpId}, the ops API reports instance ${decision.opsId}`, { kind: "identity-mismatch" });
   }
   return null;
+}
+
+/** Whether the caller named both ports of the all-agent target (flair#3128). */
+function bothTargetPortsNamed(opts: { port?: string | number; opsPort?: string | number }): boolean {
+  const httpNamed = (opts.port !== undefined && opts.port !== null) || /:\d+/.test(process.env.FLAIR_URL ?? "");
+  const opsNamed = (opts.opsPort !== undefined && opts.opsPort !== null) || Boolean(process.env.FLAIR_OPS_PORT);
+  return httpNamed && opsNamed;
 }
 
 export function register(program: Command): void {
@@ -566,14 +591,15 @@ program
         target = resolveAgentHomeTarget(opts);
       } catch (err) {
         console.error(err instanceof IncompleteInstancePairError
-          ? `❌ ${ambiguousInstanceTargetError()} — This CLI found no complete configured pair (missing ${err.reason.missing} port settings); ${reembedTargetRefusalRemedy({ kind: "incomplete-config" })}`
+          ? `❌ ${ambiguousInstanceTargetError()} — ${reembedTargetRefusalRemedy({ kind: "one-sided", supplied: err.reason.supplied, missing: err.reason.missing })}`
           : `❌ ${errorText(err)}`);
         process.exit(1);
       }
       baseUrl = `http://127.0.0.1:${target.httpPort}`;
       // flair#3135: prove the pair before ANY request to the HTTP port, so the
       // administrator credential reaches that port only after the proof.
-      const pairRefusal = await reembedTargetPairRefusal(target, resolveAdminUser(undefined), adminPassEnv!);
+      const source = target.pairBound ? "configured" : bothTargetPortsNamed(opts) ? "named" : "derived";
+      const pairRefusal = await reembedTargetPairRefusal(target, resolveAdminUser(undefined), adminPassEnv!, source);
       if (pairRefusal) {
         console.error(pairRefusal);
         process.exit(1);
