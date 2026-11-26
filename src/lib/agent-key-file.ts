@@ -332,8 +332,7 @@ export function createAgentKeyFile(privateKeyPath: string, data: string | Uint8A
   const tempPath = writeAgentKeyTemp(privateKeyPath, Buffer.from(data));
   try {
     testHooks?.beforePublish?.(tempPath, privateKeyPath);
-    // linkSync fails with EEXIST when the final path appears before publication;
-    // the caller then re-reads that file.
+    // linkSync fails with EEXIST when the final path appears before publication.
     linkSync(tempPath, privateKeyPath);
   } catch (error) {
     try {
