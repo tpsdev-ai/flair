@@ -22,6 +22,7 @@ import {
 } from "../../src/cli.js";
 import { startHarper, stopHarper, HARPER_STOP_BUDGET_MS, type HarperInstance } from "../helpers/harper-lifecycle.js";
 import { adminPasswordHintLine, finishRemoteInit, type RemoteInitPrincipal } from "../../src/commands/init.js";
+import { setRemoteAdminPassTestHooks } from "../../src/lib/remote-admin-pass.js";
 
 // ── Test setup ───────────────────────────────────────────────────────────────
 
@@ -1580,6 +1581,54 @@ describe("flair#3130 — remote init credential ordering (real Harper)", () => {
     expect(login.status, "the staged password must log in").toBe(200);
     expect(out.stdout, "the password must not reach stdout").not.toContain(chosenPass);
     expect(out.stderr, "the password must not reach stderr").not.toContain(chosenPass);
+  }, 150_000);
+
+  test("a failed rename with a missing stage reports password reset and preserves the credential", async () => {
+    const home = mkdtempSync(join(tmpDir, "home-"));
+    const secretsDir = join(home, ".tps", "secrets");
+    const secretPath = join(secretsDir, "flair-fabric-hdb");
+    const previous = "rename-recheck-previous\n";
+    mkdirSync(secretsDir, { recursive: true });
+    writeFileSync(secretPath, previous, { mode: 0o600 });
+    const chosenPass = "rename-recheck-applied";
+    let stagedPath = "";
+    setRemoteAdminPassTestHooks({ beforeRename: (path) => {
+      stagedPath = path;
+      expect(readFileSync(path, "utf8")).toBe(chosenPass + "\n");
+      rmSync(path);
+    } });
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: any, init?: any) => {
+      let operation: string | undefined;
+      try { operation = JSON.parse(init?.body)?.operation; } catch { operation = undefined; }
+      if (operation === "deploy_component") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      return REAL_FETCH(input, init);
+    }) as typeof fetch;
+    let out: Awaited<ReturnType<typeof runInitAction>>;
+    try {
+      out = await runInitAction(initArgs(harper, {
+        clusterUser: WRITER.user,
+        clusterPass: WRITER.pass,
+        flairPass: chosenPass,
+        agentId: "agent-rename-recheck",
+        keysDir: join(tmpDir, "keys-rename-recheck"),
+      }), home, { rethrow: false });
+    } finally {
+      setRemoteAdminPassTestHooks(undefined);
+      globalThis.fetch = prevFetch;
+    }
+
+    expect(stagedPath).not.toBe("");
+    expect(existsSync(stagedPath)).toBe(false);
+    expect(out.exitCode).toBe(1);
+    expect(out.stderr).toContain("No verified copy of the new password remains on this machine");
+    expect(out.stderr).toContain("Remedy: re-run the same remote init command");
+    expect(out.stderr).not.toContain("Remedy: move");
+    expect(readFileSync(secretPath, "utf8")).toBe(previous);
+    expect(statSync(secretPath).mode & 0o777).toBe(0o600);
+    expect((await harperOps(harper, "admin", chosenPass, { operation: "list_users" })).status).toBe(200);
+    expect(out.stdout).not.toContain(chosenPass);
+    expect(out.stderr).not.toContain(chosenPass);
   }, 150_000);
 
   test.each(["changed", "removed", "wide"] as const)("a %s stage after acceptance reports password reset and preserves the credential", async (state) => {

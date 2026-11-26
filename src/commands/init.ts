@@ -689,7 +689,8 @@ addAdminPassOptions(
           }
           if (saveApplied) {
             const held = stagedAdminPass!.stagedPath;
-            if (held !== null && stagedAdminPass!.stagedFileVerified) {
+            // Recheck the stage before advising a move: it may have changed since confirm().
+            if (held !== null && stagedAdminPass!.stagedFileVerified && stagedAdminPass!.stillValid()) {
               console.error(`Error: the cluster accepted the Flair administrator password, but ${held} could not be moved into place: ${message}`);
               console.error(`  The cluster now holds the password in ${held}.`);
               console.error(`  Remedy: move ${held} over ${secretPath} with mode 0600.`);

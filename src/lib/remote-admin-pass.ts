@@ -5,7 +5,7 @@
  *
  * Save before the cluster change so a failed save stops provisioning.
  * An existing credential stays in place until the staged value is confirmed.
- * After a password request is attempted, retain the stage for recovery.
+ * After a password attempt, keep a direct write or remaining sibling.
  */
 import {
   closeSync,
@@ -35,16 +35,24 @@ export class RemoteAdminPassError extends Error {
 export interface RemoteAdminPassStage {
   /** The final credential path. */
   readonly path: string;
-  /** True when a file was already present and must stay unchanged on failure. */
+  /** True when a file was present; unchanged if provisioning fails before publication. */
   readonly hadExistingFile: boolean;
-  /** The staged sibling holding the new value, or null when the value went to `path` directly. */
+  /** The allocated sibling path, or null for a direct write. */
   readonly stagedPath: string | null;
-  /** True after the staged file passes verification. */
+  /** True after the staged file passes verification at confirm(). */
   readonly stagedFileVerified: boolean;
-  /** Verify the saved value and publish a staged file. */
+  /** Verify the saved value; publish when a sibling exists. */
   confirm(): void;
+  /** Re-run the confirm() check on the saved file; false when it no longer passes. */
+  stillValid(): boolean;
   /** Attempts to remove the staged copy; a newly saved file is kept. */
   abort(): void;
+}
+
+let beforeRenameForTests: ((path: string) => void) | undefined;
+
+export function setRemoteAdminPassTestHooks(hooks: { beforeRename?: (path: string) => void } | undefined): void {
+  beforeRenameForTests = hooks?.beforeRename;
 }
 
 function errnoCode(error: unknown): string | undefined {
@@ -130,6 +138,15 @@ function verifySaved(path: string, expected: string): void {
   }
 }
 
+function passes(path: string, expected: string): boolean {
+  try {
+    verifySaved(path, expected);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Save `password` to `path` before the cluster change. Returns a stage whose
  * `confirm()` must run after the change succeeds.
@@ -155,6 +172,7 @@ export function stageRemoteAdminPassword(
       stagedPath: null,
       stagedFileVerified: false,
       confirm: () => verifySaved(path, content),
+      stillValid: () => passes(path, content),
       abort: () => {
         /* the freshly saved value is kept for the next run */
       },
@@ -175,13 +193,15 @@ export function stageRemoteAdminPassword(
     stagedPath: pending,
     get stagedFileVerified() { return stagedFileVerified; },
     confirm: () => {
-      // Check before publishing; retain the stage on failure for recovery.
+      // Check before publishing; leave a remaining sibling for recovery.
       // Rename publishes the checked file unless the staged path is replaced in between.
       stagedFileVerified = false;
       verifySaved(pending, content);
       stagedFileVerified = true;
+      beforeRenameForTests?.(pending);
       renameSync(pending, path);
     },
+    stillValid: () => passes(pending, content),
     abort: () => {
       try {
         unlinkSync(pending);
