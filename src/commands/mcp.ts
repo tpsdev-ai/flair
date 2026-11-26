@@ -13,7 +13,7 @@
  * non-strict entry into the strict check.
  */
 import { Command } from "commander";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 
 import { dirname, join } from "node:path";
 import nacl from "tweetnacl";
@@ -55,6 +55,7 @@ import {
 import { resolveHome } from "../lib/home.js";
 import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
 import { agentHomeEndpoint, resolveTargetInstanceId } from "../lib/agent-home.js";
+import { createAgentKeyFile, ensureAgentKeysDir } from "../lib/agent-key-file.js";
 
 export type McpCli = {
   resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
@@ -282,6 +283,25 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
     throw new McpClientNameExistsError(name);
   }
 
+  const privPath = privKeyPath(name, keysDir);
+  const pubPath = pubKeyPath(name, keysDir);
+  // Writing this grant's key into a pre-existing path would keep that path's
+  // wider mode (and replace its contents), so refuse before any request.
+  const existingKeyPaths: string[] = [];
+  for (const path of [privPath, pubPath]) {
+    try {
+      lstatSync(path);
+      existingKeyPaths.push(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  if (existingKeyPaths.length > 0) {
+    throw new Error(
+      `Key file ${existingKeyPaths.join(", ")} already exists — remove it, or grant under another name.`,
+    );
+  }
+
   // Defense-in-depth: refuse to silently reuse/clobber an unrelated
   // pre-existing Agent id (e.g. a human-run principal sharing this name).
   const opsUrl = typeof opsPortOrUrl === "number" ? `http://127.0.0.1:${opsPortOrUrl}/` : `${opsPortOrUrl.replace(/\/$/, "")}/`;
@@ -305,71 +325,87 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
     }
   }
 
-  mkdirSync(keysDir, { recursive: true });
-  const privPath = privKeyPath(name, keysDir);
-  const pubPath = pubKeyPath(name, keysDir);
+  ensureAgentKeysDir(keysDir);
   const kp = generateKeyPair();
   const seed = kp.secretKey.slice(0, 32);
   const pubKeyB64url = b64url(kp.publicKey);
 
-  writeFileSync(privPath, Buffer.from(seed), { mode: 0o600 });
-  chmodSync(privPath, 0o600);
-  writeFileSync(pubPath, Buffer.from(kp.publicKey));
+  const createdKeyPaths: string[] = [];
+  try {
+    createAgentKeyFile(privPath, Buffer.from(seed));
+    createdKeyPaths.push(privPath);
+    writeFileSync(pubPath, Buffer.from(kp.publicKey));
+    createdKeyPaths.push(pubPath);
 
-  const nowIso = now();
-  // flair#2433 — the new Agent row's home is THIS instance's federation id,
-  // resolved through the one shared rule; a create stamps it.
-  const home = await resolveTargetInstanceId(agentHomeEndpoint(opsUrl, adminUser, adminPass, fetchImpl));
-  const insertRes = await fetchImpl(opsUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: authHeader },
-    body: JSON.stringify({
-      operation: "insert",
-      database: "flair",
-      table: "Agent",
-      records: [{
-        id: name,
-        name,
-        type: "agent",
-        kind: "agent",
-        status: "active",
-        displayName: name,
-        admin: false,
-        defaultTrustTier: "unverified",
-        runtime: "headless",
-        publicKey: pubKeyB64url,
-        originatorInstanceId: home,
-        createdAt: nowIso,
-        updatedAt: nowIso,
-      }],
-    }),
-  });
-  if (!insertRes.ok) {
-    // Roll back the key files we just wrote — nothing left behind locally
-    // on a failed grant.
-    for (const p of [privPath, pubPath]) {
-      try { const { unlinkSync } = await import("node:fs"); unlinkSync(p); } catch { /* best effort */ }
+    const nowIso = now();
+    // flair#2433 — the new Agent row's home is THIS instance's federation id,
+    // resolved through the one shared rule; a create stamps it.
+    const home = await resolveTargetInstanceId(agentHomeEndpoint(opsUrl, adminUser, adminPass, fetchImpl));
+    const insertRes = await fetchImpl(opsUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: authHeader },
+      body: JSON.stringify({
+        operation: "insert",
+        database: "flair",
+        table: "Agent",
+        records: [{
+          id: name,
+          name,
+          type: "agent",
+          kind: "agent",
+          status: "active",
+          displayName: name,
+          admin: false,
+          defaultTrustTier: "unverified",
+          runtime: "headless",
+          publicKey: pubKeyB64url,
+          originatorInstanceId: home,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        }],
+      }),
+    });
+    if (!insertRes.ok) {
+      const text = await insertRes.text().catch(() => "");
+      throw new Error(`Failed to create Agent '${name}' via operations API (${insertRes.status}): ${text}`);
     }
-    const text = await insertRes.text().catch(() => "");
-    throw new Error(`Failed to create Agent '${name}' via operations API (${insertRes.status}): ${text}`);
+
+    const clientId = `${issuer.replace(/\/+$/, "")}/MCPClientMetadata/${name}`;
+    const entry: McpClientManifestEntry = {
+      name,
+      agentId: name,
+      clientId,
+      keyFile: privPath,
+      pubKeyFile: pubPath,
+      issuer,
+      createdAt: nowIso,
+      status: "active",
+    };
+    writeMcpClientManifest(manifestPath, [...manifest, entry]);
+
+    const resource = `${issuer.replace(/\/+$/, "")}/mcp`;
+    const config = buildMcpGrantConfig({ name, resource, keyFile: privPath });
+    return { entry, config };
+  } catch (error) {
+    // Roll back the key files this call created — nothing left behind locally
+    // on a failed grant, and a retry needs no manual cleanup.
+    if (createdKeyPaths.length > 0) {
+      const leftBehind: string[] = [];
+      for (const path of createdKeyPaths) {
+        try {
+          unlinkSync(path);
+        } catch {
+          leftBehind.push(path);
+        }
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      const cleanup = leftBehind.length === 0
+        ? "removed the key files this call created"
+        : `could not remove key file(s) ${leftBehind.join(", ")}`;
+      throw new Error(`${message}; ${cleanup}`, { cause: error });
+    }
+    throw error;
   }
-
-  const clientId = `${issuer.replace(/\/+$/, "")}/MCPClientMetadata/${name}`;
-  const entry: McpClientManifestEntry = {
-    name,
-    agentId: name,
-    clientId,
-    keyFile: privPath,
-    pubKeyFile: pubPath,
-    issuer,
-    createdAt: nowIso,
-    status: "active",
-  };
-  writeMcpClientManifest(manifestPath, [...manifest, entry]);
-
-  const resource = `${issuer.replace(/\/+$/, "")}/mcp`;
-  const config = buildMcpGrantConfig({ name, resource, keyFile: privPath });
-  return { entry, config };
 }
 
 export interface McpRevokeParams {

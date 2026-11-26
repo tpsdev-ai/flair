@@ -16,9 +16,10 @@
  *   - no key material ever reaches stdout/console output
  */
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, existsSync, fstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setAgentKeyFileTestHooks } from "../../src/lib/agent-key-file.ts";
 
 import {
   grantMcpClient,
@@ -46,6 +47,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setAgentKeyFileTestHooks(undefined);
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -216,17 +218,95 @@ describe("grantMcpClient — duplicate-name rejection", () => {
     expect(readMcpClientManifest(manifestPath)).toHaveLength(0);
   });
 
-  test("rolls back the key files it wrote if the Agent insert fails", async () => {
-    const { fetchImpl } = mockOpsFetch({ failInsert: true });
-    await expect(
-      grantMcpClient(
+  test("removes both key files when the Agent insert fails, and a retry succeeds", async () => {
+    let thrown: Error | undefined;
+    try {
+      await grantMcpClient(
         { name: "will-fail", keysDir, manifestPath, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "s3cret" },
-        { fetchImpl },
-      ),
-    ).rejects.toThrow(/Failed to create Agent/);
+        { fetchImpl: mockOpsFetch({ failInsert: true }).fetchImpl },
+      );
+    } catch (error) {
+      thrown = error as Error;
+    }
+    expect(thrown?.message).toMatch(/Failed to create Agent/);
+    expect(thrown?.message).toMatch(/removed the key files this call created/);
     expect(existsSync(join(keysDir, "will-fail.key"))).toBe(false);
     expect(existsSync(join(keysDir, "will-fail.pub"))).toBe(false);
     expect(readMcpClientManifest(manifestPath)).toHaveLength(0);
+
+    const { entry } = await grantMcpClient(
+      { name: "will-fail", keysDir, manifestPath, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "s3cret" },
+      { fetchImpl: mockOpsFetch().fetchImpl },
+    );
+    expect(readFileSync(entry.keyFile).length).toBe(32);
+    expect(statSync(entry.keyFile).mode & 0o777).toBe(0o600);
+    expect(readMcpClientManifest(manifestPath)).toHaveLength(1);
+  });
+});
+
+// ─── grant: key files ───────────────────────────────────────────────────────
+
+describe("grantMcpClient — key files", () => {
+  test("refuses a pre-existing private key path before any request, leaving its bytes and mode untouched", async () => {
+    mkdirSync(keysDir, { recursive: true });
+    const keyPath = join(keysDir, "existing-key.key");
+    const original = Buffer.from("0123456789abcdef0123456789abcdef");
+    writeFileSync(keyPath, original, { mode: 0o644 });
+    chmodSync(keyPath, 0o644);
+
+    const { fetchImpl, calls } = mockOpsFetch();
+    await expect(
+      grantMcpClient(
+        { name: "existing-key", keysDir, manifestPath, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "s3cret" },
+        { fetchImpl },
+      ),
+    ).rejects.toThrow(/already exists — remove it, or grant under another name/);
+
+    expect(calls).toHaveLength(0);
+    expect(readFileSync(keyPath).equals(original)).toBe(true);
+    expect(statSync(keyPath).mode & 0o777).toBe(0o644);
+    expect(existsSync(join(keysDir, "existing-key.pub"))).toBe(false);
+    expect(readMcpClientManifest(manifestPath)).toHaveLength(0);
+  });
+
+  test("refuses a pre-existing public key path too", async () => {
+    mkdirSync(keysDir, { recursive: true });
+    writeFileSync(join(keysDir, "pub-taken.pub"), Buffer.from("peer-key"));
+
+    const { fetchImpl, calls } = mockOpsFetch();
+    await expect(
+      grantMcpClient(
+        { name: "pub-taken", keysDir, manifestPath, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "s3cret" },
+        { fetchImpl },
+      ),
+    ).rejects.toThrow(/already exists — remove it, or grant under another name/);
+
+    expect(calls).toHaveLength(0);
+    expect(existsSync(join(keysDir, "pub-taken.key"))).toBe(false);
+  });
+
+  test("creates the private key through the exclusive helper, owner-only before the first byte", async () => {
+    let firstWriteMode: number | undefined;
+    const published: string[] = [];
+    setAgentKeyFileTestHooks({
+      beforeFirstWrite: (fd) => {
+        firstWriteMode = fstatSync(fd).mode & 0o777;
+      },
+      beforePublish: (_tempPath, finalPath) => {
+        published.push(finalPath);
+      },
+    });
+
+    const { fetchImpl } = mockOpsFetch();
+    const { entry } = await grantMcpClient(
+      { name: "new-helper", keysDir, manifestPath, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "s3cret" },
+      { fetchImpl },
+    );
+
+    expect(firstWriteMode).toBe(0o600);
+    expect(published).toEqual([entry.keyFile]);
+    expect(readFileSync(entry.keyFile).length).toBe(32);
+    expect(statSync(entry.keyFile).mode & 0o777).toBe(0o600);
   });
 });
 
