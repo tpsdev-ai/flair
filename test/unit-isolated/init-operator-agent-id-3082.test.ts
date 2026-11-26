@@ -178,7 +178,7 @@ describe("flair init --agent-id refuses a reserved administrator username before
 });
 
 describe("remote init refuses case and whitespace variants of flair-agent on both administrator inputs", () => {
-  const variants = ["Flair-Agent", " flair-agent", "FLAIR-AGENT"];
+  const variants = ["Flair-Agent", " flair-agent", "FLAIR-AGENT", "flair-agent ", "Flair-Agent "];
 
   function expectReservedRefused(home: string, result: ReturnType<typeof runInit>, role: string): void {
     const out = result.stdout + result.stderr;

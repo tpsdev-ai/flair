@@ -4234,9 +4234,21 @@ export async function provisionFabric(
     usernames.push(username);
     superUsers.push(superUser);
   }
+  const clusterAdminRecords = usernames.filter((name) => name === clusterAdminUser).length;
+  if (clusterAdminRecords !== 1) {
+    throw new Error(
+      `The cluster's list_users response does not confirm the cluster administrator '${clusterAdminUser}' exactly once, so provisioning refused to change anything`,
+    );
+  }
+  const adminRecords = usernames.filter((name) => name === DEFAULT_ADMIN_USER).length;
+  if (adminRecords > 1) {
+    throw new Error(
+      `The cluster's list_users response lists more than one Flair administrator '${DEFAULT_ADMIN_USER}' record, so provisioning refused to change anything`,
+    );
+  }
   const clusterAdminIndex = usernames.indexOf(clusterAdminUser);
-  const clusterAdminIsSuperUser = clusterAdminIndex !== -1 && superUsers[clusterAdminIndex] === true;
-  const adminExists = usernames.includes(DEFAULT_ADMIN_USER);
+  const clusterAdminIsSuperUser = superUsers[clusterAdminIndex] === true;
+  const adminExists = adminRecords === 1;
 
   if (!clusterAdminIsSuperUser) {
     // Save the password before anything on the cluster changes.

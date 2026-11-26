@@ -2,10 +2,13 @@
  * init-remote-ops.test.ts — Integration tests for the atomic
  * `flair init --remote` provisioning flow.
  *
- * Hermetic cases build a real tarball from temporary files and mock the ops
- * upload and REST responses; provisioning branches and the init action also run
- * against a spawned Harper. Verifies operation ordering, idempotence, timeout handling,
- * the secret-file write and remote-init refusals.
+ * Provisioning sends `add_user` when the cluster's user list has no `admin`
+ * record and `alter_user` when it has one; a listed super_user cluster
+ * administrator takes the reuse branch instead of an `admin` write. Tarball
+ * cases build a real archive from temporary files; other hermetic cases mock
+ * their own ops upload and REST responses. Provisioning branches and the init
+ * action also run against a spawned Harper. Verifies operation ordering,
+ * idempotence, timeout handling, the secret-file write and remote-init refusals.
  */
 
 import { describe, test, expect, beforeAll, beforeEach, afterEach, afterAll, mock } from "bun:test";
@@ -375,7 +378,7 @@ describe("provisionFabric — full happy path", () => {
     expect(addUserCalled).toBe(false);
   });
 
-  test("uses alter_user and never add_user when list_users reports an existing admin", async () => {
+  test("sends alter_user and never add_user for admin when list_users lists an admin record", async () => {
     let addUserCalled = false;
     let alterUserCalled = false;
 
@@ -503,6 +506,91 @@ describe("provisionFabric — full happy path", () => {
     expect(out.stderr).toContain("provisioning refused to change anything");
     const seen = readFileSync(requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
     expectNoWriteRequest(seen, "malformed list_users", TEST_OPTS.opsTarget);
+    expect(seen.map((call: { operation?: string }) => call.operation)).toEqual(["list_users"]);
+    expect(existsSync(join(secretsDir, "flair-fabric-hdb"))).toBe(false);
+    expect(existsSync(secretsDir) ? readdirSync(secretsDir) : []).toEqual([]);
+  }, 15_000);
+
+  test.each([
+    ["an empty list", []],
+    ["only unrelated users", [{ username: "someone-else", role: { permission: { super_user: false } } }]],
+    ["a duplicate cluster-administrator record", [
+      { username: "cluster-admin", role: { permission: { super_user: false } } },
+      { username: "cluster-admin", role: { permission: { super_user: true } } },
+    ]],
+  ])("init refuses list_users with %s that does not confirm the cluster administrator exactly once", async (_label, response) => {
+    const home = mkdtempSync(join(tmpDir, "home-"));
+    const secretsDir = join(home, ".tps", "secrets");
+    const requestsPath = join(tmpDir, "requests.jsonl");
+    const preloadPath = join(tmpDir, "ops-preload.ts");
+    writeFileSync(preloadPath, `
+      import { appendFileSync } from "node:fs";
+      globalThis.fetch = async (input, opts) => {
+        const url = String(input);
+        const operation = opts?.body ? JSON.parse(opts.body).operation : undefined;
+        appendFileSync(${JSON.stringify(requestsPath)}, JSON.stringify({ url, method: opts?.method ?? "GET", operation }) + "\\n");
+        if (operation !== "list_users") throw new Error("unexpected request after list_users");
+        return new Response(${JSON.stringify(JSON.stringify(response))}, { status: 200 });
+      };
+    `);
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+      !/^(FLAIR_|HARPER_|HDB_|FABRIC_|ROOTPATH$)/.test(key),
+    ));
+    const out = spawnSync(process.execPath, [
+      "--preload", preloadPath, join(originalCwd, "src", "cli.ts"), "init",
+      "--target", TEST_OPTS.target, "--ops-target", TEST_OPTS.opsTarget,
+      "--force", "--cluster-admin-user", TEST_OPTS.clusterAdminUser,
+      "--cluster-admin-pass", TEST_OPTS.clusterAdminPass,
+      "--flair-admin-pass", TEST_OPTS.flairAdminPass,
+    ], { env: { ...env, HOME: home, USERPROFILE: home }, encoding: "utf8", timeout: 10_000 });
+
+    expect(out.error, `init failed to run: ${out.stderr}`).toBeUndefined();
+    expect(out.status).toBe(1);
+    expect(out.stderr).toContain(`cluster administrator '${TEST_OPTS.clusterAdminUser}'`);
+    expect(out.stderr).toContain("does not confirm");
+    const seen = readFileSync(requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    expectNoWriteRequest(seen, "unconfirmed cluster administrator", TEST_OPTS.opsTarget);
+    expect(seen.map((call: { operation?: string }) => call.operation)).toEqual(["list_users"]);
+    expect(existsSync(join(secretsDir, "flair-fabric-hdb"))).toBe(false);
+    expect(existsSync(secretsDir) ? readdirSync(secretsDir) : []).toEqual([]);
+  }, 15_000);
+
+  test("init refuses a list_users answer with more than one Flair administrator record", async () => {
+    const home = mkdtempSync(join(tmpDir, "home-"));
+    const secretsDir = join(home, ".tps", "secrets");
+    const requestsPath = join(tmpDir, "requests.jsonl");
+    const preloadPath = join(tmpDir, "ops-preload.ts");
+    const response = [
+      { username: "cluster-admin", role: { permission: { super_user: false } } },
+      { username: "admin", role: { permission: { super_user: true } } },
+      { username: "admin", role: { permission: { super_user: false } } },
+    ];
+    writeFileSync(preloadPath, `
+      import { appendFileSync } from "node:fs";
+      globalThis.fetch = async (input, opts) => {
+        const url = String(input);
+        const operation = opts?.body ? JSON.parse(opts.body).operation : undefined;
+        appendFileSync(${JSON.stringify(requestsPath)}, JSON.stringify({ url, method: opts?.method ?? "GET", operation }) + "\\n");
+        if (operation !== "list_users") throw new Error("unexpected request after list_users");
+        return new Response(${JSON.stringify(JSON.stringify(response))}, { status: 200 });
+      };
+    `);
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+      !/^(FLAIR_|HARPER_|HDB_|FABRIC_|ROOTPATH$)/.test(key),
+    ));
+    const out = spawnSync(process.execPath, [
+      "--preload", preloadPath, join(originalCwd, "src", "cli.ts"), "init",
+      "--target", TEST_OPTS.target, "--ops-target", TEST_OPTS.opsTarget,
+      "--force", "--cluster-admin-user", TEST_OPTS.clusterAdminUser,
+      "--cluster-admin-pass", TEST_OPTS.clusterAdminPass,
+      "--flair-admin-pass", TEST_OPTS.flairAdminPass,
+    ], { env: { ...env, HOME: home, USERPROFILE: home }, encoding: "utf8", timeout: 10_000 });
+
+    expect(out.error, `init failed to run: ${out.stderr}`).toBeUndefined();
+    expect(out.status).toBe(1);
+    expect(out.stderr).toContain("more than one Flair administrator 'admin' record");
+    const seen = readFileSync(requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    expectNoWriteRequest(seen, "duplicate Flair administrator", TEST_OPTS.opsTarget);
     expect(seen.map((call: { operation?: string }) => call.operation)).toEqual(["list_users"]);
     expect(existsSync(join(secretsDir, "flair-fabric-hdb"))).toBe(false);
     expect(existsSync(secretsDir) ? readdirSync(secretsDir) : []).toEqual([]);
