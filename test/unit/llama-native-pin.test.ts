@@ -303,3 +303,13 @@ describe("check-llama-native-pin", () => {
     )).toBe(true);
   });
 });
+
+describe("llama script declarations", () => {
+  test.each(["llama-native-version", "llama-installed-version"])("%s.d.mts declares only names the module exports", async (name) => {
+    const declared = [...readFileSync(join(ROOT, "scripts/ci", `${name}.d.mts`), "utf8")
+      .matchAll(/^export (?:declare )?(?:const|function|let|var|class) ([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]);
+    const mod = await import(join(ROOT, "scripts/ci", `${name}.mjs`));
+    expect(declared.length).toBeGreaterThan(0);
+    expect(declared.filter((n) => !(n in mod))).toEqual([]);
+  });
+});
