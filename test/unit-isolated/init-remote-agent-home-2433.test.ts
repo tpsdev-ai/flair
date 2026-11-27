@@ -8,7 +8,7 @@ import { tempDir } from "../helpers/temp-dir.ts";
 const CLI = pathToFileURL(join(import.meta.dir, "../../src/cli.ts")).href;
 
 /** `flair init --target <hub> --remote --agent-id` against an in-memory ops API. */
-function runRemoteInit(home: string, options: { observeFirstWrite?: string; umaskZero?: boolean } = {}) {
+function runRemoteInit(home: string, options: { observeFirstWrite?: string; umaskZero?: boolean; operatorAgentRow?: boolean } = {}) {
   const env: NodeJS.ProcessEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     !/^(FLAIR_|HARPER_|HDB_|FABRIC_|TPS_TEST_ROOT$|ROOTPATH$)/.test(key),
   ));
@@ -24,6 +24,7 @@ function runRemoteInit(home: string, options: { observeFirstWrite?: string; umas
     keyFile.setAgentKeyFileTestHooks({ beforeFirstWrite: (fd) => appendFileSync(${JSON.stringify(options.observeFirstWrite)}, String(fstatSync(fd).mode & 0o777) + "\\n") });`
       : ""}
     const log = ${JSON.stringify(join(home, "ops.jsonl"))};
+    const operatorAgentRow = ${JSON.stringify(options.operatorAgentRow ?? false)};
     let instances = [];
     const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
     globalThis.fetch = async (input, init) => {
@@ -38,6 +39,11 @@ function runRemoteInit(home: string, options: { observeFirstWrite?: string; umas
         }
       }
       if (url.pathname === "/Health") return json({ ok: true });
+      // An absent record returns HTTP 404 rather than a 200 record.
+      if (operatorAgentRow && url.pathname.startsWith("/Agent/")) {
+        return json({ id: decodeURIComponent(url.pathname.slice("/Agent/".length)) });
+      }
+      if (/^\\/(Memory|Agent|OrgSkillAssignment)\\//.test(url.pathname)) return json({}, 404);
       return json({});
     };
     const { program } = await import(${JSON.stringify(CLI)});
@@ -81,6 +87,19 @@ describe("flair init --remote stamps the hub's own id on the first agent (flair#
       : [];
     expect(ops.some((entry) => entry.operation === "insert")).toBe(false);
     expect(statSync(keyPath).mode & 0o777).toBe(0o644);
+  }, 60_000);
+
+  test("an Agent record with the operator's id refuses the run with no ops insert", () => {
+    const home = tempDir("irh-opsagent-");
+    const result = runRemoteInit(home, { operatorAgentRow: true });
+    const out = result.stdout + result.stderr;
+    expect(result.status, out).toBe(1);
+    expect(out).toContain(`an Agent record has the operator's id "admin"`);
+    const logPath = join(home, "ops.jsonl");
+    const ops = existsSync(logPath)
+      ? readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
+      : [];
+    expect(ops.some((entry) => entry.operation === "insert")).toBe(false);
   }, 60_000);
 
   test("a fresh key is 0600 at its first write under a zero umask", () => {
