@@ -1610,11 +1610,13 @@ async function writeSkillCreateOrUpdate(
   // verb can re-plan with it.
   const runSkillWrite = (heldIds: ReadonlySet<string>, headMoved: { id: string | null }) => runSkillVersionWrite({
     ctx,
-    // A POST to an existing target plans in a fresh OWNED transaction
-    // (flair#3170): the joined request transaction's reads can predate a
-    // commit the verb's target read already saw (a previous write's embedding
-    // backfill), and the stale-target check would refuse the retry.
-    joinCallerTransaction: method === "post" && !storedRow,
+    // A POST that SUPERSEDES an existing target plans in a fresh OWNED
+    // transaction (flair#3170): the joined request transaction's reads can
+    // predate a commit the verb's target read already saw (a previous write's
+    // embedding backfill), and the stale-target check would refuse the retry.
+    // An in-place reserved seed POST supersedes nothing and keeps the caller's
+    // transaction, so a caller abort still undoes it.
+    joinCallerTransaction: method === "post" && (!storedRow || inPlaceId != null),
     subjectId,
     agentId: String(content.agentId),
     deferConfirmation: true,
@@ -2600,12 +2602,22 @@ export class Memory extends (databases as any).flair.Memory {
       content.id = postUrlTargetId;
     }
     const postSnapshot = content.id ? await (databases as any).flair.Memory.get(content.id) : null;
-    // flair#3170: a skill write to an existing target decides on the target as
-    // currently committed. The request transaction's snapshot can predate a
-    // commit the write must accept (the previous write's embedding backfill),
-    // and the plan re-reads committed state, so both reads name one version. A
-    // target that reads as gone keeps the snapshot row and the plan refuses it.
-    const postStored = postSnapshot && isSkillWrite(content)
+    // The in-place predicate the skill plan uses, a reserved seed id named by
+    // the body or the URL: an in-place POST supersedes nothing, so it keeps the
+    // request-snapshot target read and the caller's transaction (flair#3170).
+    const postInPlace = [content?.id, postUrlTargetId].some((candidate) => isReservedSeedId("Memory", candidate));
+    // flair#3170: a skill POST that supersedes a target present in the request
+    // snapshot decides on that target as currently committed. A commit that
+    // lands after the request transaction opened and before this read — the
+    // previous write's embedding backfill — is seen here and again by the
+    // plan, so the stale-target check compares two committed reads and the
+    // retry is not refused. A change another writer commits to that target
+    // after this read and before the plan is still refused; a content change
+    // answers 409 skill_target_changed. A target that reads as gone keeps the
+    // snapshot row and the plan refuses it. The body may omit `tags` and
+    // inherit the skill tag from the stored row, the source prepareSkillBody
+    // uses, so either row's tags decide whether this read applies.
+    const postStored = postSnapshot && !postInPlace && (isSkillWrite(content) || rowIsSkill(postSnapshot))
       ? ((await (databases as any).flair.Memory.get(String(postSnapshot.id), {})) ?? postSnapshot)
       : postSnapshot;
     // flair#2561: the fields this request supplies that `stored` can report —
