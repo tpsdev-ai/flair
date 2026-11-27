@@ -45,10 +45,11 @@ const SENTINEL = "admin:test-pass";
  * the value of HARPER_START_CREDENTIALS, so a test can assert that variable
  * reached no child process. Every call also
  * writes a warning to stderr, so a wait that reads stderr as container state
- * fails (a). `inspect-open-stdout` answers and then holds stdout open past the
- * deadline (p); `inspect-ignore-term` ignores SIGTERM and sleeps past its cap
- * (q); `inspect-slow-final` sleeps 1.5 s before the second inspect answers (o);
- * `inspect-final-stall` sleeps past the final inspect's cap (r); `logs-error`
+ * fails (a). `inspect-delay-ms` holds the first inspect's answer for that many
+ * milliseconds (`inspectDelayMs`); `inspect-open-stdout` answers and then
+ * holds stdout open past the deadline (p); `inspect-ignore-term` ignores
+ * SIGTERM and sleeps past its cap (q); `inspect-slow-final` sleeps 1.5 s before
+ * the second inspect answers (o); `inspect-final-stall` sleeps past the final inspect's cap (r); `logs-error`
  * makes `docker logs` fail with that file's text (s); `logs-ignore-term`
  * ignores SIGTERM and sleeps past the logs cap (t); `logs-secret-stderr`
  * appends that file's text to a successful `docker logs` stderr, and
@@ -78,6 +79,10 @@ case "$cmd" in
       *State.Running*State.ExitCode*) : ;;
       *) echo "docker stub: unexpected format '$fmt'" >&2; exit 64 ;;
     esac
+    if [ -f "$WAIT_STUB_DIR/inspect-delay-ms" ] && [ ! -f "$WAIT_STUB_DIR/inspect-delay-applied" ]; then
+      : > "$WAIT_STUB_DIR/inspect-delay-applied"
+      sleep "$(awk -v ms="$(cat "$WAIT_STUB_DIR/inspect-delay-ms")" 'BEGIN { printf "%.3f", ms / 1000 }')"
+    fi
     if [ -f "$WAIT_STUB_DIR/inspect-ignore-term" ]; then
       trap '' TERM
       exec sleep 6
@@ -152,6 +157,7 @@ function sandbox(
     exitCode?: string;
     inspectFails?: boolean;
     inspectSequence?: string[];
+    inspectDelayMs?: number;
     inspectSlowFinal?: boolean;
     inspectSleep?: boolean;
     inspectOpenStdout?: boolean;
@@ -175,6 +181,9 @@ function sandbox(
   writeFileSync(join(root, "exit-code"), `${options.exitCode ?? "0"}\n`);
   if (options.inspectFails) writeFileSync(join(root, "inspect-fails"), "");
   if (options.inspectSequence) writeFileSync(join(root, "inspect-sequence"), `${options.inspectSequence.join("\n")}\n`);
+  if (options.inspectDelayMs !== undefined) {
+    writeFileSync(join(root, "inspect-delay-ms"), String(options.inspectDelayMs));
+  }
   if (options.inspectSlowFinal) writeFileSync(join(root, "inspect-slow-final"), "");
   if (options.inspectSleep) writeFileSync(join(root, "inspect-sleep"), "");
   if (options.inspectOpenStdout) writeFileSync(join(root, "inspect-open-stdout"), "");
@@ -293,7 +302,7 @@ const WAIT_ARGS = (url: string) => [
   "--poll-interval-ms",
   "100",
   "--per-request-ms",
-  "1000",
+  "2000",
 ];
 
 describe("wait-for-harper.mjs", () => {
@@ -394,7 +403,7 @@ describe("wait-for-harper.mjs", () => {
         "--poll-interval-ms",
         "5000",
         "--per-request-ms",
-        "500",
+        "2000",
         "--budget-seconds",
         "2",
       ]);
@@ -422,7 +431,7 @@ describe("wait-for-harper.mjs", () => {
         "--budget-seconds",
         "1",
         "--per-request-ms",
-        "500",
+        "2000",
       ]);
 
       expect(result.status).toBe(1);
@@ -445,7 +454,7 @@ describe("wait-for-harper.mjs", () => {
         "--budget-seconds",
         "1",
         "--per-request-ms",
-        "200",
+        "2000",
         "--progress-interval-ms",
         "200",
       ]);
@@ -465,10 +474,10 @@ describe("wait-for-harper.mjs", () => {
 
     // The flag wins over the environment, and the timeout line names it.
     const server = await health(STATUS(503));
-    const box = sandbox();
+    const box = sandbox({ inspectDelayMs: 500 });
     const result = await run(
       box,
-      ["--container", "harper-flair", ...WAIT_ARGS(server.url), "--budget-seconds", "1", "--per-request-ms", "200"],
+      ["--container", "harper-flair", ...WAIT_ARGS(server.url), "--budget-seconds", "1", "--per-request-ms", "2000"],
       { HARPER_START_BUDGET_S: "50" },
     );
     expect(result.output).toContain("Harper was not ready within 1s");
@@ -583,7 +592,7 @@ describe("wait-for-harper.mjs", () => {
           "--budget-seconds",
           "2",
           "--per-request-ms",
-          "500",
+          "2000",
         ],
         {},
         5000,
@@ -646,10 +655,10 @@ describe("wait-for-harper.mjs", () => {
     "(m) HARPER_START_BUDGET_S alone bounds the wait",
     async () => {
       const server = await health(STATUS(503));
-      const box = sandbox();
+      const box = sandbox({ inspectDelayMs: 500 });
       const result = await run(
         box,
-        ["--container", "harper-flair", "--url", server.url, "--poll-interval-ms", "100", "--per-request-ms", "200"],
+        ["--container", "harper-flair", "--url", server.url, "--poll-interval-ms", "100", "--per-request-ms", "2000"],
         { HARPER_START_BUDGET_S: "2" },
         6000,
       );
@@ -975,7 +984,7 @@ describe("wait-for-harper.mjs", () => {
         "--budget-seconds",
         "2",
         "--per-request-ms",
-        "500",
+        "2000",
       ]);
 
       expect(result.status).toBe(1);
