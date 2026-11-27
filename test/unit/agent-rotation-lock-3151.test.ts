@@ -18,7 +18,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as fs from "node:fs";
-import { acquireAgentRotationLock } from "../../src/lib/agent-rotation-lock.js";
+import { acquireAgentRotationLock, setAgentRotationLockTestHook } from "../../src/lib/agent-rotation-lock.js";
 
 const cleanup: Array<() => void> = [];
 
@@ -127,6 +127,33 @@ describe("flair#3151 — agent rotation lock", () => {
     expect(res.message).toContain("not a regular file");
     expect(res.message).toContain("a symlink");
     expect(readFileSync(target, "utf-8")).toBe("target\n");
+  });
+
+  it("omits the holder record when the open flags lack O_NOFOLLOW and O_NONBLOCK", () => {
+    const dir = tempDir();
+    const lockPath = join(dir, "agent-a.rotate-key.lock");
+    writeFileSync(lockPath, "123 2026-11-26T00:00:00Z host-a\n");
+    const marker = "MARKER-6c1f2b9e";
+    const target = join(dir, "target");
+    writeFileSync(target, `456 2026-11-26T00:00:00Z ${marker}\n`);
+    // Swap the lock path for a symlink after the lstat, standing between the
+    // kind check and the diagnostic open.
+    setAgentRotationLockTestHook(() => {
+      rmSync(lockPath);
+      symlinkSync(target, lockPath);
+      return { O_RDONLY: fs.constants.O_RDONLY };
+    });
+    let res;
+    try {
+      res = acquireAgentRotationLock({ id: "agent-a", keysDir: dir, retry: { attempts: 2, delayMs: 1 } });
+    } finally {
+      setAgentRotationLockTestHook(undefined);
+    }
+
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.message).toContain(lockPath);
+    expect(res.message).not.toContain(marker);
   });
 
   it("reports an lstat error as an unchecked path", () => {

@@ -69,8 +69,15 @@ export interface AgentRotationLockOptions {
   retry?: { attempts: number; delayMs: number };
 }
 
-/** Test hook; production leaves it unset. */
-let beforeHolderOpen: ((lockPath: string) => void) | undefined;
+/** Open flags for the diagnostic holder read; `fs.constants` is the default. */
+type HolderOpenFlags = Pick<typeof constants, "O_RDONLY" | "O_NOFOLLOW" | "O_NONBLOCK">;
+
+/**
+ * Test hook; production leaves it unset. It may return the open flags for the
+ * diagnostic holder read, so a test can present a platform that defines
+ * neither `O_NOFOLLOW` nor `O_NONBLOCK`.
+ */
+let beforeHolderOpen: ((lockPath: string) => Partial<HolderOpenFlags> | void) | undefined;
 
 export function setAgentRotationLockTestHook(hook: typeof beforeHolderOpen): void {
   beforeHolderOpen = hook;
@@ -127,11 +134,22 @@ function nonRegularLockRefusal(lockPath: string, id: string, kind: string): stri
   );
 }
 
-/** Read the diagnostic holder record from a regular lock file only. */
-function readLockHolder(lockPath: string): string | null {
+/**
+ * Read the diagnostic holder record from a regular lock file only. Without
+ * both `O_NOFOLLOW` and `O_NONBLOCK` the open could follow a symlink swapped
+ * in after the lstat, so there is no holder diagnostic.
+ */
+function readLockHolder(lockPath: string, flags: Partial<HolderOpenFlags> = constants): string | null {
+  if (
+    typeof flags.O_RDONLY !== "number" ||
+    typeof flags.O_NOFOLLOW !== "number" ||
+    typeof flags.O_NONBLOCK !== "number"
+  ) {
+    return null;
+  }
   let fd: number;
   try {
-    fd = openSync(lockPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    fd = openSync(lockPath, flags.O_RDONLY | flags.O_NOFOLLOW | flags.O_NONBLOCK);
   } catch {
     return null;
   }
@@ -228,8 +246,8 @@ export function acquireAgentRotationLock(opts: AgentRotationLockOptions): AgentR
   if (kind !== "regular" && kind !== "missing") {
     return { ok: false, message: nonRegularLockRefusal(lockPath, opts.id, kind) };
   }
-  if (kind === "regular") beforeHolderOpen?.(lockPath);
-  const holder = kind === "regular" ? readLockHolder(lockPath) : null;
+  const hookFlags = kind === "regular" ? beforeHolderOpen?.(lockPath) : undefined;
+  const holder = kind === "regular" ? readLockHolder(lockPath, hookFlags ?? constants) : null;
   return { ok: false, message: refusalLine(lockPath, opts.id, holder) };
 }
 
