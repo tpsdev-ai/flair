@@ -29,6 +29,7 @@ import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper } from "../helpers/harpe
 import { componentWithReplayProbe, type ProbeComponent } from "../helpers/component-with-replay-probe";
 import { RaceHarness, newAgent } from "../helpers/embedding-writer-race";
 import { SEED_SKILL_ROW_ID } from "../../resources/seed-ids.js";
+import { promotionContentHash } from "../../resources/promotion-binding.ts";
 
 // An administrator agent: its supplied short vector is stored as sent, which
 // leaves the middleware's backfill a vector to compute.
@@ -70,6 +71,22 @@ function skillBody(content: string) {
     agentId: writer.id, content, trigger: "when the same skill POST is retried",
     tags: ["skill"], durability: "persistent", embedding: SHORT_EMBEDDING,
   };
+}
+const PROMOTED_AT = "2026-01-01T00:00:00.000Z";
+/** Stamp a valid promotion verdict over the row's stored content. */
+async function stampPromoted(id: string): Promise<void> {
+  const row = await h.readRow(id);
+  await h.rawUpdate(id, {
+    promotionStatus: "approved", promotedAt: PROMOTED_AT, promotedBy: "reviewer",
+    promotionContentHash: promotionContentHash(row.content),
+  });
+}
+/** The stamp must survive a normal Memory read (a mismatch is suppressed). */
+async function assertReadsApproved(id: string): Promise<void> {
+  const res = await h.signed(writer, "GET", memPath(id));
+  const text = await res.text();
+  expect(res.status, `read ${res.status}: ${text.slice(0, 200)}`).toBe(200);
+  expect(JSON.parse(text).promotionStatus, "the promotion stamp did not read as approved").toBe("approved");
 }
 /** Poll until the row holds a vector longer than the seeded short one. */
 async function waitForLongVector(id: string, timeoutMs = 30_000): Promise<any> {
@@ -216,10 +233,8 @@ afterAll(async () => {
     expect(first.status, await first.clone().text()).toBeLessThan(300);
     // The first write's own backfill must not be a competing change here.
     expect((await waitForLongVector(skillId)).embedding.length).toBeGreaterThan(100);
-    await h.rawUpdate(skillId, {
-      promotionStatus: "approved", promotedAt: "2026-01-01T00:00:00.000Z",
-      promotedBy: "reviewer", promotionContentHash: "promoted-hash",
-    });
+    await stampPromoted(skillId);
+    await assertReadsApproved(skillId);
     const versionsBefore = await versionsOf(skillId);
     const noContent = { agentId: writer.id, trigger: "when the same skill POST is retried", tags: ["skill"], durability: "persistent" };
     h.arm(COMMITTED_READ);
@@ -242,6 +257,41 @@ afterAll(async () => {
     expect(JSON.parse(text).error).toBe("skill_target_changed");
     const target = await h.readRow(skillId);
     expect(target?.content, "the retry overwrote the target").toBe("another writer replaced this skill's content");
+    expect(target?.promotionStatus ?? null, "the retry restored a cleared stamp").toBeNull();
+    const successors = await h.ops({ operation: "search_by_value", database: "flair", table: "Memory", search_attribute: "supersedes", search_value: skillId, get_attributes: ["*"] });
+    expect(Array.isArray(successors) ? successors : [], "the retry created a successor").toEqual([]);
+    expect(await versionsOf(skillId), "the retry appended a version row").toEqual(versionsBefore);
+  }, 120_000);
+
+  it("CONTROL: a promotion-only change another writer commits under a content-identical POST answers 409 skill_target_changed without a successor or a version", async () => {
+    const skillId = `srb-skill-${randomUUID()}`;
+    const body = skillBody("a promoted skill whose stamp another writer clears under the retry");
+    const first = await h.signed(writer, "POST", memPath(skillId), body);
+    expect(first.status, await first.clone().text()).toBeLessThan(300);
+    // The first write's own backfill must not be a competing change here.
+    expect((await waitForLongVector(skillId)).embedding.length).toBeGreaterThan(100);
+    await stampPromoted(skillId);
+    await assertReadsApproved(skillId);
+    const versionsBefore = await versionsOf(skillId);
+    h.arm(COMMITTED_READ);
+    const retry = h.signed(writer, "POST", memPath(skillId), body);
+    let cleared = false;
+    try {
+      await h.assertPaused(COMMITTED_READ);
+      await h.rawUpdate(skillId, {
+        promotionStatus: null, promotedAt: null, promotedBy: null, promotionContentHash: null,
+      });
+      cleared = true;
+    } finally {
+      h.letGo(COMMITTED_READ);
+    }
+    expect(cleared, "the promotion clear did not commit").toBe(true);
+    const res = await retry;
+    const text = await res.text();
+    expect(res.status, `retry ${res.status}: ${text.slice(0, 200)}`).toBe(409);
+    expect(JSON.parse(text).error).toBe("skill_target_changed");
+    const target = await h.readRow(skillId);
+    expect(target?.content, "the retry overwrote the target").toBe(body.content);
     expect(target?.promotionStatus ?? null, "the retry restored a cleared stamp").toBeNull();
     const successors = await h.ops({ operation: "search_by_value", database: "flair", table: "Memory", search_attribute: "supersedes", search_value: skillId, get_attributes: ["*"] });
     expect(Array.isArray(successors) ? successors : [], "the retry created a successor").toEqual([]);
