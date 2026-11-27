@@ -345,6 +345,9 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
   const trackKeyFile = (path: string, identity: KeyFileIdentity) => {
     createdKeyFiles.push({ path, dev: identity.dev, ino: identity.ino });
   };
+  // Set once the insert request may have reached the server: from then on the
+  // Agent row may exist, so the key files stay unless its deletion is acked.
+  let agentMayExist = false;
   try {
     createAgentKeyFile(privPath, Buffer.from(seed), trackKeyFile);
     createAgentKeyFile(pubPath, Buffer.from(kp.publicKey), trackKeyFile);
@@ -353,6 +356,7 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
     // flair#2433 — the new Agent row's home is THIS instance's federation id,
     // resolved through the one shared rule; a create stamps it.
     const home = await resolveTargetInstanceId(agentHomeEndpoint(opsUrl, adminUser, adminPass, fetchImpl));
+    agentMayExist = true;
     const insertRes = await fetchImpl(opsUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: authHeader },
@@ -378,6 +382,7 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
       }),
     });
     if (!insertRes.ok) {
+      agentMayExist = false;
       const text = await insertRes.text().catch(() => "");
       throw new Error(`Failed to create Agent '${name}' via operations API (${insertRes.status}): ${text}`);
     }
@@ -399,17 +404,14 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
     const config = buildMcpGrantConfig({ name, resource, keyFile: privPath });
     return { entry, config };
   } catch (error) {
-    // On failure, try to remove the key files this call created. File identity decides
-    // eligibility at the check: a path is removed (by path) only if, when
-    // checked, it still names the file this grant created. A path replaced
-    // between that check and the unlink can still be removed; a POSIX unlink by
-    // name cannot close that window. On POSIX the keys directory has no group or
-    // world permissions: a new directory requests 0700, and an existing narrower
-    // one keeps its mode. A path that no longer names the
+    // File identity decides eligibility at the check: a path is removed (by path)
+    // only if, when checked, it still names the file this grant created. A path
+    // replaced between that check and the unlink can still be removed; a POSIX
+    // unlink by name cannot close that window. A path that no longer names the
     // created file, or whose check or unlink fails with an error other than
     // ENOENT, is named in the error; a created file moved to another name is
     // not tracked.
-    if (createdKeyFiles.length > 0) {
+    const cleanupCreatedKeyFiles = (): string[] => {
       const leftBehind: string[] = [];
       for (const created of createdKeyFiles) {
         let current: Stats;
@@ -433,7 +435,36 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
           if (code !== "ENOENT") leftBehind.push(`${created.path} (not removed: ${code ?? "unlink failed"})`);
         }
       }
-      const message = error instanceof Error ? error.message : String(error);
+      return leftBehind;
+    };
+    const message = error instanceof Error ? error.message : String(error);
+    if (agentMayExist) {
+      let deleted = false;
+      try {
+        const delRes = await fetchImpl(opsUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: authHeader },
+          body: JSON.stringify({ operation: "delete", database: "flair", table: "Agent", ids: [name] }),
+        });
+        deleted = delRes.ok;
+      } catch {
+        /* deletion not acknowledged */
+      }
+      if (!deleted) {
+        throw new Error(
+          `${message}; Agent '${name}' may exist on the server and its deletion was not acknowledged, ` +
+          `so the key files were kept at ${privPath} and ${pubPath} — run \`flair agent remove ${name}\` and then remove them.`,
+          { cause: error },
+        );
+      }
+      const leftBehind = cleanupCreatedKeyFiles();
+      const outcome = leftBehind.length === 0
+        ? `the Agent '${name}' was deleted and its key files were removed`
+        : `the Agent '${name}' was deleted but key file(s) were kept: ${leftBehind.join("; ")}`;
+      throw new Error(`${message}; ${outcome}`, { cause: error });
+    }
+    if (createdKeyFiles.length > 0) {
+      const leftBehind = cleanupCreatedKeyFiles();
       const cleanup = leftBehind.length === 0
         ? "removed the key paths that still named this call's files when checked"
         : `could not remove key file(s): ${leftBehind.join("; ")}`;

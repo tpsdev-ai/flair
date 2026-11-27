@@ -24,7 +24,7 @@
  */
 
 import { describe, it, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, chmodSync, statSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -392,6 +392,46 @@ describe("applyKeyPrune — --apply moves prunable keys, leaves registered ones 
 
     const archiveDir = join(keysDir, PRUNED_DIR_NAME, "2026-07-18");
     expect(readdirSync(archiveDir).sort()).toEqual(["agent-stray.key", "agent-stray.key.2"]);
+  });
+});
+
+// ─── --apply keeps archived material owner-only (flair#3077 slice D) ──────
+
+describe("applyKeyPrune — archived material is owner-only (flair#3077 slice D)", () => {
+  async function staleEntries(agentId: string) {
+    writeSeedKey(keysDir, agentId);
+    globalThis.fetch = mockRegistrationFetch(new Set());
+    const classified = await classifyKeysDir(keysDir, BASE_URL, noInstanceRead);
+    expect(classified.aborted).toBe(false);
+    return classified.entries;
+  }
+
+  it("creates a missing archive directory owner-only", async () => {
+    const entries = await staleEntries("agent-archive-dir-new");
+    const archiveDir = join(keysDir, PRUNED_DIR_NAME, "2026-07-19");
+    const { moved } = applyKeyPrune(keysDir, entries, "2026-07-19");
+    expect(moved).toHaveLength(1);
+    expect(statSync(archiveDir).mode & 0o777).toBe(0o700);
+  });
+
+  it("tightens an existing world-readable archive directory to owner-only", async () => {
+    const entries = await staleEntries("agent-archive-dir-wide");
+    const archiveDir = join(keysDir, PRUNED_DIR_NAME, "2026-07-19");
+    mkdirSync(archiveDir, { recursive: true });
+    chmodSync(archiveDir, 0o755);
+    const { moved } = applyKeyPrune(keysDir, entries, "2026-07-19");
+    expect(moved).toHaveLength(1);
+    expect(statSync(archiveDir).mode & 0o777).toBe(0o700);
+  });
+
+  it("leaves an archived private key owner-only when the key was 0644", async () => {
+    const entries = await staleEntries("agent-archive-key-wide");
+    const keyPath = join(keysDir, "agent-archive-key-wide.key");
+    chmodSync(keyPath, 0o644);
+    const { moved } = applyKeyPrune(keysDir, entries, "2026-07-19");
+    expect(moved).toHaveLength(1);
+    const archived = join(keysDir, PRUNED_DIR_NAME, "2026-07-19", "agent-archive-key-wide.key");
+    expect(statSync(archived).mode & 0o777).toBe(0o600);
   });
 });
 

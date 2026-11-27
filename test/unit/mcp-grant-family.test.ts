@@ -443,7 +443,7 @@ describe("grantMcpClient — key files", () => {
     expect(existsSync(pubPath)).toBe(false);
   });
 
-  test.each([false, true])("manifest write failure after insert reports cleanup (unlink fails=%s)", async (failUnlink) => {
+  test.each([false, true])("manifest write failure after insert: an acknowledged Agent delete removes the key files (unlink fails=%s)", async (failUnlink) => {
     mkdirSync(manifestPath);
     const { fetchImpl, calls } = mockOpsFetch();
     let message = "";
@@ -458,12 +458,14 @@ describe("grantMcpClient — key files", () => {
     } catch (error) { message = (error as Error).message; }
     expect(message).not.toBe("");
     expect(calls.some(call => call.operation === "insert")).toBe(true);
+    expect(calls.some(call => call.operation === "delete")).toBe(true);
     for (const extension of ["key", "pub"]) {
       const path = join(keysDir, `manifest-fail.${extension}`);
       expect(existsSync(path)).toBe(failUnlink);
       if (failUnlink) expect(message).toContain(path);
     }
-    expect(message).toContain(failUnlink ? "could not remove key file(s)" : "removed the key paths that still named this call's files when checked");
+    expect(message).toContain("was deleted");
+    expect(message).toContain(failUnlink ? "key file(s) were kept" : "its key files were removed");
   });
 
   test("a cleanup check that fails with an error other than ENOENT names the path and leaves it", async () => {
@@ -499,6 +501,64 @@ describe("grantMcpClient — key files", () => {
     expect(statSync(keysDir).mode & 0o077).toBe(0);
   });
 
+});
+
+// ─── grant: key custody after the Agent insert (flair#3077 slice C) ───────
+
+describe("grantMcpClient — key custody after the Agent insert (flair#3077 slice C)", () => {
+  test("a failure after a successful insert keeps the key files and the Agent, and names both", async () => {
+    // Make the manifest write fail after the insert: its parent path is a
+    // regular file, so mkdirSync throws once the Agent row exists.
+    const parentAsFile = join(dir, "manifest-parent");
+    writeFileSync(parentAsFile, "occupied");
+    const failingManifest = join(parentAsFile, "mcp-clients.json");
+
+    const { fetchImpl, calls } = mockOpsFetch({ failDelete: true });
+    let thrown: Error | undefined;
+    try {
+      await grantMcpClient(
+        { name: "client-kept", keysDir, manifestPath: failingManifest, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "s3cret" },
+        { fetchImpl },
+      );
+    } catch (error) { thrown = error as Error; }
+
+    const privPath = join(keysDir, "client-kept.key");
+    const pubPath = join(keysDir, "client-kept.pub");
+    expect(thrown).toBeDefined();
+    expect(existsSync(privPath)).toBe(true);
+    expect(existsSync(pubPath)).toBe(true);
+    expect(statSync(privPath).mode & 0o777).toBe(0o600);
+    expect(statSync(pubPath).mode & 0o777).toBe(0o600);
+    expect(thrown!.message).toContain("client-kept");
+    expect(thrown!.message).toContain(privPath);
+    expect(thrown!.message).toContain(pubPath);
+    expect(calls.some((c) => c.operation === "insert" && c.records?.[0]?.id === "client-kept")).toBe(true);
+    expect(calls.some((c) => c.operation === "delete" && c.ids?.[0] === "client-kept")).toBe(true);
+    expect(readMcpClientManifest(failingManifest)).toHaveLength(0);
+  });
+
+  test("a failure before the insert request is sent removes the key files as before", async () => {
+    const pubPath = join(keysDir, "client-pre-insert.pub");
+    const { fetchImpl, calls } = mockOpsFetch();
+    setAgentKeyFileTestHooks({
+      beforePublish: (_temp, finalPath) => {
+        if (finalPath === pubPath) throw new Error("pre-insert failure");
+      },
+    });
+    let thrown: Error | undefined;
+    try {
+      await grantMcpClient(
+        { name: "client-pre-insert", keysDir, manifestPath, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "s3cret" },
+        { fetchImpl },
+      );
+    } catch (error) { thrown = error as Error; }
+
+    expect(thrown?.message).toContain("pre-insert failure");
+    expect(existsSync(join(keysDir, "client-pre-insert.key"))).toBe(false);
+    expect(existsSync(pubPath)).toBe(false);
+    expect(calls.some((c) => c.operation === "insert")).toBe(false);
+    expect(calls.some((c) => c.operation === "delete")).toBe(false);
+  });
 });
 
 // ─── revoke: server-ack requirement ─────────────────────────────────────────

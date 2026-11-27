@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { existsSync, lstatSync, mkdirSync, renameSync, readdirSync, type Stats } from "node:fs";
+import { existsSync, chmodSync, lstatSync, mkdirSync, renameSync, readdirSync, type Stats } from "node:fs";
 import { join } from "node:path";
 import * as render from "../render.js";
 import { scanKeyDir } from "../lib/key-dir.js";
@@ -239,6 +239,46 @@ export interface KeysPruneOutcome {
   skipped: KeysPruneSkip[];
 }
 
+/** Owner-only: no group or world permission bits. */
+const OWNER_ONLY_DIR_MODE = 0o700;
+const OWNER_ONLY_KEY_MODE = 0o600;
+
+function modeText(stats: Stats): string {
+  return (stats.mode & 0o777).toString(8).padStart(4, "0");
+}
+
+/** Create `dir` if absent, then require it owner-only. An existing wider
+ *  directory is tightened; the mode is read back, and a directory that still
+ *  has group or world bits is refused with the exact remedy. */
+function ensureOwnerOnlyDir(dir: string): void {
+  mkdirSync(dir, { recursive: true, mode: OWNER_ONLY_DIR_MODE });
+  let stats = lstatSync(dir);
+  if ((stats.mode & 0o077) !== 0) {
+    try {
+      chmodSync(dir, OWNER_ONLY_DIR_MODE);
+    } catch (error) {
+      throw new Error(`${dir} is mode ${modeText(stats)}; run \`chmod 700 ${dir}\` to make it owner-only`, { cause: error });
+    }
+    stats = lstatSync(dir);
+    if ((stats.mode & 0o077) !== 0) {
+      throw new Error(`${dir} is mode ${modeText(stats)} after tightening; run \`chmod 700 ${dir}\` to make it owner-only`);
+    }
+  }
+}
+
+/** Tighten an archived private key to 0600 after the move, read back. */
+function tightenArchivedKey(path: string): void {
+  try {
+    chmodSync(path, OWNER_ONLY_KEY_MODE);
+  } catch (error) {
+    throw new Error(`${path} could not be made owner-only after the move; run \`chmod 600 ${path}\``, { cause: error });
+  }
+  const stats = lstatSync(path);
+  if ((stats.mode & 0o777) !== OWNER_ONLY_KEY_MODE) {
+    throw new Error(`${path} is mode ${modeText(stats)} after the move; run \`chmod 600 ${path}\``);
+  }
+}
+
 /** Archive prunable agent keys; node-shaped files without .pub stay in place.
  *  The post-move check tests the archive path's type, not object identity.
  *  The source path can change after pre-move/absence checks; the archive path
@@ -258,11 +298,11 @@ export function applyKeyPrune(
   if (prunable.length === 0) return { moved, skipped };
 
   const destDir = join(keysDir, PRUNED_DIR_NAME, dateStamp);
-  // Created before the first attempted move.
+  // Created before the first attempted move, owner-only.
   let existing: Set<string> | undefined;
   const archiveNames = (): Set<string> => {
     if (!existing) {
-      mkdirSync(destDir, { recursive: true });
+      ensureOwnerOnlyDir(destDir);
       existing = new Set(readdirSync(destDir));
     }
     return existing;
@@ -330,6 +370,7 @@ export function applyKeyPrune(
       if (ownerMoved) move(toOwner, fromOwner);
       throw err;
     }
+    tightenArchivedKey(to);
     moved.push({ name: e.name, movedTo: to });
   }
   return { moved, skipped };
