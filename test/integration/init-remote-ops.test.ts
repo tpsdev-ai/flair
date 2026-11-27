@@ -23,6 +23,7 @@ import {
   waitForFlairRestart,
   provisionFabric,
   callOpsApi,
+  OpsApiError,
   program,
 } from "../../src/cli.js";
 import { startHarper, stopHarper, HARPER_STOP_BUDGET_MS, type HarperInstance } from "../helpers/harper-lifecycle.js";
@@ -262,14 +263,14 @@ describe("callOpsApi", () => {
     expect(Array.isArray(result)).toBe(true);
   });
 
-  test("throws on non-ok response", async () => {
+  test("throws on non-ok response with the fixed description", async () => {
     globalThis.fetch = mock(async () => {
-      return new Response("unauthorized", { status: 401 });
+      return new Response(JSON.stringify({ error: "Login failed" }), { status: 401 });
     });
 
     await expect(
       callOpsApi(TEST_OPTS.opsTarget, { operation: "list_users" }, "bad", "creds"),
-    ).rejects.toThrow("Ops API call failed (401): unauthorized");
+    ).rejects.toThrow("Ops API call failed (401) for 'list_users': authentication failed");
   });
 });
 
@@ -489,13 +490,20 @@ describe("provisionFabric — full happy path", () => {
       return new Response(JSON.stringify({ error: "instanceId and publicKey required" }), { status: 400 });
     });
 
-    await expect(provisionFabric(
+    const error = await provisionFabric(
       TEST_OPTS.target,
       TEST_OPTS.opsTarget,
       TEST_OPTS.clusterAdminUser,
       TEST_OPTS.clusterAdminPass,
       TEST_OPTS.flairAdminPass,
-    )).rejects.toThrow("the cluster is read-only");
+    ).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(OpsApiError);
+    expect(error).toMatchObject({
+      status: 500,
+      operation: "add_user",
+      category: null,
+      message: "Ops API call failed (500) for 'add_user': the ops API refused the request (details withheld)",
+    });
     expect(alterUserCalled).toBe(false);
   });
 
@@ -825,6 +833,58 @@ describe("isStateChanging", () => {
       await server.close();
     }
   }, 20_000);
+});
+
+describe("callOpsApi on a real Harper (#3144)", () => {
+  let harper: HarperInstance;
+  const DUPLICATE_USER = "dupe-user-3144";
+  const SUBMITTED_PASSWORD = "submitted-pass-3144";
+
+  beforeAll(async () => {
+    harper = await startLocalHarper();
+    const created = await harperOps(harper, "admin", "test123", {
+      operation: "add_user", username: DUPLICATE_USER, password: SUBMITTED_PASSWORD, role: "super_user", active: true,
+    });
+    expect([200, 409], created.text).toContain(created.status);
+  }, 180_000);
+
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
+
+  test("a wrong password carries the fixed authentication-failed description", async () => {
+    const wrongPassword = "wrong-password-3144";
+    const basicHeader = `Basic ${Buffer.from(`admin:${wrongPassword}`).toString("base64")}`;
+    const err = await callOpsApi(harper.opsURL, { operation: "list_users" }, "admin", wrongPassword).then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    expect(err).toBeInstanceOf(OpsApiError);
+    const opsError = err as OpsApiError;
+    expect(opsError.category).toBe("authentication-failed");
+    expect(opsError.status).toBe(401);
+    expect(opsError.message).toBe("Ops API call failed (401) for 'list_users': authentication failed");
+    expect(opsError.message).not.toContain(wrongPassword);
+    expect(opsError.message).not.toContain(basicHeader);
+  }, 30_000);
+
+  test("a duplicate add_user failure carries the fixed description", async () => {
+    const err = await callOpsApi(harper.opsURL, {
+      operation: "add_user", username: DUPLICATE_USER, password: SUBMITTED_PASSWORD, role: "super_user", active: true,
+    }, "admin", "test123").then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    expect(err instanceof Error, "the duplicate add_user must throw").toBe(true);
+    const message = (err as Error).message;
+    expect(message).toContain("add_user");
+    expect(message).toMatch(/\(\d{3}\)/);
+    expect(message).toContain("the user already exists");
+    expect(message).not.toContain(DUPLICATE_USER);
+    expect(message).not.toContain(SUBMITTED_PASSWORD);
+    expect(message).not.toContain(Buffer.from(SUBMITTED_PASSWORD).toString("base64"));
+    expect(err instanceof OpsApiError && err.category === "already-exists").toBe(true);
+  }, 30_000);
 });
 
 describe("flair#3106 — reserved principal refusal (real Harper)", () => {
@@ -1619,10 +1679,14 @@ describe("flair#3130 — remote init credential ordering (real Harper)", () => {
     expect(recorder.all.map((call) => call.operation)).toEqual(["list_users", "deploy_component"]);
     expect(recorder.deployAuthOk()).toBe(true);
     expect(out.error).toBeInstanceOf(Error);
-    expect(out.error?.message ?? "").toContain("Ops API call failed (403)");
-    expect(out.error?.message ?? "").toContain("Operation 'deploy_component' is not permitted for this role's operations configuration");
+    expect(out.error?.message ?? "").toContain("Ops API call failed (403) for 'deploy_component'");
+    // The thrown message lacks the submitted password and the Basic credential.
+    expect(out.error?.message ?? "").toContain("the operation is not permitted for this role");
+    expect(out.error?.message ?? "").not.toContain("withheld");
+    expect((out.error?.message ?? "").includes("unauthorized_access")).toBe(false);
+    expect((out.error?.message ?? "").includes(NO_DEPLOY.pass)).toBe(false);
+    expect((out.error?.message ?? "").includes(basic(NO_DEPLOY.user, NO_DEPLOY.pass))).toBe(false);
     expect(out.stderr).toContain("deploy_component");
-    expect(out.stderr).toContain("not permitted for this role's operations configuration");
     expect(out.stderr).not.toContain("outcome is uncertain");
     expect(readFileSync(secretPath, "utf8")).toBe(state === "existing" ? previous : chosenPass + "\n");
     expect(statSync(secretPath).mode & 0o777).toBe(0o600);
