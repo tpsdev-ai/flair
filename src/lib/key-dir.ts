@@ -136,9 +136,7 @@ export function scanAgentKeyModes(
       }
       continue;
     }
-    const names = scan.entries.map((e) => e.name).filter((name) =>
-      name.endsWith(location.suffix) && name.length > location.suffix.length,
-    ).sort();
+    const names = scan.entries.map((e) => e.name).filter((name) => name.endsWith(location.suffix)).sort();
     for (const name of names) {
       const path = join(location.dir, name);
       const pathKey = join(dirKey, name);

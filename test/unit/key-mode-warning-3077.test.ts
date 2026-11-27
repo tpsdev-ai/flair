@@ -335,6 +335,21 @@ test.skipIf(POSIX_ONLY)("a wide key in the legacy directory is warned by doctor 
   }
 }, 60_000);
 
+test.skipIf(POSIX_ONLY)("a file named only by its location's suffix is warned by doctor and status", async () => {
+  const home = makeHome("suffix-only");
+  const key = writeKey(home, "", 0o644);
+  const legacyKeys = join(home, ".tps", "secrets", "flair");
+  mkdirSync(legacyKeys, { recursive: true });
+  const legacyKey = join(legacyKeys, "-priv.key");
+  writeFileSync(legacyKey, "seed-suffix-only-3077");
+  chmodSync(legacyKey, 0o644);
+  for (const args of [["doctor"], ["status", "--url", url]]) {
+    const { output } = await runCli(args, home);
+    expect(output).toContain(`agent key file ${key} has mode 0644`);
+    expect(output).toContain(`agent key file ${legacyKey} has mode 0644`);
+  }
+}, 60_000);
+
 test.skipIf(POSIX_ONLY)("overlapping legacy and environment directories keep the legacy filename pattern", async () => {
   const home = makeHome("overlapping-legacy");
   const legacyKeys = join(home, ".tps", "secrets", "flair");
