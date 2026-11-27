@@ -10,8 +10,10 @@
  * bits is refused before its bytes are read; positive partial writes resume;
  * zero-byte and throwing writes fail and remove the temp file this call
  * created, best effort; an owner-only key that appears before
- * publication is reused, not overwritten; and owned-by-another-user, non-directory and non-regular
- * paths are refused.
+ * publication is reused, not overwritten; a reused key's directory is synced
+ * before the key is returned, and a created keys directory repeats its parent
+ * sync on the next call; and owned-by-another-user, non-directory and
+ * non-regular paths are refused.
  */
 import { afterEach, describe, expect, mock, test, spyOn } from "bun:test";
 import { spawnSync } from "node:child_process";
@@ -30,7 +32,7 @@ import {
   writeFileSync,
   writeSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
 import {
   AgentKeyFileRefusal,
@@ -441,6 +443,73 @@ test.skipIf(process.platform === "win32")("a keys directory replaced by a symlin
     setAgentKeyFileTestHooks(undefined);
   }
   expect(readdirSync(real)).toHaveLength(0);
+});
+
+test.skipIf(process.platform === "win32")("a reused key is refused when its directory sync fails, and returned once the sync works", () => {
+  const dir = keysDir();
+  ensureAgentKeysDir(dir);
+  const keyPath = join(dir, "reused.key");
+  let syncFails = true;
+  setAgentKeyFileTestHooks({
+    syncKeysDir: (fd) => {
+      if (syncFails) throw new Error("fixture sync failure");
+      fsyncSync(fd);
+    },
+  });
+  const registered: string[] = [];
+  const attempt = () => {
+    const contents = readOrCreateAgentKey(keyPath, () => Buffer.alloc(32, 3));
+    registered.push(`created=${contents.created}`);
+    return contents;
+  };
+  try {
+    // The first create publishes the key, then refuses on its directory sync.
+    expect(attempt).toThrow(/not confirmed durable/);
+    expect(existsSync(keyPath)).toBe(true);
+    // A retry reads that published key and repeats the sync before returning it.
+    expect(attempt).toThrow(AgentKeyFileRefusal);
+    expect(attempt).toThrow(/not confirmed durable/);
+    expect(registered).toHaveLength(0);
+    syncFails = false;
+    expect(attempt().created).toBe(false);
+  } finally {
+    setAgentKeyFileTestHooks(undefined);
+  }
+  expect(registered).toEqual(["created=false"]);
+  expect(readFileSync(keyPath).length).toBe(32);
+});
+
+test.skipIf(process.platform === "win32")("a created keys directory whose parent sync fails is refused, and the next call repeats the parent sync", () => {
+  const dir = keysDir();
+  const parent = dirname(dir);
+  let syncFails = true;
+  let syncs = 0;
+  let syncedParent: { dev: number; ino: number } | undefined;
+  setAgentKeyFileTestHooks({
+    syncKeysDir: (fd) => {
+      syncs += 1;
+      const st = fstatSync(fd);
+      syncedParent = { dev: st.dev, ino: st.ino };
+      if (syncFails) throw new Error("fixture sync failure");
+      fsyncSync(fd);
+    },
+  });
+  try {
+    expect(() => ensureAgentKeysDir(dir)).toThrow(AgentKeyFileRefusal);
+    expect(syncs).toBe(1);
+    expect(syncedParent).toEqual({ dev: statSync(parent).dev, ino: statSync(parent).ino });
+    // The directory exists now, so the next call takes the existing branch and
+    // repeats the parent sync; its failure refuses.
+    expect(existsSync(dir)).toBe(true);
+    expect(() => ensureAgentKeysDir(dir)).toThrow(/not confirmed durable/);
+    expect(syncs).toBe(2);
+    syncFails = false;
+    ensureAgentKeysDir(dir);
+  } finally {
+    setAgentKeyFileTestHooks(undefined);
+  }
+  expect(syncs).toBe(3);
+  expect(statSync(dir).mode & 0o777).toBe(0o700);
 });
 
 const MOCK_OPS_SOURCE = `

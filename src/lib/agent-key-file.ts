@@ -148,9 +148,12 @@ function checkAgentKeysDir(keysDir: string): void {
 }
 
 /**
- * Request mode 0700 for missing `keysDir` (the umask may make it narrower);
- * check the path afterwards like an existing directory; tighten an owned
- * directory; refuse a symlink, a non-directory, or another owner.
+ * On POSIX, request mode 0700 for a missing `keysDir` (the umask may make it
+ * narrower), check the path after creation like an existing directory, sync
+ * the created directory's parent, and tighten an owned directory; a symlink, a
+ * non-directory or another owner is refused. A retry with `keysDir` already
+ * present repeats the parent sync. On Windows the directory is created and
+ * returned unchecked.
  */
 export function ensureAgentKeysDir(keysDir: string): void {
   if (WIN32) {
@@ -177,16 +180,7 @@ export function ensureAgentKeysDir(keysDir: string): void {
     if (firstCreated !== undefined) {
       for (let created = keysDir; ; created = dirname(created)) {
         if ([".", ".."].includes(basename(created))) continue;
-        let parent = dirname(created);
-        try {
-          parent = realpathSync(parent);
-          syncAgentKeysDir(parent);
-        } catch (error) {
-          throw new AgentKeyFileRefusal(
-            `flair could not sync parent directory ${parent} (${error instanceof Error ? error.message : String(error)}); ` +
-              `new keys directory ${keysDir} is not confirmed durable; check the directory and filesystem, then retry`,
-          );
-        }
+        syncKeysParent(created, `new keys directory ${keysDir}`);
         if (resolve(created) === resolve(firstCreated)) break;
       }
     }
@@ -194,6 +188,26 @@ export function ensureAgentKeysDir(keysDir: string): void {
   }
 
   checkAgentKeysDir(keysDir);
+  // A retry sees the directory this run (or an earlier failed run) created; the
+  // parent sync is repeated, so a later success confirms the entry durable.
+  syncKeysParent(keysDir, `keys directory ${keysDir}`);
+}
+
+/**
+ * On POSIX, sync the parent of a directory entry so the entry survives a
+ * crash; a failure refuses with `subject` named as unconfirmed durable.
+ */
+function syncKeysParent(created: string, subject: string): void {
+  let parent = dirname(created);
+  try {
+    parent = realpathSync(parent);
+    syncAgentKeysDir(parent);
+  } catch (error) {
+    throw new AgentKeyFileRefusal(
+      `flair could not sync parent directory ${parent} (${error instanceof Error ? error.message : String(error)}); ` +
+        `${subject} is not confirmed durable; check the directory and filesystem, then retry`,
+    );
+  }
 }
 
 /**
@@ -414,8 +428,8 @@ export function createAgentKeyFile(
   } catch {
     /* the published key is complete; a leftover temp file is mode 0600 */
   }
-  // Publish the key's directory before returning: every caller registers the
-  // key only after this returns, so the registration never outlives the entry.
+  // On POSIX, sync the key's directory before returning so the entry is durable
+  // before the caller registers the key; a failure refuses.
   try {
     syncAgentKeysDir(dirname(privateKeyPath));
   } catch (error) {
@@ -530,14 +544,20 @@ export function replaceAgentKeyFile(privateKeyPath: string, stagedPath: string):
 /**
  * Reuse the key at `privateKeyPath` when it exists, otherwise write the bytes
  * `create` returns. An occupied path wins over `create` (an export that
- * carries another key does not replace one already on disk).
+ * carries another key does not replace one already on disk). On POSIX a
+ * reused key's directory is synced before the key is returned, so a retry
+ * after a failed sync confirms the entry durable; a failure refuses and
+ * leaves the key in place. Windows cannot sync a directory.
  */
 export function readOrCreateAgentKey(
   privateKeyPath: string,
   create: () => string | Uint8Array,
 ): AgentKeyFileContents {
   const existing = readExistingAgentKey(privateKeyPath);
-  if (existing) return { bytes: existing, created: false };
+  if (existing) {
+    syncReusedAgentKeyDir(privateKeyPath);
+    return { bytes: existing, created: false };
+  }
 
   const data = create();
   try {
@@ -545,9 +565,28 @@ export function readOrCreateAgentKey(
   } catch (error) {
     if (errnoCode(error) === "EEXIST") {
       const raced = readExistingAgentKey(privateKeyPath);
-      if (raced) return { bytes: raced, created: false };
+      if (raced) {
+        syncReusedAgentKeyDir(privateKeyPath);
+        return { bytes: raced, created: false };
+      }
     }
     throw error;
   }
   return { bytes: new Uint8Array(Buffer.from(data)), created: true };
+}
+
+/**
+ * On POSIX, sync the directory of a key this call did not write, before it is
+ * returned to a caller that registers it; a failure refuses and leaves the key
+ * in place. Windows cannot sync a directory.
+ */
+function syncReusedAgentKeyDir(privateKeyPath: string): void {
+  try {
+    syncAgentKeysDir(dirname(privateKeyPath));
+  } catch (error) {
+    throw new AgentKeyFileRefusal(
+      `flair could not sync keys directory ${dirname(privateKeyPath)} (${error instanceof Error ? error.message : String(error)}); ` +
+        `existing key ${privateKeyPath} is not confirmed durable; check the directory and filesystem, then retry`,
+    );
+  }
 }
