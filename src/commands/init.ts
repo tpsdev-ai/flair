@@ -285,8 +285,10 @@ async function seedUsingFlairSkillViaRest(baseUrl: string, adminUser: string, ad
 }
 
 /**
- * flair#3126 — run the seed's reads and refusals before init's role, user and
- * Agent writes, so a refusal leaves none of them behind. Writes nothing.
+ * flair#3126 — run the seed's reads and refusals with no write. A refusal
+ * detected by the preflight prevents the role, shared-user and Agent writes in
+ * `finishRemoteInit`. Fabric deployment and administrator provisioning may
+ * already have occurred; a later seed refusal can follow those writes.
  */
 async function preflightUsingFlairSkillViaRest(baseUrl: string, adminUser: string, adminPass: string): Promise<void> {
   const outcome = await checkUsingFlairSkill({ baseUrl, user: adminUser, pass: adminPass });
@@ -442,8 +444,8 @@ export async function finishRemoteInit(
   const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
   const role = remote ? "hub" : undefined;
 
-  // flair#3126 — a seed refusal must reach the operator before this run's first
-  // write, so nothing it writes is left behind on every attempt.
+  // flair#3126 — run the seed's checks before this function's role, user and
+  // Agent writes.
   await preflightUsingFlairSkillViaRest(baseUrl, adminUser, adminPass);
 
   if (provisioningLeg) {

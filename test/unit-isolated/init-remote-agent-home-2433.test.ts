@@ -39,7 +39,7 @@ function runRemoteInit(home: string, options: { observeFirstWrite?: string; umas
         }
       }
       if (url.pathname === "/Health") return json({ ok: true });
-      // A real server answers an absent record with 404, not a body.
+      // An absent record returns HTTP 404 rather than a 200 record.
       if (operatorAgentRow && url.pathname.startsWith("/Agent/")) {
         return json({ id: decodeURIComponent(url.pathname.slice("/Agent/".length)) });
       }

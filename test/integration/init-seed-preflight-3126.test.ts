@@ -1,9 +1,12 @@
-// ─── flair#3126 — remote init checks the skill seed before its first write ───
+// ─── flair#3126 — remote init checks the skill seed before its role, user and Agent writes ───
 //
 // Real Harper. A `using-flair` row owned by another administrator must refuse a
-// remote init as principal B with the seed's own message, and that run must
-// leave no role, user or Agent write behind. After the remedy's DELETE the same
-// run succeeds, and its re-run leaves the rows unchanged.
+// remote init as principal B with the seed's own message. A refusal detected by
+// the preflight prevents the role, shared-user and Agent writes in
+// `finishRemoteInit`. Fabric deployment and administrator provisioning may
+// already have occurred; a later seed refusal can follow those writes. After
+// the remedy's DELETE the same run succeeds, and its re-run keeps the seed
+// row's owner and the assignment count.
 //
 // `flair init --remote`'s provisioning leg runs in this process with
 // `deploy_component` answered locally (the component is already installed) and
@@ -16,7 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { program } from "../../src/cli.js";
 import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle.js";
-import { SEED_ASSIGNMENT_ID, SEED_SKILL_ID } from "../../src/lib/skill-seed.js";
+import { checkUsingFlairSkill, SEED_ASSIGNMENT_ID, SEED_SKILL_ID } from "../../src/lib/skill-seed.js";
 import { USING_FLAIR_SKILL_CONTENT, USING_FLAIR_SKILL_TRIGGER } from "../../src/lib/using-flair-skill.js";
 
 const REAL_FETCH = globalThis.fetch;
@@ -168,7 +171,7 @@ async function runInit(): Promise<{ exitCode?: number; stdout: string; stderr: s
   return { exitCode, stdout, stderr };
 }
 
-describe("flair#3126 — remote init checks the skill seed before its first write", () => {
+describe("flair#3126 — remote init checks the skill seed before its role, user and Agent writes", () => {
   beforeAll(async () => {
     harper = await startHarper();
     assertOwnInstance(harper);
@@ -177,8 +180,33 @@ describe("flair#3126 — remote init checks the skill seed before its first writ
       const res = await ops({ operation: "add_user", username, password, role: "super_user", active: true });
       expect([200, 409], `add_user ${username}: ${res.text.slice(0, 200)}`).toContain(res.status);
     }
-    // The managed row the seed refuses: the current shipped text, a live skill,
-    // owned by administrator A.
+  }, 240_000);
+
+  afterAll(async () => {
+    if (harper) await stopHarper(harper);
+    if (scratchHome) { try { rmSync(scratchHome, { recursive: true, force: true }); } catch { /* best effort */ } }
+  }, HARPER_STOP_BUDGET_MS);
+
+  test("checkUsingFlairSkill with neither seed row present sends only GETs and writes neither row", async () => {
+    const methods: string[] = [];
+    const prev = globalThis.fetch;
+    globalThis.fetch = (async (input: any, init?: any) => {
+      methods.push(init?.method ?? "GET");
+      return REAL_FETCH(input, init);
+    }) as typeof fetch;
+    try {
+      const outcome = await checkUsingFlairSkill({ baseUrl: harper.httpURL, user: ADMIN_B, pass: PASS_B });
+      expect(outcome.kind, JSON.stringify(outcome)).toBe("ok");
+    } finally {
+      globalThis.fetch = prev;
+    }
+    expect(await memoryRow()).toBeNull();
+    expect(await assignmentRows()).toEqual([]);
+    expect(methods.length).toBeGreaterThan(0);
+    expect([...new Set(methods)]).toEqual(["GET"]);
+  }, 120_000);
+
+  test("a foreign-owned row refuses the run before the role, shared-user and Agent writes", async () => {
     const inserted = await ops({
       operation: "insert", database: "flair", table: "Memory",
       records: [{
@@ -188,14 +216,6 @@ describe("flair#3126 — remote init checks the skill seed before its first writ
       }],
     });
     expect(inserted.status, inserted.text.slice(0, 300)).toBe(200);
-  }, 240_000);
-
-  afterAll(async () => {
-    if (harper) await stopHarper(harper);
-    if (scratchHome) { try { rmSync(scratchHome, { recursive: true, force: true }); } catch { /* best effort */ } }
-  }, HARPER_STOP_BUDGET_MS);
-
-  test("a foreign-owned row refuses the run before any role, user or Agent write", async () => {
     const run = await runInit();
     expect(run.exitCode, run.stdout + run.stderr).toBe(1);
     expect(run.stderr).toContain("Error: the using-flair skill seed was refused — ");
@@ -211,7 +231,7 @@ describe("flair#3126 — remote init checks the skill seed before its first writ
     expect(await assignmentRows()).toEqual([]);
   }, 240_000);
 
-  test("after the remedy's DELETE the same run succeeds, and its re-run is idempotent", async () => {
+  test("after the remedy's DELETE the same run succeeds, and its re-run keeps the seed row's owner and the assignment count", async () => {
     const deleted = await deleteRowAsOperator();
     expect(deleted.status, deleted.body.slice(0, 300)).toBeLessThan(300);
 

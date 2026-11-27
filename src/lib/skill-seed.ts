@@ -305,7 +305,8 @@ interface SeedCheckFacts {
 /**
  * The seed's reads and refusals, with no write. {@link seedPass} runs it before
  * its writes, and {@link checkUsingFlairSkill} runs it alone as init's
- * preflight, so both refuse on the same instance state with the same message.
+ * preflight; the two calls use the same checks and message templates (expiry
+ * checks read the real clock on each pass).
  */
 async function checkSeed(
   io: SkillSeedIo,
@@ -654,8 +655,9 @@ export function seedUsingFlairSkill(opts: SkillSeedRestOptions): Promise<SkillSe
 
 /**
  * Run the seed's reads and refusals on the instance at `baseUrl` without
- * writing anything. `flair init` calls it before the writes that precede the
- * seed, and the seed re-runs the same checks when it writes.
+ * writing anything. `flair init` calls it before the role, shared-user and
+ * Agent writes in `finishRemoteInit`, and before the local agent write when it
+ * starts its own instance; the seed re-runs the same checks when it writes.
  */
 export async function checkUsingFlairSkill(opts: SkillSeedRestOptions): Promise<SkillSeedOutcome> {
   const current = currentSeed();
