@@ -18,7 +18,7 @@ import { invalidAgentIdMessage } from "../../src/lib/agent-id-rule.js";
 
 const PRELOAD = resolve(import.meta.dirname, "../../test/fixtures/key-path-read-log-preload.cjs");
 const CHILD_DEADLINE_MS = 20_000;
-const BAD_IDS = ["bad/id", "..", ""];
+const BAD_IDS = ["bad/id", "..", "", "../escape"];
 
 interface CliResult {
   stdout: string;
@@ -109,6 +109,11 @@ describe("flair#3136 — a command refuses an invalid agent id before it builds 
         expect(out).toContain(invalidAgentIdMessage(id));
         expect(reads).not.toContain(sentinel);
         expect(reads.filter((path) => path.startsWith(keysDir + sep))).toEqual([]);
+        if (id === "../escape") {
+          // Would-be key path is outside the keys directory; it must not be read either.
+          expect(resolve(sentinel).startsWith(resolve(keysDir) + sep)).toBe(false);
+          expect(reads.filter((path) => path.endsWith("escape.key"))).toEqual([]);
+        }
         expect(requests).toEqual([]);
         expect(existsSync(sentinel)).toBe(true);
         expect(readFileSync(sentinel, "utf8")).toBe(`sentinel-${id}`);

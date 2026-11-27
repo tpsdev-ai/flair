@@ -65,7 +65,7 @@ export function agentKeyLocations(): KeyLocation[] {
 }
 
 /** A refusal for an agent id that cannot name a key file: the id is checked
- *  before any path is built. Callers map it to their own error style. */
+ *  before it is joined into a path. Callers map it to their own error style. */
 export class AgentKeyPathRefusal extends Error {
   readonly code = "invalid_agent_id" as const;
   /** The CLI prints the message alone and exits 1 when a command lets it propagate. */
@@ -76,7 +76,8 @@ export class AgentKeyPathRefusal extends Error {
   }
 }
 
-function requireAgentId(agentId: string): void {
+/** Apply the shared agent-ID rule to an id a command is about to sign as. */
+export function requireAgentId(agentId: string): void {
   if (!isValidAgentId(agentId)) throw new AgentKeyPathRefusal(invalidAgentIdMessage(agentId));
 }
 

@@ -1,9 +1,9 @@
 /**
  * flair#3136 item 1: every ID-derived key path in src/ is built by a validated
  * helper in src/lib/key-dir.ts, which applies the shared agent-ID rule before
- * joining. The guard fails on any string literal or template-literal text
- * outside that module that is, or ends with, `.key`, `-priv.key` or `.pub`,
- * however it is assembled. A named allowlist covers non-agent literals.
+ * joining. The guard fails on any string literal or template-literal text chunk
+ * outside that module that is, or ends with, `.key`, `-priv.key` or `.pub`. A
+ * named allowlist covers non-agent literals.
  */
 import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
@@ -14,43 +14,43 @@ const SRC = join(ROOT, "src");
 const HELPER = join(SRC, "lib", "key-dir.ts");
 const KEY_SUFFIXES = [".key", "-priv.key", ".pub"];
 
-/** Named non-agent uses that genuinely need such a literal. `markers` must
- *  appear on the offending line, so a new literal in the same file still fails. */
-const ALLOWLIST: Array<{ name: string; file: string; markers: string[]; reason: string }> = [
+/** Named non-agent uses that genuinely need such a literal. `expression` must
+ *  contain the flagged literal, so another literal on the same line still fails. */
+const ALLOWLIST: Array<{ name: string; file: string; expression: string; reason: string }> = [
   {
     name: "prune-discovered-filenames",
     file: "src/commands/keys.ts",
-    markers: ['slice(0, -".key".length)'],
+    expression: 'slice(0, -".key".length)',
     reason: "keys prune classifies discovered file names before any id check; no id-derived path",
   },
   {
     name: "key-file-readdir-filter",
     file: "src/cli.ts",
-    markers: ['endsWith(".key")'],
+    expression: 'endsWith(".key")',
     reason: "readdir filter over discovered file names, not an id-derived path",
   },
   {
     name: "key-file-readdir-filter",
     file: "src/lib/auth-resolve.ts",
-    markers: ['endsWith(".key")'],
+    expression: 'endsWith(".key")',
     reason: "readdir filter over discovered file names, not an id-derived path",
   },
   {
     name: "key-file-readdir-filter",
     file: "src/lib/doctor-run.ts",
-    markers: ['endsWith(".key")'],
+    expression: 'endsWith(".key")',
     reason: "readdir filter over discovered file names, not an id-derived path",
   },
   {
     name: "placeholder-remedy",
     file: "src/lib/auth-resolve.ts",
-    markers: ['"<agent-id>.key"'],
+    expression: '"<agent-id>.key"',
     reason: "operator remedy names a placeholder path, not built from an id",
   },
   {
     name: "custody-key-filename",
     file: "src/lib/integrity-state.ts",
-    markers: ['"custody.key"'],
+    expression: '"custody.key"',
     reason: "integrity custody file name, not an agent key path",
   },
 ];
@@ -58,6 +58,7 @@ const ALLOWLIST: Array<{ name: string; file: string; markers: string[]; reason: 
 interface Literal {
   text: string;
   line: number;
+  index: number;
 }
 
 function stripComments(source: string): string {
@@ -101,7 +102,7 @@ function literals(source: string): Literal[] {
         text += source[j];
         j++;
       }
-      found.push({ text, line: lineAt(i) });
+      found.push({ text, line: lineAt(i), index: i });
       i = j + 1;
       continue;
     }
@@ -117,7 +118,7 @@ function literals(source: string): Literal[] {
         }
         if (source[j] === "`") break;
         if (source[j] === "$" && source[j + 1] === "{") {
-          found.push({ text, line: lineAt(textStart) });
+          found.push({ text, line: lineAt(textStart), index: textStart });
           let depth = 1;
           j += 2;
           while (j < source.length && depth > 0) {
@@ -132,7 +133,7 @@ function literals(source: string): Literal[] {
         text += source[j];
         j++;
       }
-      found.push({ text, line: lineAt(textStart) });
+      found.push({ text, line: lineAt(textStart), index: textStart });
       i = j + 1;
       continue;
     }
@@ -157,22 +158,34 @@ function sourceFiles(dir: string): string[] {
   return out.sort();
 }
 
-function allowed(file: string, lineText: string): boolean {
-  return ALLOWLIST.some((entry) => entry.file === file && entry.markers.some((marker) => lineText.includes(marker)));
+function allowed(file: string, source: string, literal: Literal): boolean {
+  return ALLOWLIST.some((entry) => {
+    if (entry.file !== file) return false;
+    for (let at = source.indexOf(entry.expression); at !== -1; at = source.indexOf(entry.expression, at + 1)) {
+      if (literal.index >= at && literal.index < at + entry.expression.length) return true;
+    }
+    return false;
+  });
+}
+
+/** Offenders in one file's source, with `relativeFile` only labelling the hits. */
+function offendersIn(relativeFile: string, source: string): string[] {
+  const stripped = stripComments(source);
+  const lines = stripped.split("\n");
+  const found: string[] = [];
+  for (const literal of keyLiterals(stripped)) {
+    const lineText = lines[literal.line - 1]?.trim() ?? "";
+    if (allowed(relativeFile, stripped, literal)) continue;
+    found.push(`${relativeFile}:${literal.line}: ${lineText}`);
+  }
+  return found;
 }
 
 function offenders(): string[] {
   const found: string[] = [];
   for (const file of sourceFiles(SRC)) {
     if (file === HELPER) continue;
-    const source = readFileSync(file, "utf8");
-    const lines = stripComments(source).split("\n");
-    const relativeFile = relative(ROOT, file);
-    for (const literal of keyLiterals(source)) {
-      const lineText = lines[literal.line - 1]?.trim() ?? "";
-      if (allowed(relativeFile, lineText)) continue;
-      found.push(`${relativeFile}:${literal.line}: ${lineText}`);
-    }
+    found.push(...offendersIn(relative(ROOT, file), readFileSync(file, "utf8")));
   }
   return found;
 }
@@ -189,6 +202,12 @@ test("the detector sees each guarded assembly shape (self-proof)", () => {
   }
   expect(keyLiterals('join(dir, `${agentId}.json`)')).toEqual([]);
   expect(keyLiterals('join(dir, agentId + ".pubx")')).toEqual([]);
+});
+
+test("an ID-derived .key join beside an allowlisted expression on the same line still fails", () => {
+  const line = 'const safe = names.filter((n) => n.endsWith(".key")); const bad = join(dir, `${agentId}.key`);';
+  expect(offendersIn("src/lib/auth-resolve.ts", line))
+    .toEqual([`src/lib/auth-resolve.ts:1: ${line}`]);
 });
 
 test("the helper builds the private and public paths (the guard is not vacuous)", () => {
