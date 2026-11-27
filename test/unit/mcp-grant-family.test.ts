@@ -455,7 +455,7 @@ describe("grantMcpClient — key files", () => {
     expect(existsSync(pubPath)).toBe(false);
   });
 
-  test.each([false, true])("manifest write failure after insert: an acknowledged Agent delete removes the key files (unlink fails=%s)", async (failUnlink) => {
+  test.each([false, true])("manifest write failure after insert: an acknowledged Agent delete removes the key files, but a failed unlink keeps them (failUnlink=%s)", async (failUnlink) => {
     mkdirSync(manifestPath);
     const { fetchImpl, calls } = mockOpsFetch();
     let message = "";

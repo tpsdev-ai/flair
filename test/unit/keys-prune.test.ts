@@ -478,14 +478,35 @@ describe("applyKeyPrune — the archive path is a directory this user owns (flai
     chmodSync(join(keysDir, PRUNED_DIR_NAME), 0o700);
     mkdirSync(archiveDir);
     const uid = process.getuid();
-    const spy = spyOn(process, "getuid").mockReturnValue(uid + 1);
+    // The .pruned component passes; only the date directory reads as foreign.
+    const spy = spyOn(process, "getuid").mockReturnValueOnce(uid).mockReturnValue(uid + 1);
+    let message = "";
     try {
-      expect(() => applyKeyPrune(keysDir, entries, "2026-07-19")).toThrow(/not owned by the current user.*nothing was moved/);
-    } finally {
+      applyKeyPrune(keysDir, entries, "2026-07-19");
+    } catch (error) { message = (error as Error).message; } finally {
       spy.mockRestore();
     }
+    expect(message).toContain(`${archiveDir} is not owned by the current user`);
+    expect(message).toContain("nothing was moved");
     expect(existsSync(join(keysDir, `${agentId}.key`))).toBe(true);
     expect(readdirSync(archiveDir)).toEqual([]);
+  });
+
+  it("a platform without process.getuid refuses before creating the archive path", async () => {
+    const agentId = "agent-no-getuid";
+    const entries = await staleEntries(agentId);
+    const original = process.getuid;
+    Object.defineProperty(process, "getuid", { value: undefined, configurable: true, writable: true });
+    let message = "";
+    try {
+      applyKeyPrune(keysDir, entries, "2026-07-19");
+    } catch (error) { message = (error as Error).message; } finally {
+      Object.defineProperty(process, "getuid", { value: original, configurable: true, writable: true });
+    }
+    expect(message).toContain("process.getuid is unavailable");
+    expect(message).toContain("nothing was moved");
+    expect(existsSync(join(keysDir, PRUNED_DIR_NAME))).toBe(false);
+    expect(existsSync(join(keysDir, `${agentId}.key`))).toBe(true);
   });
 });
 
@@ -531,6 +552,26 @@ describe("applyKeyPrune — a chmod that does not take effect is refused (flair#
     );
     expect(existsSync(join(keysDir, `${agentId}.key`))).toBe(true);
     expect(readdirSync(archiveDir)).toEqual([]);
+  });
+
+  it("a remedy for a path containing a single quote stays one shell argument", async () => {
+    const agentId = "agent-dir-quoted";
+    const entries = await staleEntries(agentId);
+    const dateStamp = "2026-07-19'quoted";
+    const archiveDir = join(keysDir, PRUNED_DIR_NAME, dateStamp);
+    mkdirSync(join(keysDir, PRUNED_DIR_NAME), { recursive: true });
+    chmodSync(join(keysDir, PRUNED_DIR_NAME), 0o700);
+    mkdirSync(archiveDir);
+    chmodSync(archiveDir, 0o755);
+    let message = "";
+    try {
+      applyKeyPrune(keysDir, entries, dateStamp, undefined, noopChmod);
+    } catch (error) { message = (error as Error).message; }
+    const rendered = message.match(/run `chmod 700 (.*)` to make it owner-only/)?.[1];
+    expect(rendered).toBeDefined();
+    const parsed = spawnSync("sh", ["-c", `printf '%s\n' ${rendered}`], { timeout: 10_000, encoding: "utf8" });
+    expect(parsed.status).toBe(0);
+    expect(parsed.stdout).toBe(`${archiveDir}\n`);
   });
 
   it("a key chmod that leaves the mode unchanged is refused after the move, naming where the key is", async () => {

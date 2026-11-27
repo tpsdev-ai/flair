@@ -260,11 +260,19 @@ function shellWord(path: string): string {
 /** Create `dir` if absent, then require it to be a directory this user owns
  *  with no group or world bits. A symlink, a non-directory or another owner's
  *  directory is refused before anything moves; an existing wider directory is
- *  tightened, and the mode is read back. */
+ *  tightened, and the mode is read back. Ownership is checked only where
+ *  `process.getuid` is available; where it is not, the move is refused before
+ *  anything is created. */
 function ensureArchiveComponent(
   dir: string,
   chmod: (path: string, mode: number) => void,
 ): void {
+  const uid = currentUid();
+  if (uid === undefined) {
+    throw new Error(
+      `${dir}: cannot establish that the archive path is owned by the current user because process.getuid is unavailable on this platform; nothing was moved — re-run without --apply to report stale keys without archiving them`,
+    );
+  }
   let stats: Stats;
   try {
     stats = lstatSync(dir);
@@ -283,8 +291,7 @@ function ensureArchiveComponent(
   if (!stats.isDirectory()) {
     throw new Error(`${dir} is not a directory; the archive path must be a directory this user owns, so nothing was moved`);
   }
-  const uid = currentUid();
-  if (uid !== undefined && stats.uid !== uid) {
+  if (stats.uid !== uid) {
     throw new Error(`${dir} is not owned by the current user; the archive path must be a directory this user owns, so nothing was moved`);
   }
   if ((stats.mode & 0o077) !== 0) {
