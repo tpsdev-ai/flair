@@ -66,7 +66,7 @@ export interface PlannedFrom {
 
 export interface AtomicWriteEntry {
   path: string;
-  content: string;
+  content: string | Uint8Array;
   /** File mode for the new file (e.g. 0o600). */
   mode: number;
   /**
@@ -96,7 +96,7 @@ export interface FileSnapshot extends PlannedFrom {
 
 export interface AtomicWriteHooks {
   open?: (path: string, flags: string, mode: number) => number;
-  write?: (fd: number, data: string) => void;
+  write?: (fd: number, data: string | Uint8Array) => void;
   /** Sets the staged file's exact mode (the open() mode is narrowed by the umask). */
   fchmod?: (fd: number, mode: number) => void;
   fsync?: (fd: number) => void;
@@ -113,7 +113,7 @@ export interface AtomicWriteHooks {
 
 interface Resolved {
   open: (path: string, flags: string, mode: number) => number;
-  write: (fd: number, data: string) => void;
+  write: (fd: number, data: string | Uint8Array) => void;
   fchmod: (fd: number, mode: number) => void;
   fsync: (fd: number) => void;
   close: (fd: number) => void;
@@ -130,7 +130,7 @@ function resolveHooks(h: AtomicWriteHooks): Resolved {
   return {
     open: h.open ?? ((p, flags, mode) => openSync(p, flags, mode)),
     write: h.write ?? ((fd, data) => {
-      const buf = Buffer.from(data, "utf-8");
+      const buf = typeof data === "string" ? Buffer.from(data, "utf-8") : Buffer.from(data);
       let off = 0;
       while (off < buf.length) off += writeSync(fd, buf, off, buf.length - off);
     }),
@@ -207,7 +207,7 @@ function tempPathFor(target: string): string {
 }
 
 /** Write `content` to a NEW temp file next to `target`, fsynced and closed. */
-function stage(fs: Resolved, target: string, content: string, mode: number): string {
+function stage(fs: Resolved, target: string, content: string | Uint8Array, mode: number): string {
   const tmp = tempPathFor(target);
   const fd = fs.open(tmp, "wx", mode);
   try {
@@ -253,7 +253,7 @@ export function writeFilesAtomically(entries: AtomicWriteEntry[], hooks: AtomicW
   const originals = entries.map((e) => {
     if (!fs.exists(e.path)) return { path: e.path, existed: false as const };
     // A planned-from target is restored from the bytes it was re-checked to hold.
-    const content = e.expect ? e.expect.content : fs.read(e.path);
+    const content = e.expect ? Buffer.from(e.expect.content, "utf-8") : fs.readBytes(e.path);
     return { path: e.path, existed: true as const, content, mode: fs.modeOf(e.path) };
   });
 

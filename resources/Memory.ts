@@ -56,7 +56,7 @@ import { admitLockedMemoryWrite, type LockedMemoryTransaction, type LockedWriteA
 import { assertValidDurability, stampEphemeralExpiry } from "./memory-durability.js";
 import { embedTextField, enforceSkillDurability, isSkillWrite, type MemoryEmbeddingInputField, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate, skillMetadataHasDuplicateKey } from "./skill-write.js";
 import { embeddedTextHash, hashEmbeddedText } from "./memory-embed-hash.js";
-import { afterCloseStaged, buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, grantedSkillClose, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
+import { afterCloseStaged, buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, grantedSkillClose, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillTargetSnapshotChanged, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
 import { SKILL_SUBJECT_TYPE, removeAppendedVersion } from "./instruction-version-record.js";
 import { deriveSkillSubjectId } from "./skill-subject.js";
 import {
@@ -1610,7 +1610,14 @@ async function writeSkillCreateOrUpdate(
   // verb can re-plan with it.
   const runSkillWrite = (heldIds: ReadonlySet<string>, headMoved: { id: string | null }) => runSkillVersionWrite({
     ctx,
-    joinCallerTransaction: method === "post",
+    // A POST that SUPERSEDES an existing target plans in a fresh OWNED
+    // transaction (flair#3170): the joined request transaction's reads can
+    // predate a commit the verb's target read already saw (a previous write's
+    // embedding backfill), and the stale-target check would refuse the retry.
+    // An in-place reserved seed POST supersedes nothing and joins the caller's
+    // transaction when one is open and joinable, so a caller abort still
+    // undoes it.
+    joinCallerTransaction: method === "post" && (!storedRow || inPlaceId != null),
     subjectId,
     agentId: String(content.agentId),
     deferConfirmation: true,
@@ -1743,6 +1750,10 @@ async function writeSkillCreateOrUpdate(
     if (head && !heldIds.has(String(head.id))) return new SkillLockExtension([String(head.id)]);
   }
   const headMoved: { id: string | null } = { id: null };
+  // Test-only: holds a skill POST before its plan runs under the lock, after
+  // the verb read its target (flair#3170).
+  const planPause = txnPausePoint("memory-post-skill-plan");
+  if (planPause) await planPause;
   const outcome = await runSkillWrite(heldIds, headMoved);
   if (headMoved.id) return new SkillLockExtension([headMoved.id]);
   if (!outcome.ok) return outcome.response;
@@ -2482,6 +2493,11 @@ export class Memory extends (databases as any).flair.Memory {
    *  commits after the lock is released; a superseding skill write owns its
    *  commit. A POST that names neither takes no lock. */
   async post(content: any, context?: any) {
+    // Test-only: on the HTTP request path, holds a POST after its request
+    // transaction opened and before it takes the target's lock and reads it, so
+    // a concurrent commit can land in between (flair#3170).
+    const targetReadPause = txnPausePoint("memory-post-target-read");
+    if (targetReadPause) await targetReadPause;
     // flair#2307: resolve the `supersedes` reference to its canonical id once,
     // before lock selection (some POSTs take no lock), so the predecessor read,
     // the close and any lock taken name that id (a selector or encoded
@@ -2586,7 +2602,32 @@ export class Memory extends (databases as any).flair.Memory {
       (typeof postUrlTargetId === "string" || typeof postUrlTargetId === "number")) {
       content.id = postUrlTargetId;
     }
-    const postStored = content.id ? await (databases as any).flair.Memory.get(content.id) : null;
+    const postSnapshot = content.id ? await (databases as any).flair.Memory.get(content.id) : null;
+    // The in-place predicate the skill plan uses, a reserved seed id named by
+    // the body or the URL: an in-place POST supersedes nothing, so it keeps the
+    // request-snapshot target read and the caller's transaction (flair#3170).
+    const postInPlace = [content?.id, postUrlTargetId].some((candidate) => isReservedSeedId("Memory", candidate));
+    // flair#3170: a skill POST that supersedes a target present in the request
+    // snapshot reads the target as committed when it still exists. The only
+    // change that window accepts is the previous write's embedding backfill
+    // fields. The plan's stale-target check then compares two committed reads
+    // and the retry is not refused. Any other change to the target in that
+    // window answers 409 skill_target_changed, and a target gone by this read
+    // is refused the same way, recreating no row and appending no
+    // InstructionVersion. The body may omit `tags` and inherit the skill
+    // tag from the stored row, the source prepareSkillBody uses, so either
+    // row's tags decide whether this read applies.
+    const postStoredRead = !!(postSnapshot && !postInPlace && (isSkillWrite(content) || rowIsSkill(postSnapshot)));
+    // Test-only: holds a skill POST after its request-snapshot read and before
+    // its committed target read, so a concurrent delete can land in between
+    // (flair#3170).
+    const committedReadPause = postStoredRead ? txnPausePoint("memory-post-committed-read") : undefined;
+    if (committedReadPause) await committedReadPause;
+    const postCommitted = postStoredRead && postSnapshot ? await (databases as any).flair.Memory.get(String(postSnapshot.id), {}) : null;
+    if (postStoredRead && postSnapshot && (!postCommitted || skillTargetSnapshotChanged(postSnapshot, postCommitted))) {
+      return skillWriteConflict("skill_target_changed");
+    }
+    const postStored = postStoredRead && postSnapshot ? (postCommitted ?? postSnapshot) : postSnapshot;
     // flair#2561: the fields this request supplies that `stored` can report —
     // its string-valued text fields and, for a skill, the skill fields it
     // supplies (flair#2575) — read before a skill predecessor is merged into the

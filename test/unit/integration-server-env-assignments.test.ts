@@ -49,6 +49,36 @@ const ALLOWED: ReadonlyArray<{ file: string; variable: string; reason: string }>
     variable: "FLAIR_KEY_PATH",
     reason: "the in-process pi-flair client reads it",
   },
+  {
+    file: "test/integration/init-remote-ops.test.ts",
+    variable: "FLAIR_ADMIN_PASS",
+    reason: "runInitAction saves, deletes and restores it around the in-process init action so an ambient value cannot leak in",
+  },
+  {
+    file: "test/integration/init-remote-ops.test.ts",
+    variable: "FLAIR_CLUSTER_ADMIN_USER",
+    reason: "runInitAction saves, deletes and restores it around the in-process init action so an ambient value cannot leak in",
+  },
+  {
+    file: "test/integration/init-remote-ops.test.ts",
+    variable: "FLAIR_CLUSTER_ADMIN_PASS",
+    reason: "runInitAction saves, deletes and restores it around the in-process init action so an ambient value cannot leak in",
+  },
+  {
+    file: "test/integration/init-remote-ops.test.ts",
+    variable: "FLAIR_TARGET",
+    reason: "runInitAction saves, deletes and restores it around the in-process init action so an ambient value cannot leak in",
+  },
+  {
+    file: "test/integration/init-remote-ops.test.ts",
+    variable: "FLAIR_OPS_TARGET",
+    reason: "runInitAction saves, deletes and restores it around the in-process init action so an ambient value cannot leak in",
+  },
+  {
+    file: "test/integration/init-remote-ops.test.ts",
+    variable: "FLAIR_ADMIN_USER",
+    reason: "runInitAction saves, deletes and restores it around the in-process init action so an ambient value cannot leak in",
+  },
 ];
 
 // Sites whose key the scan cannot read, per (file, site text) with the number
@@ -83,6 +113,12 @@ const UNSCANNABLE_ALLOWED: ReadonlyArray<{ file: string; text: string; sites: nu
     text: "process.env[PRESENCE_SEND_FLAG_ENV]",
     sites: 2,
     reason: "sets FLAIR_FEDERATION_PRESENCE_SEND, which the in-process runFederationSyncOnce() call reads, and deletes it in afterAll; the receiver declares it removed through serverEnv",
+  },
+  {
+    file: "test/integration/init-seed-preflight-3126.test.ts",
+    text: "process.env[key]",
+    sites: 3,
+    reason: "runInit deletes the listed FLAIR_* and ROOTPATH variables before the in-process init action and restores the saved values afterwards, so an ambient value cannot leak in",
   },
 ];
 

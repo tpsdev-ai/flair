@@ -296,11 +296,22 @@ type SeedPassSignal =
   | { kind: "no_answer"; detail: string }
   | { kind: "no_time" };
 
-async function seedPass(
+/** The facts a passed check hands to the write phase. */
+interface SeedCheckFacts {
+  storedContent: string | null;
+  assignment: SeedAssignment | null;
+}
+
+/**
+ * The seed's reads and refusals, with no write. {@link seedPass} runs it before
+ * its writes, and {@link checkUsingFlairSkill} runs it alone as init's
+ * preflight; the two calls use the same checks and message templates (expiry
+ * checks read the real clock on each pass).
+ */
+async function checkSeed(
   io: SkillSeedIo,
   current: SeedCurrent,
-  rowWriteBudget: () => number,
-): Promise<SkillSeedOutcome | SeedPassSignal> {
+): Promise<SkillSeedOutcome | (SeedCheckFacts & { kind: "ready" })> {
   const rowRead = await io.readRow();
   if (!rowRead.ok) {
     return refused(
@@ -371,6 +382,18 @@ async function seedPass(
     }
   }
 
+  return { kind: "ready", storedContent, assignment: assignRead.row ?? null };
+}
+
+async function seedPass(
+  io: SkillSeedIo,
+  current: SeedCurrent,
+  rowWriteBudget: () => number,
+): Promise<SkillSeedOutcome | SeedPassSignal> {
+  const checked = await checkSeed(io, current);
+  if (checked.kind !== "ready") return checked;
+  const { storedContent, assignment } = checked;
+
   const action = decideSkillSeed(storedContent, current.content, current.hashes);
   if (action === "create" || action === "replace") {
     const budgetMs = rowWriteBudget();
@@ -408,8 +431,8 @@ async function seedPass(
     }
   }
 
-  let assignmentId = String(assignRead.row?.id ?? "");
-  if (!assignRead.row) {
+  let assignmentId = String(assignment?.id ?? "");
+  if (!assignment) {
     const write = await io.putAssignment();
     if (!write.ok) {
       return refused(
@@ -628,4 +651,23 @@ export function skillSeedRestIo(opts: SkillSeedRestOptions, current: SeedCurrent
  */
 export function seedUsingFlairSkill(opts: SkillSeedRestOptions): Promise<SkillSeedOutcome> {
   return runSkillSeed(skillSeedRestIo(opts), currentSeed());
+}
+
+/**
+ * Run the seed's reads and refusals on the instance at `baseUrl` without
+ * writing anything. `flair init` calls it before the role, shared-user and
+ * Agent writes in `finishRemoteInit`, and before the local agent write when it
+ * starts its own instance; the seed re-runs the same checks when it writes.
+ */
+export async function checkUsingFlairSkill(opts: SkillSeedRestOptions): Promise<SkillSeedOutcome> {
+  const current = currentSeed();
+  const checked = await checkSeed(skillSeedRestIo(opts), current);
+  if (checked.kind !== "ready") return checked;
+  return {
+    kind: "ok",
+    action: decideSkillSeed(checked.storedContent, current.content, current.hashes),
+    skillId: SEED_SKILL_ID,
+    assignmentId: String(checked.assignment?.id ?? ""),
+    message: "the using-flair skill seed passed its checks",
+  };
 }

@@ -93,6 +93,8 @@ async function fleet(op: string, body: Record<string, unknown> = {}): Promise<an
 async function mcpTool(tool: string, args: Record<string, unknown>): Promise<{ echo: any; text: string }> {
   const out = await fleet("mcpRpc", {
     sub: SUB,
+    // The scope the write tools this file calls require (flair#3076).
+    scope: "memory:write",
     rpc: { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: tool, arguments: args } },
   });
   expect(out.ok, `mcpRpc transport failed: ${JSON.stringify(out).slice(0, 400)}`).toBe(true);

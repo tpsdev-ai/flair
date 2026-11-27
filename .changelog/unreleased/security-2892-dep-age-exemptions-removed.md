@@ -1,1 +1,0 @@
-- **The dependency bake-time gate checks node-forge 1.4.3 and joi 17.13.9 without version exemptions.** ([#2972](https://github.com/tpsdev-ai/flair/pull/2972))

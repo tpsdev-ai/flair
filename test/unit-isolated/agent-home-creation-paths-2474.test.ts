@@ -18,11 +18,12 @@
  * up an HTTP server in place of the operations API.
  */
 import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, fstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { program } from "../../src/cli.js";
+import { setAgentKeyFileTestHooks } from "../../src/lib/agent-key-file.js";
 
 const LOCAL_ID = "inst-local-2474";
 
@@ -73,9 +74,14 @@ function opsUrl(): string {
   return `http://127.0.0.1:${address.port}`;
 }
 
+let lastErrors: string[] = [];
+
 async function run(args: string[]): Promise<number> {
   const logSpy = spyOn(console, "log").mockImplementation(() => {});
-  const errSpy = spyOn(console, "error").mockImplementation(() => {});
+  lastErrors = [];
+  const errSpy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+    lastErrors.push(args.map(String).join(" "));
+  });
   const origExit = process.exit;
   process.exit = ((code?: number) => {
     throw new Error(`process.exit(${code ?? 0})`);
@@ -126,4 +132,73 @@ describe("flair#2474 — each seed-based creation path stamps the local home", (
     expect(agentInserts[0].records[0].id).toBe("imported-agent");
     expect(agentInserts[0].records[0].originatorInstanceId).toBe(LOCAL_ID);
   });
+});
+
+describe("flair#3077 — import checks the existing key file before reuse", () => {
+  function exportPath(id: string, privateKey?: boolean): string {
+    const path = join(tmpHome, `${id}.json`);
+    writeFileSync(path, JSON.stringify({
+      type: "agent-export",
+      agent: { id },
+      ...(privateKey ? { privateKey: Buffer.alloc(32, 6).toString("base64") } : {}),
+      souls: [],
+      memories: [],
+    }));
+    return path;
+  }
+
+  for (const withPrivateKey of [true, false]) {
+    test(`a 0644 key is refused and unchanged (export ${withPrivateKey ? "with" : "without"} a private key)`, async () => {
+      const id = withPrivateKey ? "import-wide-export-3077" : "import-wide-generate-3077";
+      mkdirSync(keysDir, { recursive: true });
+      const keyPath = join(keysDir, `${id}.key`);
+      const prior = Buffer.alloc(32, 5);
+      writeFileSync(keyPath, prior);
+      chmodSync(keyPath, 0o644);
+      const path = exportPath(id, withPrivateKey);
+
+      const code = await run([
+        "import", path,
+        "--port", "1",
+        "--ops-target", opsUrl(),
+        "--admin-pass", "throwaway-admin-pass-not-a-secret",
+        "--keys-dir", keysDir,
+      ]);
+
+      expect(code).toBe(1);
+      expect(lastErrors.join("\n")).toContain(`chmod 600 ${keyPath}`);
+      expect(readFileSync(keyPath).equals(prior)).toBe(true);
+      expect(agentInserts).toHaveLength(0);
+      expect(statSync(keyPath).mode & 0o777).toBe(0o644);
+    });
+
+    test(`a fresh ${withPrivateKey ? "restored" : "generated"} key is 0600 at its first write under a zero umask`, async () => {
+      const id = withPrivateKey ? "import-restore-first-3077" : "import-generate-first-3077";
+      const keyPath = join(keysDir, `${id}.key`);
+      const path = exportPath(id, withPrivateKey);
+      const observed: number[] = [];
+      setAgentKeyFileTestHooks({
+        beforeFirstWrite: (fd) => {
+          observed.push(fstatSync(fd).mode & 0o777);
+        },
+      });
+      const previous = process.umask(0);
+      let code: number;
+      try {
+        code = await run([
+          "import", path,
+          "--port", "1",
+          "--ops-target", opsUrl(),
+          "--admin-pass", "throwaway-admin-pass-not-a-secret",
+          "--keys-dir", keysDir,
+        ]);
+      } finally {
+        process.umask(previous);
+        setAgentKeyFileTestHooks(undefined);
+      }
+      expect(code).toBe(0);
+      expect(observed).toEqual([0o600]);
+      expect(statSync(keyPath).mode & 0o777).toBe(0o600);
+    });
+  }
 });

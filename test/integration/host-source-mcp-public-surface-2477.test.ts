@@ -56,7 +56,8 @@ async function adminOp(op: Record<string, any>): Promise<Response> {
 
 async function mintToken(): Promise<string> {
   const key = await importPKCS8(privateKeyPem, "RS256");
-  return new SignJWT({ client_id: "host-source-public-client", scope: "openid" })
+  // The scope memory_store requires (flair#3076).
+  return new SignJWT({ client_id: "host-source-public-client", scope: "memory:write" })
     .setProtectedHeader({ alg: "RS256", kid: KID, typ: "at+jwt" })
     .setIssuer(ISSUER)
     .setAudience(RESOURCE)

@@ -11,6 +11,7 @@
  * Do not import src/cli.ts from here — that would cycle and pull the
  * non-strict entry into the strict check.
  */
+import { randomUUID } from "node:crypto";
 import { Command, Option } from "commander";
 import * as render from "../render.js";
 import { resolveAdminUser, addAdminPassOptions } from "../lib/auth-resolve.js";
@@ -21,6 +22,10 @@ import { resolveLocalDeleteInstance } from "../lib/local-delete-instance.js";
 import { confirmedPurgeIds } from "../lib/memory-purge-response.js";
 import { resolveHome } from "../lib/home.js";
 import { ALL_TIERS } from "../lib/memory-integrity.js";
+import {
+  MEMORY_PROVIDER_RETRY_DELAY_MS,
+  isProviderTimeoutRefusal,
+} from "../lib/memory-provider-timeout.js";
 import {
   normalizeOrigin,
   buildCheckpoint,
@@ -128,6 +133,11 @@ export function categorizeForHygiene(row: HygieneRow, opts: HygieneOptions): Hyg
 export function register(program: Command): void {
   // ─── flair memory ──────────────────────────────────────────────────────────
   const ENTITIES_OPTION_DESCRIPTION = cli.ENTITIES_OPTION_DESCRIPTION;
+  // A write refused with 503 memory_provider_timeout wrote nothing (the
+  // write-lock contract), so `memory add` replays it with the same id. The
+  // bounded attempt count keeps a slow provider from turning one command into
+  // an unbounded wait.
+  const MEMORY_ADD_MAX_ATTEMPTS = 3;
 
   const memory = program.command("memory").description("Manage agent memories");
   addSharedCredentialOptions(
@@ -151,7 +161,9 @@ export function register(program: Command): void {
         console.error("error: --agent <id> required (or set FLAIR_AGENT_ID)");
         process.exit(2);
       }
-      const memId = `${agentId}-${Date.now()}`;
+      // flair#3107: one id per command, random so same-millisecond adds do not
+      // collide; computed once so the retry loop below replays it.
+      const memId = `${agentId}-${randomUUID()}`;
       const body: any = {
         id: memId, agentId, content, durability: opts.durability || "standard",
         tags: opts.tags ? String(opts.tags).split(",").map((x: string) => x.trim()).filter(Boolean) : undefined,
@@ -183,12 +195,27 @@ export function register(program: Command): void {
         const entities = parseEntitiesOptionOrExit(String(opts.entities));
         if (entities.length > 0) body.entities = entities;
       }
-      const out = await api("PUT", `/Memory/${encodeRecordId(memId)}`, body, {
-        agentId,
-        agentIdSource: source,
-        explicitAdminPass: opts.adminPass,
-        adminUser: opts.adminUser,
-      });
+      let out: any;
+      for (let attempt = 1; ; attempt++) {
+        try {
+          out = await api("PUT", `/Memory/${encodeRecordId(memId)}`, body, {
+            agentId,
+            agentIdSource: source,
+            explicitAdminPass: opts.adminPass,
+            adminUser: opts.adminUser,
+          });
+          break;
+        } catch (err) {
+          if (!isProviderTimeoutRefusal(err)) throw err;
+          if (attempt >= MEMORY_ADD_MAX_ATTEMPTS) {
+            console.error(
+              `error: memory add: the embedding provider timed out (503 memory_provider_timeout) on all ${attempt} attempts; nothing was written — retry when the provider is responsive`,
+            );
+            process.exit(1);
+          }
+          await new Promise((resolve) => setTimeout(resolve, MEMORY_PROVIDER_RETRY_DELAY_MS * attempt));
+        }
+      }
       console.log(JSON.stringify(out, null, 2));
     });
   // ─── flair memory write-task-summary ────────────────────────────────────────
@@ -248,7 +275,7 @@ export function register(program: Command): void {
       const content = lines.join("\n");
 
       const { agentId, source } = resolveSigningAgentId(opts, "memory write-task-summary");
-      const memId = `${opts.agent}-task-${opts.beads}-${Date.now()}`;
+      const memId = `${opts.agent}-task-${opts.beads}-${randomUUID()}`;
       const body: any = {
         id: memId,
         agentId: opts.agent,

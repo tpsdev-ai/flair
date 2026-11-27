@@ -31,6 +31,7 @@ import { describeEmbedGpuDoctorFinding } from "../lib/embed-gpu-doctor.js";
 import { describeEmbeddingSpaceDoctorFinding } from "../lib/embedding-space-doctor.js";
 import { adminPassDesyncFinding, detectPersistedAdminUser } from "../lib/init-admin-pass.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
+import { formatKeyModeFinding, keyModesUnsupported, KEY_MODES_UNSUPPORTED_MESSAGE, scanAgentKeyModes, scanKeyDir, sameKeyDir } from "../lib/key-dir.js";
 import {
   instanceIdentityLines,
   probeInstanceIdentity,
@@ -44,7 +45,7 @@ import { resolveRegistryNotice } from "../lib/npm-registry.js";
 import { formatServingTreeLine, formatTreeAssessmentLines, type TreeAssessment } from "../lib/tree-divergence.js";
 import { rewriteFederationSchedulerRuntime, type RewriteFederationRuntimeResult } from "../federation/scheduler.js";
 import { execSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, statSync, unlinkSync } from "node:fs";
 
 import { dirname, join, resolve } from "node:path";
 import { resolveHome } from "../lib/home.js";
@@ -443,8 +444,8 @@ export interface InstallTreeDoctorDeps {
  *   - `--fix` counts the divergence FIXED only after the unit was re-pointed,
  *     the instance restarted, and the serving tree re-proven to be this CLI's —
  *     "nothing to rewrite" or a failed restart is never a fix;
- *   - a federation-sync shim running another npm-global tree is one issue,
- *     fixed only when re-pointed AND re-read as current.
+ *   - a federation-sync shim the dry run would re-point is one issue, fixed
+ *     only when re-pointed AND re-read as current or as a node pin.
  *
  * Extracted from the action (like renderEmbedGpuDoctorFinding) so the counting
  * is exercised directly; the action passes the real adapters.
@@ -524,13 +525,14 @@ export async function runInstallTreeDoctorSection(
       break;
     case "would-rewrite": {
       issues++;
-      write(`  ${bad} the federation-sync shim runs another install tree — ${f.detail}`);
+      write(`  ${bad} the federation-sync shim would be re-pointed — ${f.detail}`);
       if (mode.autoFix && mode.dryRun) {
         write(`  ${info} ${render.wrap(render.c.dim, "[dry-run] would re-point the shim's exec line (the scheduler unit is not rewritten)")}`);
       } else if (mode.autoFix) {
         const r = deps.rewriteFederation(false);
         const verify = r.status === "rewritten" ? deps.rewriteFederation(true) : null;
-        if (verify?.status === "current") {
+        // A re-pointed Homebrew Cellar node that is not this CLI's node re-reads as a pin (flair#3056).
+        if (verify?.status === "current" || verify?.status === "pinned-node") {
           fixed++;
           write(`  ${ok} ${r.detail}`);
         } else {
@@ -963,52 +965,80 @@ program
 
     // 2. Keys directory
     const keysDir = defaultKeysDir();
+    let keysDirUnreadable = false;
+    if (keyModesUnsupported()) {
+      console.log(`  ${render.icons.info} ${render.wrap(render.c.dim, KEY_MODES_UNSUPPORTED_MESSAGE)}`);
+    }
     if (existsSync(keysDir)) {
-      const keyFiles = (await import("node:fs")).readdirSync(keysDir).filter((f: string) => f.endsWith(".key"));
-      // ~/.flair/keys is shared by agent Ed25519 signing keys and node-scoped
-      // federation keys (flair#1193). Only agent keys are signing identities;
-      // node keys are AES-GCM keystore blobs that must never be parsed as, or
-      // inferred as, an agent. Partition them out here so every downstream
-      // consumer of keyAgentIds (registration checks, --fix inference,
-      // fixCommandAgentHint) is node-free by construction.
-      const partitioned = partitionKeyIds(
-        keyFiles.map((f: string) => f.replace(/\.key$/, "")),
-        keysDir,
-      );
-      keyAgentIds = partitioned.agentKeyIds;
-      nodeKeyIds = partitioned.nodeKeyIds;
-      if (keyAgentIds.length > 0) {
-        console.log(`  ${render.icons.ok} Keys found: ${render.wrap(render.c.bold, String(keyAgentIds.length))} agent(s) in ${render.wrap(render.c.dim, keysDir)}`);
-        if (partitioned.nodeKeyIds.length > 0) {
-          console.log(`     ${render.icons.info} ${render.wrap(render.c.dim, `${partitioned.nodeKeyIds.length} node-scoped federation key(s) present — not agent signing keys; skipping`)}`);
-        }
-      } else if (partitioned.nodeKeyIds.length > 0) {
-        // Node keys but no agent key: functionally there is no agent identity
-        // here. Report it plainly (not the old DECODER false alarm) and point
-        // at the real remedy. Kept a warn — not an issues++ — so a genuine
-        // federation-only host doesn't newly fail doctor's exit code.
-        console.log(`  ${render.icons.warn} No agent signing key found — only ${render.wrap(render.c.bold, String(nodeKeyIds.length))} node-scoped federation key(s) in ${render.wrap(render.c.dim, keysDir)}`);
-        console.log(`     ${render.wrap(render.c.dim, "These are Fabric node keys, not agent identities. Fix:")} flair init --agent-id <your-agent>`);
-      } else {
-        console.log(`  ${render.icons.error} Keys directory exists but no .key files found`);
-        console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair init --agent-id <your-agent>`);
+      const keyScan = scanKeyDir(keysDir);
+      if (keyScan.state === "unreadable") {
+        // A keys directory doctor cannot read is not a clean result.
+        keysDirUnreadable = true;
         issues++;
-      }
-
-      if (nodeKeyIds.length > 0 && harperResponding) {
-        if (pairNotRun) {
-          reportPairNotRun("Node key instance check");
+        console.log(`  ${render.icons.warn} Keys directory could not be read: ${render.wrap(render.c.dim, keysDir)} — key checks skipped`);
+      } else {
+        const keyFiles = keyScan.entries.filter((e) => e.kind === "key").map((e) => e.name);
+        // ~/.flair/keys is shared by agent Ed25519 signing keys and node-scoped
+        // federation keys (flair#1193). Partition by file name (see
+        // partitionKeyIds): downstream consumers of keyAgentIds (registration
+        // checks, --fix inference, fixCommandAgentHint) skip ids classified as
+        // node keys. A node-shaped id with a sibling `.pub` is classified as an
+        // agent key.
+        const partitioned = partitionKeyIds(
+          keyFiles.map((f: string) => f.replace(/\.key$/, "")),
+          keysDir,
+        );
+        keyAgentIds = partitioned.agentKeyIds;
+        nodeKeyIds = partitioned.nodeKeyIds;
+        if (keyAgentIds.length > 0) {
+          console.log(`  ${render.icons.ok} Keys found: ${render.wrap(render.c.bold, String(keyAgentIds.length))} agent(s) in ${render.wrap(render.c.dim, keysDir)}`);
+          if (partitioned.nodeKeyIds.length > 0) {
+            console.log(`     ${render.icons.info} ${render.wrap(render.c.dim, `${partitioned.nodeKeyIds.length} node-scoped federation key(s) present — not agent signing keys; skipping`)}`);
+          }
+        } else if (partitioned.nodeKeyIds.length > 0) {
+          // Node keys but no agent key: functionally there is no agent identity
+          // here. Report it plainly (not the old DECODER false alarm) and point
+          // at the real remedy. Kept a warn — not an issues++ — so a genuine
+          // federation-only host doesn't newly fail doctor's exit code.
+          console.log(`  ${render.icons.warn} No agent signing key found — only ${render.wrap(render.c.bold, String(nodeKeyIds.length))} node-scoped federation key(s) in ${render.wrap(render.c.dim, keysDir)}`);
+          console.log(`     ${render.wrap(render.c.dim, "These are Fabric node keys, not agent identities. Fix:")} flair init --agent-id <your-agent>`);
         } else {
-          const advisory = await readNodeSeedAdvisory({
-            nodeKeyIds, keysDir, baseUrl, port: opts.port, resolveHttpPort, resolveOpsPort,
-          });
-          if (advisory) console.log(`  ${render.icons.info} ${advisory}`);
+          console.log(`  ${render.icons.error} Keys directory exists but no .key files found`);
+          console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair init --agent-id <your-agent>`);
+          issues++;
+        }
+
+        if (nodeKeyIds.length > 0 && harperResponding) {
+          if (pairNotRun) {
+            reportPairNotRun("Node key instance check");
+          } else {
+            const advisory = await readNodeSeedAdvisory({
+              nodeKeyIds, keysDir, baseUrl, port: opts.port, resolveHttpPort, resolveOpsPort,
+            });
+            if (advisory) console.log(`  ${render.icons.info} ${advisory}`);
+          }
         }
       }
     } else {
       console.log(`  ${render.icons.error} Keys directory missing: ${render.wrap(render.c.dim, keysDir)}`);
       console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair init --agent-id <your-agent>`);
       issues++;
+    }
+
+    // Agent key files must be owner-only on POSIX (flair#3077). Read-only:
+    // this never changes a file. It covers the standard `resolveKeyPath` locations,
+    // not only the default keys directory.
+    if (!keyModesUnsupported()) {
+      const modeScan = scanAgentKeyModes();
+      for (const { dir, code } of modeScan.unreadable) {
+        if (keysDirUnreadable && sameKeyDir(dir, keysDir)) continue;
+        issues++;
+        console.log(`  ${render.icons.warn} agent key directory ${render.wrap(render.c.dim, dir)} could not be read (${code}) — key file modes not checked`);
+      }
+      for (const finding of modeScan.findings) {
+        issues++;
+        console.log(`  ${render.icons.warn} ${render.wrap(render.c.yellow, formatKeyModeFinding(finding))}`);
+      }
     }
 
     // 3. Config file (flair#1514) — same resolution Harper uses: cwd, then
@@ -2662,6 +2692,9 @@ program
         const lastExit = d.status.installed && d.status.active === true
           ? queryLastExitStatus({ plat: d.status.platform, darwinTarget: d.darwinTarget, linuxServiceUnit: d.linuxServiceUnit })
           : null;
+        // flair#3056: set when the unit file names the flair-generated shim as
+        // its program and the node path on the shim's exec line does not exist.
+        const shimMissingNode = d.kind === "federation" && d.status.installed ? fedSched.inspectFederationShimNode() : null;
         const facts = {
           label: d.label,
           enableCommand: d.enableCommand,
@@ -2669,6 +2702,7 @@ program
           installed: d.status.installed,
           active: d.status.active,
           lastExit,
+          shimMissingNode,
           stderrLogPath: d.stderrLogPath,
         };
         const finding = d.kind === "federation"

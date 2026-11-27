@@ -24,38 +24,18 @@
  */
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { suppliesSoulScopeFields } from "../lib/soul-scope-fields.js";
-import { ApiHttpError, ApiRequestOutcomeUnknown, apiErrorRawBody } from "../lib/auth-resolve.js";
+import { ApiHttpError, ApiRequestOutcomeUnknown } from "../lib/auth-resolve.js";
+import {
+  MEMORY_PROVIDER_RETRY_DELAY_MS,
+  apiErrorCode,
+  isProviderTimeoutRefusal,
+} from "../lib/memory-provider-timeout.js";
 import { readFileSync, existsSync, rmSync, mkdtempSync, statSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { extractSnapshot, createSnapshot } from "./snapshot.js";
 
 export type ApiCall = (method: string, path: string, body?: unknown) => Promise<any>;
-
-/** How long a memory write refused with `503 memory_provider_timeout` waits before its single retry. */
-const RESTORE_PROVIDER_RETRY_DELAY_MS = 1_000;
-
-/**
- * The server's `error` code on an `ApiHttpError`, parsed from the response body
- * that error carries (`apiErrorRawBody`; the message is never read). Returns
- * undefined for a non-HTTP error, an error that carries no body, or a body
- * without a string `error` field.
- */
-function apiErrorCode(err: unknown): string | undefined {
-  const text = apiErrorRawBody(err);
-  if (text === undefined) return undefined;
-  try {
-    const body = JSON.parse(text);
-    return body && typeof body === "object" && typeof body.error === "string" ? body.error : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/** A memory write refused with exactly 503 and `memory_provider_timeout`. */
-function isProviderTimeoutRefusal(err: unknown): boolean {
-  return err instanceof ApiHttpError && err.status === 503 && apiErrorCode(err) === "memory_provider_timeout";
-}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -72,8 +52,13 @@ export function formatUnknownState(state: { entity: "memory" | "soul"; id: strin
     : `${state.entity} ${state.id}: absent from the verification read; the deadline fired before a complete response, so whether the write landed is unresolved and its state is unverified`;
 }
 
-/** The server release that first serves `GET /AdminMemoryCandidates/{agentId}`. */
-export const CANDIDATE_LIST_MIN_SERVER_VERSION = "0.63.0";
+/**
+ * The server release that first serves `GET /AdminMemoryCandidates/{agentId}`. This is a server-capability
+ * minimum, not a package version, so its name does not end in "version": in the files it scans,
+ * check-version-sync treats a declaration whose identifier ends in "version" and holds the target release as
+ * a version site the release must bump.
+ */
+export const CANDIDATE_LIST_FIRST_SERVER_RELEASE = "0.63.0";
 
 /** The page size restore asks the admin-only candidate route for. */
 export const CANDIDATE_LIST_LIMIT = 500;
@@ -354,7 +339,7 @@ function candidateListDefect(body: any): string | null {
 /** The candidate-route 404 guidance: the operator message when GET /AdminMemoryCandidates answers 404. */
 function candidateRoute404Guidance(err: ApiHttpError): string {
   return `restore lists leftover MemoryCandidate rows through GET /AdminMemoryCandidates on the restore target, and the target answered HTTP ${err.status}. `
-    + `That route is part of Flair server ${CANDIDATE_LIST_MIN_SERVER_VERSION}; if the target runs an older server, upgrade it to ${CANDIDATE_LIST_MIN_SERVER_VERSION} or newer, then retry. `
+    + `That route is part of Flair server ${CANDIDATE_LIST_FIRST_SERVER_RELEASE}; if the target runs an older server, upgrade it to ${CANDIDATE_LIST_FIRST_SERVER_RELEASE} or newer, then retry. `
     + "No target rows were deleted or written.";
 }
 
@@ -665,7 +650,7 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
         // nothing, so replaying this one PUT cannot double-write the row.
         if (!isProviderTimeoutRefusal(err)) throw err;
         result.retried.memories.push(id);
-        await delay(RESTORE_PROVIDER_RETRY_DELAY_MS);
+        await delay(MEMORY_PROVIDER_RETRY_DELAY_MS);
         // No client-side timer here: a request abandoned at a client deadline
         // could still commit after this row was recorded failed. The whole
         // request now carries the shared deadline, and its expiry is an

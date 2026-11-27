@@ -207,7 +207,8 @@ function expect4xx(res: { status: number; text: string }, what: string): void {
 
 async function mintMcpToken(sub: string): Promise<string> {
   const key = await importPKCS8(mcpPrivateKeyPem, "RS256");
-  return new SignJWT({ client_id: "idp-mapping-writes-client", scope: "openid" })
+  // The scope memory_store requires (flair#3076).
+  return new SignJWT({ client_id: "idp-mapping-writes-client", scope: "memory:write" })
     .setProtectedHeader({ alg: "RS256", kid: MCP_KID, typ: "at+jwt" })
     .setIssuer(MCP_ISSUER)
     .setAudience(MCP_RESOURCE)

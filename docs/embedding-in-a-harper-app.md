@@ -35,8 +35,8 @@ That is the whole API. No deep import, no `server.resources`, no `.Resource`, no
 **3. Read it back, scoped to that agent.**
 
 ```javascript
-const hits = await planner.recall("deploy schedule", { limit: 5 });
-const record = await planner.memory.get(hits[0].id);
+const hits = await planner.recall("deploy schedule", { limit: 5 });   // an array of hits
+const record = await planner.memory.get(hits[0].id);                  // the stored row, or null
 ```
 
 **4. Register an agent, no CLI.**
@@ -50,7 +50,7 @@ await flair.admin.registerAgent("planner", { publicKey: "pending" });
 **5. Verify it worked.**
 
 ```javascript
-console.log(await planner.memory.search({ limit: 10 }));
+console.log(await planner.memory.search({ limit: 10 }));   // an array of at most 10 rows
 console.log([...server.resources.keys()].sort());   // what Flair registered
 ```
 
@@ -80,9 +80,9 @@ planner.agentId;  // "planner"
 | Method | Description |
 |---|---|
 | `handle.memory.write(content, opts?)` | Write a memory as this agent. `agentId` is stamped from the handle — the caller never passes it. |
-| `handle.memory.get(id)` | Read a memory by id, scoped to this agent. |
-| `handle.memory.search(opts?)` | Search memories scoped to this agent. |
-| `handle.recall(query, opts?)` | Semantic search scoped to this agent. |
+| `handle.memory.get(id)` | Read a memory by id, scoped to this agent. Resolves to the stored row, or `null` when that id is not readable by this agent. |
+| `handle.memory.search(opts?)` | Search memories scoped to this agent. Resolves to an array of rows, at most `opts.limit` of them when that option is set. |
+| `handle.recall(query, opts?)` | Semantic search scoped to this agent. Resolves to an array of hits. |
 
 ### `flair.admin`
 
@@ -93,7 +93,7 @@ Admin operations — unfiltered reads, cross-agent writes. Every call site is gr
 | Method | Description |
 |---|---|
 | `flair.admin.registerAgent(id, opts?)` | Register an agent through the Agent resource (full Principal shape). |
-| `flair.admin.memory.get(id)` | Read any memory by id, unfiltered. |
+| `flair.admin.memory.get(id)` | Read any memory by id, unfiltered. Resolves to the stored row, or `null` when no record has that id. |
 | `flair.admin.memory.write(asAgentId, content, opts?)` | Write a memory attributed to another agent. |
 
 ### `flair.internal`

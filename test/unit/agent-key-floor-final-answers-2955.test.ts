@@ -253,6 +253,26 @@ describe("flair#2955 — the agent-key floor moves on for credential refusals, c
     }
   });
 
+  test("a key file named only `.key` is a floor candidate and signs once", async () => {
+    const onlySuffix = makeTmpDir("flair-2955-suffix-only");
+    try {
+      writeAgentKey(onlySuffix, "");
+      const server = await startFloorServer(() => ({ status: 200, body: { ok: true } }));
+      try {
+        const result = await authedRequest("POST", "/Memory", { agentId: "agent-first", content: "hello" }, {
+          baseUrl: server.url,
+          keysDir: onlySuffix,
+        });
+        expect(result).toEqual({ ok: true });
+        expect(signedRequests(server).map((r) => agentOf(r.authorization))).toEqual([""]);
+      } finally {
+        await server.close();
+      }
+    } finally {
+      rmSync(onlySuffix, { recursive: true, force: true });
+    }
+  });
+
   test("a corrupt first key file is skipped before anything is sent, and the next key signs once", async () => {
     const onlyCorruptFirst = makeTmpDir("flair-2955-corrupt-first");
     try {
