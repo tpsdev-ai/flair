@@ -2,14 +2,19 @@
  * init-remote-ops.test.ts — Integration tests for the atomic
  * `flair init --remote` provisioning flow.
  *
- * Mocks fetch() to simulate the ops API and Flair REST endpoints.
- * Verifies operation ordering, idempotence, timeout handling, and
- * the secret-file write.
+ * Provisioning sends `add_user` when the cluster's user list has no `admin`
+ * record and `alter_user` when it has one; a listed super_user cluster
+ * administrator takes the reuse branch instead of an `admin` write. Tarball
+ * cases build a real archive from temporary files; other hermetic cases mock
+ * the HTTP calls they exercise. Provisioning branches and the init
+ * action also run against a spawned Harper. Verifies operation ordering,
+ * idempotence, timeout handling, the secret-file write and remote-init refusals.
  */
 
 import { describe, test, expect, beforeAll, beforeEach, afterEach, afterAll, mock } from "bun:test";
 import { existsSync, readFileSync, readdirSync, readlinkSync, lstatSync, symlinkSync, rmSync, mkdirSync, writeFileSync, mkdtempSync, chmodSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "node:http";
@@ -331,6 +336,44 @@ describe("provisionFabric — full happy path", () => {
     expect(waitCalled).toBe(true);
   });
 
+  test("accepts an unrelated record with database grants and no super_user", async () => {
+    const operations: string[] = [];
+
+    globalThis.fetch = mock(async (url: string, opts?: any) => {
+      const parsed = new URL(url);
+      if (parsed.port === "19925") {
+        const body = JSON.parse(opts.body);
+        operations.push(body.operation);
+        if (body.operation === "list_users") {
+          return new Response(JSON.stringify([
+            { username: "cluster-admin", role: { permission: { super_user: false } } },
+            {
+              username: "cluster-db-reader",
+              permission: { flair: { tables: { Memory: { read: true, insert: false, update: false, delete: false, attribute_permissions: [] } } } },
+            },
+          ]), { status: 200 });
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (parsed.port === "19926" && parsed.pathname.includes("FederationPair")) {
+        return new Response(JSON.stringify({ error: "instanceId and publicKey required" }), { status: 400 });
+      }
+      return new Response("unknown", { status: 400 });
+    });
+
+    const principal = await provisionFabric(
+      TEST_OPTS.target,
+      TEST_OPTS.opsTarget,
+      TEST_OPTS.clusterAdminUser,
+      TEST_OPTS.clusterAdminPass,
+      TEST_OPTS.flairAdminPass,
+    );
+
+    expect(principal).toEqual({ username: "admin", password: TEST_OPTS.flairAdminPass, created: true });
+    expect(operations).toContain("deploy_component");
+    expect(operations).toContain("add_user");
+  });
+
   test("skips add_user when cluster-admin is already super_user", async () => {
     let listUsersCalled = false;
     let addUserCalled = false;
@@ -373,8 +416,53 @@ describe("provisionFabric — full happy path", () => {
     expect(addUserCalled).toBe(false);
   });
 
-  test("falls back to alter_user when add_user returns 'already exists'", async () => {
-    let addUserErr = false;
+  test("sends alter_user and never add_user for admin when list_users lists an admin record and the cluster administrator is not a super_user", async () => {
+    let addUserCalled = false;
+    let alterUserCalled = false;
+
+    globalThis.fetch = mock(async (url: string, opts?: any) => {
+      const parsed = new URL(url);
+      if (parsed.port === "19925") {
+        const body = JSON.parse(opts.body);
+        if (body.operation === "deploy_component") {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        if (body.operation === "list_users") {
+          return new Response(JSON.stringify([
+            { username: "cluster-admin", role: { permission: { super_user: false } } },
+            { username: "admin", role: { permission: { super_user: true } } },
+          ]), { status: 200 });
+        }
+        if (body.operation === "add_user") {
+          addUserCalled = true;
+        }
+        if (body.operation === "alter_user") {
+          alterUserCalled = true;
+          expect(body.username).toBe("admin");
+          expect(body.password).toBe(TEST_OPTS.flairAdminPass);
+          expect(body.role).toBe("super_user");
+          expect(body.active).toBe(true);
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        return new Response("unknown", { status: 400 });
+      }
+      return new Response(JSON.stringify({ error: "instanceId and publicKey required" }), { status: 400 });
+    });
+
+    const principal = await provisionFabric(
+      TEST_OPTS.target,
+      TEST_OPTS.opsTarget,
+      TEST_OPTS.clusterAdminUser,
+      TEST_OPTS.clusterAdminPass,
+      TEST_OPTS.flairAdminPass,
+    );
+
+    expect(principal).toEqual({ username: "admin", password: TEST_OPTS.flairAdminPass, created: true });
+    expect(alterUserCalled).toBe(true);
+    expect(addUserCalled).toBe(false);
+  });
+
+  test("an unrelated add_user failure with no admin in list_users propagates instead of falling back to alter_user", async () => {
     let alterUserCalled = false;
 
     globalThis.fetch = mock(async (url: string, opts?: any) => {
@@ -390,15 +478,10 @@ describe("provisionFabric — full happy path", () => {
           ]), { status: 200 });
         }
         if (body.operation === "add_user") {
-          addUserErr = true;
-          return new Response("user already exists", { status: 409 });
+          return new Response("the cluster is read-only", { status: 500 });
         }
         if (body.operation === "alter_user") {
           alterUserCalled = true;
-          expect(body.username).toBe("admin");
-          expect(body.password).toBe(TEST_OPTS.flairAdminPass);
-          expect(body.role).toBe("super_user");
-          expect(body.active).toBe(true);
           return new Response(JSON.stringify({ ok: true }), { status: 200 });
         }
         return new Response("unknown", { status: 400 });
@@ -406,17 +489,165 @@ describe("provisionFabric — full happy path", () => {
       return new Response(JSON.stringify({ error: "instanceId and publicKey required" }), { status: 400 });
     });
 
-    await provisionFabric(
+    await expect(provisionFabric(
       TEST_OPTS.target,
       TEST_OPTS.opsTarget,
       TEST_OPTS.clusterAdminUser,
       TEST_OPTS.clusterAdminPass,
       TEST_OPTS.flairAdminPass,
-    );
-
-    expect(addUserErr).toBe(true);
-    expect(alterUserCalled).toBe(true);
+    )).rejects.toThrow("the cluster is read-only");
+    expect(alterUserCalled).toBe(false);
   });
+
+  test.each([
+    ["missing username", [
+      { username: "cluster-admin", role: { permission: { super_user: false } } },
+      { role: { permission: { super_user: false } } },
+    ]],
+    ["empty username", [{ username: "", role: { permission: { super_user: false } } }]],
+    ["string permission", [{ username: "cluster-admin", role: { permission: { super_user: "false" } } }]],
+    ["numeric permission", [{ username: "cluster-admin", role: { permission: { super_user: 1 } } }]],
+    ["null permission", [{ username: "cluster-admin", role: { permission: { super_user: null } } }]],
+    ["missing permission", [{ username: "cluster-admin", role: { permission: {} } }]],
+    ["admin missing super_user", [
+      { username: "cluster-admin", role: { permission: { super_user: false } } },
+      { username: "admin", role: { permission: {} } },
+    ]],
+    ["admin string super_user", [
+      { username: "cluster-admin", role: { permission: { super_user: false } } },
+      { username: "admin", role: { permission: { super_user: "false" } } },
+    ]],
+    ["non-object entry", [null]],
+    ["array entry", [[]]],
+    ["non-array response", {}],
+  ])("init refuses list_users with %s before credential staging or write requests", async (_label, response) => {
+    const home = mkdtempSync(join(tmpDir, "home-"));
+    const secretsDir = join(home, ".tps", "secrets");
+    const requestsPath = join(tmpDir, "requests.jsonl");
+    const preloadPath = join(tmpDir, "ops-preload.ts");
+    writeFileSync(preloadPath, `
+      import { appendFileSync } from "node:fs";
+      globalThis.fetch = async (input, opts) => {
+        const url = String(input);
+        const operation = opts?.body ? JSON.parse(opts.body).operation : undefined;
+        appendFileSync(${JSON.stringify(requestsPath)}, JSON.stringify({ url, method: opts?.method ?? "GET", operation }) + "\\n");
+        if (operation !== "list_users") throw new Error("unexpected request after list_users");
+        return new Response(${JSON.stringify(JSON.stringify(response))}, { status: 200 });
+      };
+    `);
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+      !/^(FLAIR_|HARPER_|HDB_|FABRIC_|ROOTPATH$)/.test(key),
+    ));
+    const out = spawnSync(process.execPath, [
+      "--preload", preloadPath, join(originalCwd, "src", "cli.ts"), "init",
+      "--target", TEST_OPTS.target, "--ops-target", TEST_OPTS.opsTarget,
+      "--force", "--cluster-admin-user", TEST_OPTS.clusterAdminUser,
+      "--cluster-admin-pass", TEST_OPTS.clusterAdminPass,
+      "--flair-admin-pass", TEST_OPTS.flairAdminPass,
+    ], { env: { ...env, HOME: home, USERPROFILE: home }, encoding: "utf8", timeout: 10_000 });
+
+    expect(out.error, `init failed to run: ${out.stderr}`).toBeUndefined();
+    expect(out.status).toBe(1);
+    const decidingRecord = ["string permission", "numeric permission", "null permission", "missing permission", "admin missing super_user", "admin string super_user"].includes(_label);
+    expect(out.stderr).toContain(
+      !Array.isArray(response)
+        ? "not an array"
+        : decidingRecord
+          ? "malformed record for a user that decides provisioning"
+          : "no readable username",
+    );
+    expect(out.stderr).toContain("provisioning refused to change anything");
+    const seen = readFileSync(requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    expectNoWriteRequest(seen, "malformed list_users", TEST_OPTS.opsTarget);
+    expect(seen.map((call: { operation?: string }) => call.operation)).toEqual(["list_users"]);
+    expect(existsSync(join(secretsDir, "flair-fabric-hdb"))).toBe(false);
+    expect(existsSync(secretsDir) ? readdirSync(secretsDir) : []).toEqual([]);
+  }, 15_000);
+
+  test.each([
+    ["an empty list", []],
+    ["only unrelated users", [{ username: "someone-else", role: { permission: { super_user: false } } }]],
+    ["a duplicate cluster-administrator record", [
+      { username: "cluster-admin", role: { permission: { super_user: false } } },
+      { username: "cluster-admin", role: { permission: { super_user: true } } },
+    ]],
+  ])("init refuses list_users with %s that does not confirm the cluster administrator exactly once", async (_label, response) => {
+    const home = mkdtempSync(join(tmpDir, "home-"));
+    const secretsDir = join(home, ".tps", "secrets");
+    const requestsPath = join(tmpDir, "requests.jsonl");
+    const preloadPath = join(tmpDir, "ops-preload.ts");
+    writeFileSync(preloadPath, `
+      import { appendFileSync } from "node:fs";
+      globalThis.fetch = async (input, opts) => {
+        const url = String(input);
+        const operation = opts?.body ? JSON.parse(opts.body).operation : undefined;
+        appendFileSync(${JSON.stringify(requestsPath)}, JSON.stringify({ url, method: opts?.method ?? "GET", operation }) + "\\n");
+        if (operation !== "list_users") throw new Error("unexpected request after list_users");
+        return new Response(${JSON.stringify(JSON.stringify(response))}, { status: 200 });
+      };
+    `);
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+      !/^(FLAIR_|HARPER_|HDB_|FABRIC_|ROOTPATH$)/.test(key),
+    ));
+    const out = spawnSync(process.execPath, [
+      "--preload", preloadPath, join(originalCwd, "src", "cli.ts"), "init",
+      "--target", TEST_OPTS.target, "--ops-target", TEST_OPTS.opsTarget,
+      "--force", "--cluster-admin-user", TEST_OPTS.clusterAdminUser,
+      "--cluster-admin-pass", TEST_OPTS.clusterAdminPass,
+      "--flair-admin-pass", TEST_OPTS.flairAdminPass,
+    ], { env: { ...env, HOME: home, USERPROFILE: home }, encoding: "utf8", timeout: 10_000 });
+
+    expect(out.error, `init failed to run: ${out.stderr}`).toBeUndefined();
+    expect(out.status).toBe(1);
+    expect(out.stderr).toContain(`cluster administrator '${TEST_OPTS.clusterAdminUser}'`);
+    expect(out.stderr).toContain("does not confirm");
+    const seen = readFileSync(requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    expectNoWriteRequest(seen, "unconfirmed cluster administrator", TEST_OPTS.opsTarget);
+    expect(seen.map((call: { operation?: string }) => call.operation)).toEqual(["list_users"]);
+    expect(existsSync(join(secretsDir, "flair-fabric-hdb"))).toBe(false);
+    expect(existsSync(secretsDir) ? readdirSync(secretsDir) : []).toEqual([]);
+  }, 15_000);
+
+  test("init refuses a list_users answer with more than one Flair administrator record", async () => {
+    const home = mkdtempSync(join(tmpDir, "home-"));
+    const secretsDir = join(home, ".tps", "secrets");
+    const requestsPath = join(tmpDir, "requests.jsonl");
+    const preloadPath = join(tmpDir, "ops-preload.ts");
+    const response = [
+      { username: "cluster-admin", role: { permission: { super_user: false } } },
+      { username: "admin", role: { permission: { super_user: true } } },
+      { username: "admin", role: { permission: { super_user: false } } },
+    ];
+    writeFileSync(preloadPath, `
+      import { appendFileSync } from "node:fs";
+      globalThis.fetch = async (input, opts) => {
+        const url = String(input);
+        const operation = opts?.body ? JSON.parse(opts.body).operation : undefined;
+        appendFileSync(${JSON.stringify(requestsPath)}, JSON.stringify({ url, method: opts?.method ?? "GET", operation }) + "\\n");
+        if (operation !== "list_users") throw new Error("unexpected request after list_users");
+        return new Response(${JSON.stringify(JSON.stringify(response))}, { status: 200 });
+      };
+    `);
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+      !/^(FLAIR_|HARPER_|HDB_|FABRIC_|ROOTPATH$)/.test(key),
+    ));
+    const out = spawnSync(process.execPath, [
+      "--preload", preloadPath, join(originalCwd, "src", "cli.ts"), "init",
+      "--target", TEST_OPTS.target, "--ops-target", TEST_OPTS.opsTarget,
+      "--force", "--cluster-admin-user", TEST_OPTS.clusterAdminUser,
+      "--cluster-admin-pass", TEST_OPTS.clusterAdminPass,
+      "--flair-admin-pass", TEST_OPTS.flairAdminPass,
+    ], { env: { ...env, HOME: home, USERPROFILE: home }, encoding: "utf8", timeout: 10_000 });
+
+    expect(out.error, `init failed to run: ${out.stderr}`).toBeUndefined();
+    expect(out.status).toBe(1);
+    expect(out.stderr).toContain("more than one Flair administrator 'admin' record");
+    const seen = readFileSync(requestsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    expectNoWriteRequest(seen, "duplicate Flair administrator", TEST_OPTS.opsTarget);
+    expect(seen.map((call: { operation?: string }) => call.operation)).toEqual(["list_users"]);
+    expect(existsSync(join(secretsDir, "flair-fabric-hdb"))).toBe(false);
+    expect(existsSync(secretsDir) ? readdirSync(secretsDir) : []).toEqual([]);
+  }, 15_000);
 });
 
 describe("CLI --force + --cluster-admin-user validation", () => {
@@ -674,6 +905,25 @@ describe("flair#3106 — reserved principal refusal (real Harper)", () => {
     expect(readdirSync(home)).toEqual([]);
     expectNoWriteRequest(recorder.all, "reserved-principal/agent-ID overlap refusal", harper.opsURL);
   }, 150_000);
+
+  test("a real Harper treats Flair-Agent, ' flair-agent' and FLAIR-AGENT as distinct users from flair-agent", async () => {
+    const variants = ["Flair-Agent", " flair-agent", "FLAIR-AGENT"];
+    for (const variant of variants) {
+      const added = await harperOps(harper, "admin", "test123", {
+        operation: "add_user", username: variant, password: "variant-pass", role: "super-role", active: true,
+      });
+      expect([200, 409], `add_user ${JSON.stringify(variant)}: ${added.text.slice(0, 200)}`).toContain(added.status);
+      const own = await harperOps(harper, variant, "variant-pass", { operation: "list_users" });
+      expect(own.status, `${JSON.stringify(variant)} must authenticate with its own password`).toBe(200);
+      const cross = await harperOps(harper, variant, "reserved-pass", { operation: "list_users" });
+      expect(cross.status, `${JSON.stringify(variant)} must not authenticate with flair-agent's password`).toBe(401);
+    }
+    const listed = await harperOps(harper, "admin", "test123", { operation: "list_users" });
+    const names = ((listed.body as any[]) ?? []).map((u) => u.username);
+    for (const name of ["flair-agent", ...variants]) {
+      expect(names, `list_users must carry ${JSON.stringify(name)} as its own row`).toContain(name);
+    }
+  }, 60_000);
 });
 
 describe("flair#3106 — external-instance refusal (hermetic)", () => {
@@ -781,7 +1031,7 @@ const laterOptions = (h: HarperInstance, agentId: string, keysDir: string) => ({
   baseUrl: h.httpURL,
   opsUrl: h.opsURL,
   remote: true,
-  provisioned: true,
+  provisioningLeg: true,
   agentId,
   keysDir,
 });
@@ -910,6 +1160,7 @@ describe("flair#3106 — existing super_user branch (real Harper)", () => {
       expect(hint).toContain("cluster administrator password");
       expect(hint).not.toContain(secretPath);
       expect(out.stdout).toContain("Admin user: cluster-north");
+      expect(out.stderr, "no credential file exists, so the reuse warning must not print").not.toContain("neither changed nor verified");
     } finally {
       recorder.restore();
     }
@@ -1102,6 +1353,10 @@ describe("flair#3106 — created admin branch (real Harper)", () => {
       expect(hint).toContain("cluster administrator password");
       expect(hint).not.toContain(secretPath);
       expect(out.stdout).toContain("Admin user: admin");
+      expect(out.stderr, "the reused branch must warn about the existing credential file").toContain(secretPath);
+      expect(out.stderr).toContain("neither changed nor verified");
+      expect(out.stderr).toContain("Verify it by authenticating to the instance with the password it holds before relying on it.");
+      expect(out.stderr.split("this run reused an existing super_user cluster administrator").length - 1).toBe(1);
     } finally {
       recorder.restore();
     }
@@ -1114,9 +1369,8 @@ describe("flair#3106 — existing admin update path (real Harper)", () => {
 
   beforeAll(async () => {
     harper = await startLocalHarper();
-    // `admin` already exists on a fresh instance, so a non-super cluster
-    // administrator drives provisionFabric's add_user -> "already exists" ->
-    // alter_user branch.
+    // `admin` already exists on a fresh instance, so the validated list_users
+    // records drive provisionFabric's alter_user path.
     const opsRole = await harperOps(harper, "admin", "test123", {
       operation: "add_role",
       role: "cluster-ops-role",
@@ -1443,7 +1697,7 @@ describe("flair#3130 — remote init credential ordering (real Harper)", () => {
 
     expect(out.exitCode, "the action must exit non-zero when the cluster change fails").toBe(1);
     expect(out.stderr, "the failure must name the saved file").toContain(secretPath);
-    expect(recorder.all.filter((call) => call.operation === "add_user" || call.operation === "alter_user").map((call) => call.operation)).toEqual(["add_user"]);
+    expect(recorder.all.filter((call) => call.operation === "add_user" || call.operation === "alter_user").map((call) => call.operation)).toEqual(["alter_user"]);
     expect(out.stderr, "init must report the uncertain outcome").toContain("may hold the password saved");
     expect(
       recorder.all.some((call) => call.operation === "deploy_component"),
@@ -1506,7 +1760,7 @@ describe("flair#3130 — remote init credential ordering (real Harper)", () => {
     }
 
     expect(out.exitCode, "the action must exit non-zero when the cluster change fails").toBe(1);
-    expect(recorder.all.filter((call) => call.operation === "add_user" || call.operation === "alter_user").map((call) => call.operation)).toEqual(["add_user"]);
+    expect(recorder.all.filter((call) => call.operation === "add_user" || call.operation === "alter_user").map((call) => call.operation)).toEqual(["alter_user"]);
     expect(out.stderr, "init must report the uncertain outcome").toContain("may hold the password");
     expect(recorder.all.some((call) => call.operation === "deploy_component"), "the change was attempted").toBe(true);
 
@@ -1611,9 +1865,9 @@ describe("flair#3130 — remote init credential ordering (real Harper)", () => {
       try { operation = bodyText === null ? undefined : JSON.parse(bodyText)?.operation; } catch { operation = undefined; }
       if (operation === "deploy_component") return new Response(JSON.stringify({ ok: true }), { status: 200 });
       const res = await REAL_FETCH(input, init);
-      if (operation === "add_user") {
-        // The seeded admin makes add_user take the duplicate-user path;
-        // alter_user applies the password next. Use a directory at the target.
+      if (operation === "alter_user") {
+        // The seeded admin makes list_users choose the update path, so
+        // alter_user applies the password. Use a directory at the target.
         sentWith = readdirSync(secretsDir);
         rmSync(secretPath, { force: true });
         mkdirSync(secretPath, { recursive: true });
@@ -2052,6 +2306,58 @@ describe("flair#3130 — remote init credential ordering (real Harper)", () => {
   }, 150_000);
 });
 
+describe("flair#3159 — unrelated list_users records (real Harper)", () => {
+  let harper: HarperInstance;
+
+  beforeAll(async () => {
+    harper = await startLocalHarper();
+    const superRole = await harperOps(harper, "admin", "test123", { operation: "add_role", role: "super-role", permission: { super_user: true } });
+    expect([200, 409], superRole.text).toContain(superRole.status);
+    const clusterUser = await harperOps(harper, "admin", "test123", {
+      operation: "add_user", username: "cluster-north", password: "cluster-north-pass", role: "super-role", active: true,
+    });
+    expect([200, 409], clusterUser.text).toContain(clusterUser.status);
+
+    // Harper accepts a role that holds only database grants and no super_user
+    // flag, so list_users returns a record whose permission has no super_user.
+    const dbOnlyRole = await harperOps(harper, "admin", "test123", {
+      operation: "add_role",
+      role: "database-only-role",
+      permission: {
+        flair: {
+          tables: {
+            Memory: { read: true, insert: false, update: false, delete: false, attribute_permissions: [] },
+          },
+        },
+      },
+    });
+    expect(dbOnlyRole.status, dbOnlyRole.text).toBe(200);
+    const dbOnlyUser = await harperOps(harper, "admin", "test123", {
+      operation: "add_user", username: "cluster-db-reader", password: "cluster-db-reader-pass", role: "database-only-role", active: true,
+    });
+    expect([200, 409], dbOnlyUser.text).toContain(dbOnlyUser.status);
+  }, 180_000);
+
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
+
+  test("a user whose role holds only database grants does not make provisioning refuse", async () => {
+    const listed = await harperOps(harper, "admin", "test123", { operation: "list_users" });
+    expect(listed.status, listed.text.slice(0, 200)).toBe(200);
+    expect(((listed.body as any[]) ?? []).map((record) => record.username)).toContain("cluster-db-reader");
+
+    const recorder = installRecorder({ user: "cluster-north", pass: "cluster-north-pass" });
+    try {
+      const principal = await provisionFabric(
+        harper.httpURL, harper.opsURL, "cluster-north", "cluster-north-pass", "generated-3159",
+      );
+      expect(principal).toEqual({ username: "cluster-north", password: "cluster-north-pass", created: false });
+      expect(recorder.deployAuthOk(), "the deploy request must carry the cluster administrator's Basic auth").toBe(true);
+    } finally {
+      recorder.restore();
+    }
+  }, 120_000);
+});
+
 // ─── the `flair init` action helpers ────────────────────────────────────────────
 //
 // These drive the command action itself: the principal assignment, the later
@@ -2096,6 +2402,7 @@ async function runInitAction(args: string[], home: string, opts: { rethrow?: boo
   const origExit = process.exit;
   const origLog = console.log;
   const origErr = console.error;
+  const origWarn = console.warn;
   let stdout = "";
   let stderr = "";
   let exitCode: number | undefined;
@@ -2112,6 +2419,7 @@ async function runInitAction(args: string[], home: string, opts: { rethrow?: boo
   delete process.env.ROOTPATH;
   console.log = (...parts: unknown[]) => { stdout += parts.map((part) => String(part)).join(" ") + "\n"; };
   console.error = (...parts: unknown[]) => { stderr += parts.map((part) => String(part)).join(" ") + "\n"; };
+  console.warn = (...parts: unknown[]) => { stderr += parts.map((part) => String(part)).join(" ") + "\n"; };
   process.exit = ((code?: number) => {
     exitCode = code ?? 0;
     throw new Error(`process.exit(${code ?? 0})`);
@@ -2129,6 +2437,7 @@ async function runInitAction(args: string[], home: string, opts: { rethrow?: boo
     process.exit = origExit;
     console.log = origLog;
     console.error = origErr;
+    console.warn = origWarn;
     if (saved.HOME === undefined) delete process.env.HOME;
     else process.env.HOME = saved.HOME;
     if (saved.USERPROFILE === undefined) delete process.env.USERPROFILE;

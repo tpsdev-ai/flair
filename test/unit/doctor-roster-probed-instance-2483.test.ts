@@ -446,6 +446,7 @@ describe("proveLocalInstancePair — the OS listener table must show one process
       kind: "unproven",
       status: null,
       detail: `the listener table for ops port ${serverPort} cannot be read: lsof is not installed or not on PATH, and this check reads the listener table with \`lsof -nP -iTCP:${serverPort} -sTCP:LISTEN -Fp\``,
+      reason: "listener-table-unavailable",
       remedy: "Install lsof or put it on PATH (macOS ships it as /usr/sbin/lsof), then re-run this command on the host where Harper runs.",
     });
   });

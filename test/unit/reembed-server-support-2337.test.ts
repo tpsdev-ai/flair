@@ -90,7 +90,7 @@ const CURRENT_HEALTH = {
   searchReady: true,
   capabilities: [MEMORY_REEMBED_PATCH_CAPABILITY],
 };
-const CANDIDATE = { id: "agent-a/item-1", content: "fixture content", embeddingModel: "stale-model" };
+const CANDIDATE = { id: "agent-a/item-1", agentId: "agent-a", content: "fixture content", embeddingModel: "stale-model" };
 
 /** A HOME with a key file for agent-a, so the single-agent path proceeds. */
 function homeWithKey(): string {

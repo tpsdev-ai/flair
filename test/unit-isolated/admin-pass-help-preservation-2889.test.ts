@@ -40,7 +40,7 @@ describe("flair#2889 — --admin-pass descriptions", () => {
   });
 });
 
-describe("flair#2889 — options other than --admin-pass-file and memory search --admin-user keep their origin/main order", () => {
+describe("flair#2889 — fixture option order", () => {
   test("the registered tree matches the fixture after removing the added options", () => {
     const walked = new Map<string, string[]>();
     for (const { path, cmd } of walkCliCommands(program)) walked.set(path, optionNames(cmd));
@@ -53,7 +53,8 @@ describe("flair#2889 — options other than --admin-pass-file and memory search 
       .map(([path, options]) => {
         const expected = (FIXTURE[path]?.options ?? []).filter((name) => name !== "--admin-pass-file");
         const actual = options.filter((name) => name !== "--admin-pass-file"
-          && !(path === "flair memory search" && name === "--admin-user"));
+          && !(path === "flair memory search" && name === "--admin-user")
+          && !(path === "flair reembed" && name === "--ops-port"));
         return { path, expected, actual };
       })
       .filter(({ expected, actual }) => expected.join(" ") !== actual.join(" "));
