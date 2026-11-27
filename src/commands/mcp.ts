@@ -403,8 +403,9 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
     // eligibility at the check: a path is removed (by path) only if, when
     // checked, it still names the file this grant created. A path replaced
     // between that check and the unlink can still be removed; a POSIX unlink by
-    // name cannot close that window. On POSIX the keys directory is owner-only
-    // (0700, or narrower if it already was). A path that no longer names the
+    // name cannot close that window. On POSIX the keys directory has no group or
+    // world permissions: a new directory requests 0700, and an existing narrower
+    // one keeps its mode. A path that no longer names the
     // created file, or whose check or unlink fails with an error other than
     // ENOENT, is named in the error; a created file moved to another name is
     // not tracked.

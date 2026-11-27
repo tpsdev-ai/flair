@@ -79,8 +79,8 @@ export function setAgentKeyFileTestHooks(hooks: AgentKeyFileTestHooks | undefine
  * before it is published. Cleanup removes a path only if, when checked, it
  * still names the file this grant created; a path swapped between that check
  * and the unlink can still be removed, which a POSIX unlink by name cannot
- * prevent. On POSIX the keys directory is owner-only (0700, or narrower if it
- * already was).
+ * prevent. On POSIX the keys directory has no group or world permissions: a new
+ * directory requests 0700, and an existing narrower one keeps its mode.
  */
 export interface KeyFileIdentity {
   dev: number;
