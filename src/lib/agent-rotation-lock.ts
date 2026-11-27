@@ -136,8 +136,10 @@ function nonRegularLockRefusal(lockPath: string, id: string, kind: string): stri
 
 /**
  * Read the diagnostic holder record from a regular lock file only. Without
- * both `O_NOFOLLOW` and `O_NONBLOCK` the open could follow a symlink swapped
- * in after the lstat, so there is no holder diagnostic.
+ * `O_NOFOLLOW` the open could follow a symlink swapped in after the lstat;
+ * without `O_NONBLOCK` it could block on a FIFO swapped in the same way. When
+ * `O_RDONLY`, `O_NOFOLLOW` or `O_NONBLOCK` is not defined, there is no holder
+ * diagnostic.
  */
 function readLockHolder(lockPath: string, flags: Partial<HolderOpenFlags> = constants): string | null {
   if (

@@ -156,6 +156,39 @@ describe("flair#3151 — agent rotation lock", () => {
     expect(res.message).not.toContain(marker);
   });
 
+  const holderMarker = "MARKER-0b7d41a5";
+  function refusalWithHookFlags(flags: Partial<typeof fs.constants>): string {
+    const dir = tempDir();
+    writeFileSync(join(dir, "agent-a.rotate-key.lock"), `123 2026-11-26T00:00:00Z ${holderMarker}\n`);
+    setAgentRotationLockTestHook(() => flags);
+    let res;
+    try {
+      res = acquireAgentRotationLock({ id: "agent-a", keysDir: dir, retry: { attempts: 2, delayMs: 1 } });
+    } finally {
+      setAgentRotationLockTestHook(undefined);
+    }
+    expect(res.ok).toBe(false);
+    if (res.ok) return "";
+    return res.message;
+  }
+
+  it("shows the holder record of a regular lock when all three open flags are defined", () => {
+    const { O_RDONLY, O_NOFOLLOW, O_NONBLOCK } = fs.constants;
+    expect(refusalWithHookFlags({ O_RDONLY, O_NOFOLLOW, O_NONBLOCK })).toContain(holderMarker);
+  });
+
+  for (const missing of ["O_RDONLY", "O_NOFOLLOW", "O_NONBLOCK"] as const) {
+    it(`omits the holder record of a regular lock when ${missing} is not defined`, () => {
+      const flags: Partial<typeof fs.constants> = {
+        O_RDONLY: fs.constants.O_RDONLY,
+        O_NOFOLLOW: fs.constants.O_NOFOLLOW,
+        O_NONBLOCK: fs.constants.O_NONBLOCK,
+      };
+      delete flags[missing];
+      expect(refusalWithHookFlags(flags)).not.toContain(holderMarker);
+    });
+  }
+
   it("reports an lstat error as an unchecked path", () => {
     const dir = tempDir();
     writeFileSync(join(dir, "agent-a.rotate-key.lock"), "");
