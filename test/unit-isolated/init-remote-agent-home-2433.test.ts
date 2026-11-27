@@ -89,7 +89,7 @@ describe("flair init --remote stamps the hub's own id on the first agent (flair#
     expect(statSync(keyPath).mode & 0o777).toBe(0o644);
   }, 60_000);
 
-  test("an Agent record with the operator's id refuses the run before the first write", () => {
+  test("an Agent record with the operator's id refuses the run with no ops insert", () => {
     const home = tempDir("irh-opsagent-");
     const result = runRemoteInit(home, { operatorAgentRow: true });
     const out = result.stdout + result.stderr;
