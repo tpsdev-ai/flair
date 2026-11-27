@@ -569,7 +569,14 @@ describe("applyKeyPrune — a chmod that does not take effect is refused (flair#
     } catch (error) { message = (error as Error).message; }
     const rendered = message.match(/run `chmod 700 (.*)` to make it owner-only/)?.[1];
     expect(rendered).toBe(`'${archiveDir.replace(/'/g, `'\\''`)}'`);
-  });
+    const parsed = spawnSync("/bin/sh", [], {
+      input: `set -- ${rendered}\nprintf '%s\\n' "$#" "$1"\n`,
+      timeout: 5_000,
+      encoding: "utf8",
+    });
+    expect(parsed.status).toBe(0);
+    expect(parsed.stdout.split("\n").slice(0, 2)).toEqual(["1", archiveDir]);
+  }, 20_000);
 
   it("a key chmod that leaves the mode unchanged is refused after the move, naming where the key is", async () => {
     const agentId = "agent-key-chmod-noop";
