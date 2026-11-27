@@ -548,6 +548,54 @@ test.skipIf(process.platform === "win32")("a created keys directory whose parent
   expect(statSync(dir).mode & 0o777).toBe(0o700);
 });
 
+test.skipIf(process.platform === "win32")("a keys directory another process creates before the mkdir is synced in its parent", () => {
+  const dir = keysDir();
+  const parent = dirname(dir);
+  const synced: Array<{ dev: number; ino: number }> = [];
+  setAgentKeyFileTestHooks({
+    beforeKeysDirCreate: (creating) => {
+      mkdirSync(creating, { recursive: true, mode: 0o700 });
+    },
+    syncKeysDir: (fd) => {
+      const st = fstatSync(fd);
+      synced.push({ dev: st.dev, ino: st.ino });
+      fsyncSync(fd);
+    },
+  });
+  try {
+    ensureAgentKeysDir(dir);
+  } finally {
+    setAgentKeyFileTestHooks(undefined);
+  }
+  expect(synced).toEqual([{ dev: statSync(parent).dev, ino: statSync(parent).ino }]);
+  expect(statSync(dir).mode & 0o777).toBe(0o700);
+});
+
+test.skipIf(process.platform === "win32")("a parent sync failure after another process created the keys directory refuses with nothing registered", () => {
+  const dir = keysDir();
+  const keyPath = join(dir, "agent-a.key");
+  setAgentKeyFileTestHooks({
+    beforeKeysDirCreate: (creating) => {
+      mkdirSync(creating, { recursive: true, mode: 0o700 });
+    },
+    syncKeysDir: () => {
+      throw new Error("fixture sync failure");
+    },
+  });
+  let caught: unknown;
+  try {
+    ensureAgentKeysDir(dir);
+    readOrCreateAgentKey(keyPath, () => Buffer.alloc(32, 5));
+  } catch (error) {
+    caught = error;
+  } finally {
+    setAgentKeyFileTestHooks(undefined);
+  }
+  expect(caught).toBeInstanceOf(AgentKeyFileRefusal);
+  expect((caught as Error).message).toContain("not confirmed durable");
+  expect(existsSync(keyPath)).toBe(false);
+});
+
 const MOCK_OPS_SOURCE = `
 const { writeFileSync } = require("node:fs");
 let stored = "";

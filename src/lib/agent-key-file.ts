@@ -57,6 +57,8 @@ export interface AgentKeyFileTestHooks {
   beforeFirstWrite?: (fd: number) => void;
   /** Replaces the seed write and returns the byte count a real write would. */
   writeSeedFile?: (fd: number, bytes: Buffer) => number;
+  /** Runs before the keys directory is created, to stand in for another process. */
+  beforeKeysDirCreate?: (dir: string) => void;
   /** Runs after the keys directory is created, before anything else touches it. */
   afterKeysDirCreate?: (dir: string) => void;
   /** Runs with the opened key descriptor immediately before its bytes are read. */
@@ -172,6 +174,7 @@ export function ensureAgentKeysDir(keysDir: string): void {
   if (missing) {
     // The directory is owner-only from creation: the umask can only narrow the
     // mode, never widen it past 0700. No later chmod is involved.
+    testHooks?.beforeKeysDirCreate?.(keysDir);
     const firstCreated = mkdirSync(keysDir, { recursive: true, mode: 0o700 });
     testHooks?.afterKeysDirCreate?.(keysDir);
     // A recursive mkdir also succeeds when another process created the path
@@ -183,6 +186,10 @@ export function ensureAgentKeysDir(keysDir: string): void {
         syncKeysParent(created, `new keys directory ${keysDir}`);
         if (resolve(created) === resolve(firstCreated)) break;
       }
+    } else {
+      // Another process created the directory between the check and this
+      // mkdir; its entry in its parent still needs the same sync.
+      syncKeysParent(keysDir, `keys directory ${keysDir}`);
     }
     return;
   }
