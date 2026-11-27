@@ -4,7 +4,7 @@
  * Uses mock HTTP servers. No real Harper instance required.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import { spawn } from "node:child_process";
 import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, chmodSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { createServer, IncomingMessage, ServerResponse, Server } from "node:http";
 import nacl from "tweetnacl";
 import { childOverranDeadline } from "./helpers/child-deadline.js";
+import { localPortState } from "../src/lib/init-tcp-probe.js";
 
 // flair#1807: the child's OWN deadline, and the per-case budget above it. A
 // full `flair init --skip-start --skip-soul` run on this host measures ~0.2 s,
@@ -365,15 +366,80 @@ describe("flair status", () => {
   });
 });
 
+/**
+ * Reserve two ephemeral ports by binding to port 0, capturing assigned ports, and closing.
+ * The ports are returned unbound.
+ */
+async function reserveUnboundPortPair(): Promise<{ httpPort: number; opsPort: number }> {
+  const s1 = createServer();
+  const s2 = createServer();
+  await new Promise<void>((resolve, reject) => {
+    s1.listen(0, "127.0.0.1", () => resolve());
+    s1.on("error", reject);
+  });
+  await new Promise<void>((resolve, reject) => {
+    s2.listen(0, "127.0.0.1", () => resolve());
+    s2.on("error", reject);
+  });
+  const httpPort = (s1.address() as any).port;
+  const opsPort = (s2.address() as any).port;
+  await stopServer(s1);
+  await stopServer(s2);
+  return { httpPort, opsPort };
+}
+
+async function assertPortsFree(httpPort: number, opsPort: number): Promise<void> {
+  const httpState = await localPortState(httpPort, "127.0.0.1");
+  const opsState = await localPortState(opsPort, "127.0.0.1");
+  expect(httpState).toBe("free");
+  expect(opsState).toBe("free");
+}
+
 describe("local init admin password handling", () => {
   let tmpDir: string;
   let oldEnv: NodeJS.ProcessEnv;
+  let httpPort: number;
+  let opsPort: number;
 
-  beforeEach(() => {
+  const DEFAULT_PORTS = [19926, 19925, 9926, 9925];
+  const defaultServers: Server[] = [];
+  const defaultPortRequests: { port: number; method: string; url: string }[] = [];
+
+  beforeAll(async () => {
+    for (const port of DEFAULT_PORTS) {
+      try {
+        const srv = createServer((req, res) => {
+          defaultPortRequests.push({ port, method: req.method ?? "GET", url: req.url ?? "/" });
+          res.writeHead(500, { "Content-Type": "text/plain" });
+          res.end("unexpected request to default port");
+        });
+        await new Promise<void>((resolve, reject) => {
+          srv.listen(port, "127.0.0.1", () => resolve());
+          srv.on("error", reject);
+        });
+        defaultServers.push(srv);
+      } catch {
+        // Port may already be in use; skip binding mock
+      }
+    }
+  });
+
+  afterAll(async () => {
+    for (const s of defaultServers) {
+      await stopServer(s);
+    }
+    defaultServers.length = 0;
+  });
+
+  beforeEach(async () => {
     tmpDir = makeTmpDir();
     oldEnv = { ...process.env };
     // Set HOME to temp dir so that .flair directory is isolated
     process.env.HOME = tmpDir;
+    process.env.USERPROFILE = tmpDir;
+    if (!process.env.FLAIR_MODELS_DIR) {
+      process.env.FLAIR_MODELS_DIR = join(process.cwd(), "models");
+    }
     // Unset any Flair-related env vars that might affect the test
     delete process.env.FLAIR_ADMIN_PASS;
     delete process.env.HDB_ADMIN_PASSWORD;
@@ -381,9 +447,21 @@ describe("local init admin password handling", () => {
     delete process.env.FLAIR_OPS_TARGET;
     delete process.env.FLAIR_CLUSTER_ADMIN_USER;
     delete process.env.FLAIR_CLUSTER_ADMIN_PASS;
+
+    // Fixture so --skip-start knows Harper is already installed and skips install
+    const dataDir = join(tmpDir, ".flair", "data");
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(join(dataDir, "harper-config.yaml"), `rootPath: ${dataDir}\n`);
+
+    const ports = await reserveUnboundPortPair();
+    httpPort = ports.httpPort;
+    opsPort = ports.opsPort;
+    await assertPortsFree(httpPort, opsPort);
+    defaultPortRequests.length = 0;
   });
 
   afterEach(() => {
+    expect(defaultPortRequests).toHaveLength(0);
     for (const key of Object.keys(process.env)) if (!(key in oldEnv)) delete process.env[key];
     for (const [key, value] of Object.entries(oldEnv)) process.env[key] = value;
     rmSync(tmpDir, { recursive: true, force: true });
@@ -392,9 +470,11 @@ describe("local init admin password handling", () => {
   it("does not print generated admin password to stdout", async () => {
     // Run flair init with --skip-start and --skip-soul to avoid Harper startup and soul wizard
     const { stdout, stderr } = await runCli(
-      ["init", "--skip-start", "--skip-soul"],
+      ["init", "--skip-start", "--skip-soul", "--port", String(httpPort), "--ops-port", String(opsPort)],
       "init: generated password not printed",
     );
+
+    expect(defaultPortRequests).toHaveLength(0);
 
     // Read the generated admin password file
     const adminPassPath = join(tmpDir, ".flair", "admin-pass");
@@ -403,7 +483,9 @@ describe("local init admin password handling", () => {
     expect(adminPass.length).toBeGreaterThan(0);
     // Ensure the file is not world-readable (mode 0o600)
     const stats = statSync(adminPassPath);
-    expect(stats.mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") {
+      expect(stats.mode & 0o777).toBe(0o600);
+    }
 
     // Assert that the admin password is not in stdout
     expect(stdout).not.toContain(adminPass);
@@ -416,15 +498,19 @@ describe("local init admin password handling", () => {
     process.env.FLAIR_ADMIN_PASS = testPass;
 
     const { stdout } = await runCli(
-      ["init", "--skip-start", "--skip-soul"],
+      ["init", "--skip-start", "--skip-soul", "--port", String(httpPort), "--ops-port", String(opsPort)],
       "init: admin password from environment",
     );
+
+    expect(defaultPortRequests).toHaveLength(0);
 
     const adminPassPath = join(tmpDir, ".flair", "admin-pass");
     // flair#2210: init persists the explicit credential on every platform (0600, exactly as given).
     expect(existsSync(adminPassPath)).toBe(true);
     expect(readFileSync(adminPassPath, "utf8")).toBe(testPass + "\n");
-    expect(statSync(adminPassPath).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") {
+      expect(statSync(adminPassPath).mode & 0o777).toBe(0o600);
+    }
     // The admin password should not be printed
     expect(stdout).not.toContain(testPass);
     // flair#1807: measured, a full `flair init --skip-start --skip-soul` run on
@@ -435,15 +521,19 @@ describe("local init admin password handling", () => {
   it("respects admin password from deprecated --admin-pass option (with warning)", async () => {
     const testPass = "testinlinepass123";
     const { stdout, stderr } = await runCli(
-      ["init", "--skip-start", "--skip-soul", "--admin-pass", testPass],
+      ["init", "--skip-start", "--skip-soul", "--admin-pass", testPass, "--port", String(httpPort), "--ops-port", String(opsPort)],
       "init: deprecated --admin-pass option",
     );
+
+    expect(defaultPortRequests).toHaveLength(0);
 
     const adminPassPath = join(tmpDir, ".flair", "admin-pass");
     // flair#2210: init persists the explicit credential on every platform (0600, exactly as given).
     expect(existsSync(adminPassPath)).toBe(true);
     expect(readFileSync(adminPassPath, "utf8")).toBe(testPass + "\n");
-    expect(statSync(adminPassPath).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") {
+      expect(statSync(adminPassPath).mode & 0o777).toBe(0o600);
+    }
     // The password should not be in stdout
     expect(stdout).not.toContain(testPass);
     // But a warning should be in stderr about inline admin pass
