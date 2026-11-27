@@ -2,10 +2,12 @@
  * skill-retry-backfill-3170.test.ts — flair#3170: an identical skill POST
  * retry is not refused by the previous write's embedding backfill.
  *
- * A POST to an existing skill target reads its target outside any transaction,
- * then plans. This file makes the ordering deterministic with two test-only
- * pause points: `memory-post-target-read` holds the retry after its request
- * transaction opened and before it reads its target, and
+ * A skill POST to an existing target reads that target, then plans under the
+ * lock; when a commit lands between the two reads (the previous write's
+ * embedding backfill) the retry must still commit a successor. This file makes
+ * the ordering deterministic with two test-only pause points:
+ * `memory-post-target-read` holds the retry after its request transaction opened
+ * and before it takes the target's lock and reads it, and
  * `memory-post-skill-plan` holds it before its plan runs under the lock.
  *
  * The instance is home-isolated and ephemeral; every URL is asserted to be
@@ -42,7 +44,7 @@ function skillBody(content: string) {
     tags: ["skill"], durability: "persistent", embedding: SHORT_EMBEDDING,
   };
 }
-/** Poll until the row holds a vector the backfill wrote. */
+/** Poll until the row holds a vector longer than the seeded short one. */
 async function waitForLongVector(id: string, timeoutMs = 30_000): Promise<any> {
   const deadline = Date.now() + timeoutMs;
   let row = await h.readRow(id);
