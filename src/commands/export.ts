@@ -9,7 +9,7 @@
 import { Command } from "commander";
 import { defaultKeysDir, resolveAdminUser, addAdminPassOptions } from "../lib/auth-resolve.js";
 import * as render from "../render.js";
-import { closeSync, constants as fsConstants, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { writeFilesAtomically } from "../lib/atomic-write.js";
 import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
 
@@ -66,9 +66,18 @@ function defaultExportClockMs(): number {
   return Number.isFinite(parsed) ? parsed : Date.now();
 }
 
+/** The file operations `writeDefaultExport` performs. A test replaces a member
+ *  to inject a failure after the exclusive create. */
+export const defaultExportWriteOps = {
+  write: (fd: number, content: string): void => { writeFileSync(fd, content); },
+  fsync: (fd: number): void => { fsyncSync(fd); },
+  close: (fd: number): void => { closeSync(fd); },
+  unlink: (path: string): void => { unlinkSync(path); },
+};
+
 /** Create `outputPath` exclusively at requested `mode` and write `content`.
  *  An existing path — file, symlink or anything else — is refused and nothing
- *  is written. */
+ *  is written. A failed write removes the file this call created. */
 function writeDefaultExport(outputPath: string, content: string, mode: number): void {
   let fd: number;
   try {
@@ -82,11 +91,22 @@ function writeDefaultExport(outputPath: string, content: string, mode: number): 
     throw err;
   }
   try {
-    writeFileSync(fd, content);
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
+    defaultExportWriteOps.write(fd, content);
+    defaultExportWriteOps.fsync(fd);
+  } catch (err) {
+    try {
+      defaultExportWriteOps.close(fd);
+    } catch {
+      // The write failure is what this call reports.
+    }
+    try {
+      defaultExportWriteOps.unlink(outputPath);
+    } catch (cleanupErr) {
+      console.error(`Error: failed to remove the partial export at ${outputPath}: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`);
+    }
+    throw err;
   }
+  defaultExportWriteOps.close(fd);
 }
 
 function hasRequiredStringFields(value: unknown, fields: readonly string[]): value is Record<string, unknown> {
@@ -201,13 +221,14 @@ addAdminPassOptions(
     };
 
     let rawOutputPath: string;
+    let defaultExportsDir: string | undefined;
     if (opts.output !== undefined) {
       rawOutputPath = opts.output;
     } else {
-      const exportsDir = join(resolveHome(), ".flair", "exports");
-      const defaultPath = defaultExportOutputPath(exportsDir, agentId, defaultExportClockMs());
+      defaultExportsDir = join(resolveHome(), ".flair", "exports");
+      const defaultPath = defaultExportOutputPath(defaultExportsDir, agentId, defaultExportClockMs());
       if (defaultPath === null) {
-        console.error(`Error: refusing to write agent '${agentId}' outside the exports directory ${resolve(exportsDir)}`);
+        console.error(`Error: refusing to write agent '${agentId}' outside the exports directory ${resolve(defaultExportsDir)}`);
         process.exit(1);
       }
       rawOutputPath = defaultPath;
@@ -215,6 +236,10 @@ addAdminPassOptions(
     // Canonicalize to prevent path traversal (e.g. ../../etc/passwd)
     const outputPath = resolve(rawOutputPath);
     mkdirSync(join(outputPath, ".."), { recursive: true });
+    if (defaultExportsDir !== undefined && dirname(outputPath) !== realpathSync(defaultExportsDir)) {
+      console.error(`Error: refusing to write agent '${agentId}' outside the exports directory ${resolve(defaultExportsDir)}`);
+      process.exit(1);
+    }
     const fileMode = opts.includeKey ? 0o600 : 0o644;
     const content = JSON.stringify(exportData, null, 2);
     if (opts.output !== undefined) {

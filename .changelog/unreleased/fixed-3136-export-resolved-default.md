@@ -1,0 +1,2 @@
+- **`flair export` requires its default output's directory to equal the resolved exports directory and removes a partial file when the write fails.**
+  After creating the exports directory, the command compares the default output's directory with the directory's real path and refuses, writing nothing, when they differ, so a symlinked exports directory or parent does not redirect the default export. If the write or fsync fails after the exclusive create, the command closes the descriptor, removes the file that run created, and reports a removal failure with its path.
