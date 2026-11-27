@@ -1,7 +1,7 @@
 /**
- * flair#3136: `flair export` applies the ONE agent-ID rule before any request
- * or file write, and its default output path stays a direct child of the
- * exports directory.
+ * flair#3136: `flair export` applies the ONE agent-ID rule before it reads
+ * export data or a key or writes its file, and its default output path stays a
+ * direct child of the exports directory.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
@@ -58,7 +58,7 @@ function listTree(dir: string): string[] {
   }
 }
 
-describe("flair export: the agent-ID rule runs before any request or write (#3136)", () => {
+describe("flair export: the agent-ID rule runs before the export reads data or a key or writes its file (#3136)", () => {
   let scratch: string;
   beforeAll(() => {
     ensureCliBuild();

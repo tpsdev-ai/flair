@@ -113,7 +113,7 @@ addAdminPassOptions(
   .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--keys-dir <dir>", "Keys directory", defaultKeysDir())
   .action(async (agentId, opts) => {
-    // flair#3136 — the ONE agent-ID rule, before any request, key read or file write.
+    // flair#3136 — the ONE agent-ID rule, before this action reads export data or a key or writes its file.
     if (!isValidAgentId(agentId)) {
       console.error(`Error: ${invalidAgentIdMessage(agentId)}`);
       process.exit(1);
