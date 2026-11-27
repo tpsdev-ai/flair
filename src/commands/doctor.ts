@@ -979,11 +979,11 @@ program
       } else {
         const keyFiles = keyScan.entries.filter((e) => e.kind === "key").map((e) => e.name);
         // ~/.flair/keys is shared by agent Ed25519 signing keys and node-scoped
-        // federation keys (flair#1193). Only agent keys are signing identities;
-        // node keys are AES-GCM keystore blobs that must never be parsed as, or
-        // inferred as, an agent. Partition them out here so every downstream
-        // consumer of keyAgentIds (registration checks, --fix inference,
-        // fixCommandAgentHint) is node-free by construction.
+        // federation keys (flair#1193). Partition by file name (see
+        // partitionKeyIds): downstream consumers of keyAgentIds (registration
+        // checks, --fix inference, fixCommandAgentHint) skip ids classified as
+        // node keys. A node-shaped id with a sibling `.pub` is classified as an
+        // agent key.
         const partitioned = partitionKeyIds(
           keyFiles.map((f: string) => f.replace(/\.key$/, "")),
           keysDir,

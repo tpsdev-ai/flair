@@ -186,11 +186,11 @@ export function isNodeKeyId(id: string, keysDir: string): boolean {
 }
 
 /**
- * Partition `.key`-derived ids into agent signing keys and node-scoped
- * federation keys (see isNodeKeyId). Node keys must never feed agent handling —
- * Ed25519 parsing, registration checks, or connector-identity inference
- * (flair#1193) — so callers keep only `agentKeyIds` for those paths and report
- * `nodeKeyIds` informatively.
+ * Partition `.key`-derived ids by file name: an id that `isNodeKeyId` matches
+ * (node-shaped, no sibling `.pub`) goes to `nodeKeyIds`, every other id to
+ * `agentKeyIds`. Callers use only `agentKeyIds` for agent handling (Ed25519
+ * parsing, registration checks, connector-identity inference, flair#1193) and
+ * report `nodeKeyIds` informatively. Key contents are not read.
  */
 export function partitionKeyIds(
   ids: string[],
