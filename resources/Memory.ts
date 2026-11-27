@@ -56,7 +56,7 @@ import { admitLockedMemoryWrite, type LockedMemoryTransaction, type LockedWriteA
 import { assertValidDurability, stampEphemeralExpiry } from "./memory-durability.js";
 import { embedTextField, enforceSkillDurability, isSkillWrite, type MemoryEmbeddingInputField, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate, skillMetadataHasDuplicateKey } from "./skill-write.js";
 import { embeddedTextHash, hashEmbeddedText } from "./memory-embed-hash.js";
-import { afterCloseStaged, buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, grantedSkillClose, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
+import { afterCloseStaged, buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, grantedSkillClose, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillTargetSnapshotChanged, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
 import { SKILL_SUBJECT_TYPE, removeAppendedVersion } from "./instruction-version-record.js";
 import { deriveSkillSubjectId } from "./skill-subject.js";
 import {
@@ -2608,15 +2608,12 @@ export class Memory extends (databases as any).flair.Memory {
     // request-snapshot target read and the caller's transaction (flair#3170).
     const postInPlace = [content?.id, postUrlTargetId].some((candidate) => isReservedSeedId("Memory", candidate));
     // flair#3170: a skill POST that supersedes a target present in the request
-    // snapshot reads the target as committed when it still exists. A commit
-    // that lands after the request transaction opened and before this read —
-    // the previous write's embedding backfill — is seen here and again by the
-    // plan, so the stale-target check compares two committed reads and the
-    // retry is not refused. A change another writer commits to that target
-    // after this read and before the plan is still refused; a content change
-    // with ownership unchanged answers 409 skill_target_changed. When the
-    // target is gone by this read, the plan refuses with 409
-    // skill_target_changed, recreating no row and appending no
+    // snapshot reads the target as committed when it still exists. The only
+    // change that window accepts is the previous write's embedding backfill
+    // fields. The plan's stale-target check then compares two committed reads
+    // and the retry is not refused. Any other change to the target in that
+    // window answers 409 skill_target_changed, and a target gone by this read
+    // is refused the same way, recreating no row and appending no
     // InstructionVersion. The body may omit `tags` and inherit the skill
     // tag from the stored row, the source prepareSkillBody uses, so either
     // row's tags decide whether this read applies.
@@ -2626,9 +2623,11 @@ export class Memory extends (databases as any).flair.Memory {
     // (flair#3170).
     const committedReadPause = postStoredRead ? txnPausePoint("memory-post-committed-read") : undefined;
     if (committedReadPause) await committedReadPause;
-    const postStored = postStoredRead && postSnapshot
-      ? ((await (databases as any).flair.Memory.get(String(postSnapshot.id), {})) ?? postSnapshot)
-      : postSnapshot;
+    const postCommitted = postStoredRead && postSnapshot ? await (databases as any).flair.Memory.get(String(postSnapshot.id), {}) : null;
+    if (postStoredRead && postSnapshot && (!postCommitted || skillTargetSnapshotChanged(postSnapshot, postCommitted))) {
+      return skillWriteConflict("skill_target_changed");
+    }
+    const postStored = postStoredRead && postSnapshot ? (postCommitted ?? postSnapshot) : postSnapshot;
     // flair#2561: the fields this request supplies that `stored` can report —
     // its string-valued text fields and, for a skill, the skill fields it
     // supplies (flair#2575) — read before a skill predecessor is merged into the
