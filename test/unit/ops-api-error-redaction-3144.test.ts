@@ -541,7 +541,7 @@ describe("callOpsApi fixed no-response descriptions (#3144)", () => {
     throw new Error("expected a request failure");
   }
 
-  test("reports the target scheme, host and port with a fixed no-response category", async () => {
+  test("reports the target origin with a fixed no-response category", async () => {
     const password = "ops-p@ss:3144";
     const credentials = `ops-user:${password}`;
     const target = `https://ops-user:${encodeURIComponent(password)}@127.0.0.1:19925/ops/path-secret-3144?token=query-3144#fragment-3144`;
@@ -560,6 +560,19 @@ describe("callOpsApi fixed no-response descriptions (#3144)", () => {
         expect(message).not.toContain("path-secret-3144");
         expect(message).toContain("https://127.0.0.1:19925 (no response)");
       }
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("reports the origin without a default port", async () => {
+    const target = "https://ops-user:pw-3144@ops.example.test:443/ops";
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => { throw new Error(target); }) as unknown as typeof fetch;
+    try {
+      const error = await rejectedRequest(target);
+      expect(error.message).toContain("ops API request got no response from https://ops.example.test (no response).");
+      expect(error.message).not.toContain("pw-3144");
     } finally {
       globalThis.fetch = originalFetch;
     }
