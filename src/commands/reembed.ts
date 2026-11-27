@@ -9,6 +9,13 @@ import { Command } from "commander";
 import { authFetch, defaultKeysDir, resolveAdminUser } from "../lib/auth-resolve.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import {
+  agentHomeEndpoint,
+  decideProbedPairIdentity,
+  readHttpInstanceIdentity,
+  resolveTargetInstanceIdentity,
+} from "../lib/agent-home.js";
+import { IncompleteInstancePairError, proveLocalInstancePair } from "../lib/local-instance-pair.js";
+import {
   MEMORY_REEMBED_PATCH_CAPABILITY,
   healthVersion,
   parseHealthCapabilities,
@@ -21,6 +28,12 @@ export type ReembedCli = {
   privKeyPath: (...args: any[]) => any;
   resolveHttpPort: (...args: any[]) => any;
   resolveOpsPort: (...args: any[]) => any;
+  resolveAgentHomeTarget: (opts: { port?: string | number; opsPort?: string | number; dataDir?: string }) => {
+    httpPort: number;
+    opsPort: number;
+    pairBound: boolean;
+  };
+  ambiguousInstanceTargetError: string;
 };
 
 let cli: ReembedCli;
@@ -42,11 +55,20 @@ function resolveOpsPort(...args: any[]): any {
   return cli.resolveOpsPort(...args);
 }
 
+function resolveAgentHomeTarget(...args: Parameters<ReembedCli["resolveAgentHomeTarget"]>): ReturnType<ReembedCli["resolveAgentHomeTarget"]> {
+  return cli.resolveAgentHomeTarget(...args);
+}
+
+function ambiguousInstanceTargetError(): string {
+  return cli.ambiguousInstanceTargetError;
+}
+
 /**
- * flair#2561: reads the `embeddingModel` stored on Memory row `id`, resolving
- * undefined when the read fails or returns no such row. `flair reembed` reads
- * the stamp from the stored row after each re-embed PATCH, because the PATCH
- * response carries no embedding field.
+ * flair#2561: reads the `embeddingModel` stored on Memory row `id`, throwing
+ * when the request, its JSON, its shape, or an empty answer for a row this run
+ * just wrote fails, so a failed read is not reported as a missing stamp.
+ * `flair reembed` reads the stamp from the stored row after each re-embed
+ * PATCH, because the PATCH response carries no embedding field.
  */
 export type StoredModelReader = (id: string) => Promise<unknown>;
 
@@ -57,27 +79,31 @@ export type StoredModelReader = (id: string) => Promise<unknown>;
  */
 export function opsStoredModelReader(opsPort: string | number, opsAuth: string): StoredModelReader {
   return async (id) => {
-    let rows: unknown;
-    try {
-      const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: opsAuth },
-        body: JSON.stringify({
-          operation: "search_by_id",
-          database: "flair",
-          table: "Memory",
-          ids: [id],
-          get_attributes: ["id", "embeddingModel"],
-        }),
-        signal: AbortSignal.timeout(20_000),
-      });
-      if (!res.ok) return undefined;
-      rows = await res.json();
-    } catch {
-      return undefined;
+    const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: opsAuth },
+      body: JSON.stringify({
+        operation: "search_by_id",
+        database: "flair",
+        table: "Memory",
+        ids: [id],
+        get_attributes: ["id", "embeddingModel"],
+      }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const rows: unknown = await res.json();
+    if (!Array.isArray(rows)) {
+      throw new Error(`search_by_id answered ${describeJsonShape(rows)}, not a row array`);
     }
-    const row = Array.isArray(rows) ? rows.find((r) => (r as { id?: unknown } | null)?.id === id) : undefined;
-    return (row as { embeddingModel?: unknown } | undefined)?.embeddingModel;
+    if (rows.length === 0) {
+      throw new Error(`search_by_id answered an empty row array for id ${id}`);
+    }
+    const row = rows.find((r) => (r as { id?: unknown } | null)?.id === id);
+    if (row === undefined) {
+      throw new Error(`search_by_id answered ${rows.length} row(s) without the requested id`);
+    }
+    return (row as { embeddingModel?: unknown }).embeddingModel;
   };
 }
 
@@ -221,16 +247,17 @@ export async function readAllMemoryRows(opts: {
  */
 export function agentStoredModelReader(baseUrl: string, agentId: string, keyPath: string): StoredModelReader {
   return async (id) => {
-    let row: unknown;
-    try {
-      const res = await authFetch(baseUrl, agentId, keyPath, "GET", `/Memory/${encodeRecordId(id)}`);
-      if (!res.ok) return undefined;
-      row = await res.json();
-    } catch {
-      return undefined;
+    const res = await authFetch(baseUrl, agentId, keyPath, "GET", `/Memory/${encodeRecordId(id)}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const row: unknown = await res.json();
+    if (row === null || typeof row !== "object" || Array.isArray(row)) {
+      throw new Error(`GET /Memory/${encodeRecordId(id)} answered ${describeJsonShape(row)}, not a record`);
     }
-    const record = row as { id?: unknown; embeddingModel?: unknown } | null;
-    return record?.id === id ? record.embeddingModel : undefined;
+    const record = row as { id?: unknown; embeddingModel?: unknown };
+    if (record.id !== id) {
+      throw new Error(`GET /Memory/${encodeRecordId(id)} answered a record that does not name the requested id`);
+    }
+    return record.embeddingModel;
   };
 }
 
@@ -242,7 +269,88 @@ export function agentStoredModelReader(baseUrl: string, agentId: string, keyPath
  * flair#2561: the server answers `{ id, updatedAt }`. The row counts as
  * re-embedded when that response names this row and the stored row then
  * carries `intendedModel`, read with `readStoredModel`.
+ *
+ * flair#3128: `reembedRowOutcome` also returns a reason label (HTTP status or
+ * error message) that the command counts once per distinct value.
  */
+export type ReembedRowOutcome = { ok: boolean; reason?: string };
+
+export async function reembedRowOutcome(
+  baseUrl: string,
+  agentId: string,
+  keyPath: string,
+  id: string,
+  intendedModel: string,
+  readStoredModel: StoredModelReader,
+): Promise<ReembedRowOutcome> {
+  let res: Response;
+  try {
+    res = await authFetch(baseUrl, agentId, keyPath, "PATCH", `/Memory/${encodeRecordId(id)}`, {
+      embedding: null, embeddingModel: null,
+    });
+  } catch (err) {
+    return { ok: false, reason: `PATCH failed: ${oneLine(errorText(err))}` };
+  }
+  return reembedOutcomeFromResponse(res, id, intendedModel, readStoredModel);
+}
+
+/**
+ * flair#3128: the same re-embed PATCH and readback with the administrator
+ * credential the all-agent run lists rows with. Its two-field body is
+ * identical to `reembedRowOutcome`'s, so it changes only the embedding, the
+ * model stamp, `updatedAt`, the embedded-text hash and a missing legacy
+ * `instanceToken`; it never needs, or looks for, the owner's key.
+ */
+export async function adminReembedRowOutcome(
+  baseUrl: string,
+  opsAuth: string,
+  id: string,
+  intendedModel: string,
+  readStoredModel: StoredModelReader,
+): Promise<ReembedRowOutcome> {
+  let res: Response;
+  try {
+    res = await fetch(`${baseUrl}/Memory/${encodeRecordId(id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Authorization: opsAuth },
+      body: JSON.stringify({ embedding: null, embeddingModel: null }),
+      signal: AbortSignal.timeout(20_000),
+    });
+  } catch (err) {
+    return { ok: false, reason: `PATCH failed: ${oneLine(errorText(err))}` };
+  }
+  return reembedOutcomeFromResponse(res, id, intendedModel, readStoredModel);
+}
+
+/** The readback and reason classification both re-embed paths share. */
+async function reembedOutcomeFromResponse(
+  res: Response,
+  id: string,
+  intendedModel: string,
+  readStoredModel: StoredModelReader,
+): Promise<ReembedRowOutcome> {
+  if (!res.ok) return { ok: false, reason: `HTTP ${res.status}` };
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    return { ok: false, reason: "PATCH response was not JSON" };
+  }
+  if ((body as { id?: unknown } | null)?.id !== id) {
+    return { ok: false, reason: "PATCH response did not name the row" };
+  }
+  let stored: unknown;
+  try {
+    stored = await readStoredModel(id);
+  } catch (err) {
+    return { ok: false, reason: `stored model read failed: ${oneLine(errorText(err))}` };
+  }
+  if (stored === intendedModel) return { ok: true };
+  const shown = typeof stored === "string" && stored.length > 0 ? stored : "missing";
+  return { ok: false, reason: `stored embeddingModel is ${oneLine(shown)}` };
+}
+
+/** `reembedRow` as a boolean: true when the PATCH succeeded, the response names the row, and the stored stamp matches. */
 export async function reembedRow(
   baseUrl: string,
   agentId: string,
@@ -251,18 +359,49 @@ export async function reembedRow(
   intendedModel: string,
   readStoredModel: StoredModelReader,
 ): Promise<boolean> {
-  const res = await authFetch(baseUrl, agentId, keyPath, "PATCH", `/Memory/${encodeRecordId(id)}`, {
-    embedding: null, embeddingModel: null,
+  return (await reembedRowOutcome(baseUrl, agentId, keyPath, id, intendedModel, readStoredModel)).ok;
+}
+
+function errorText(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.length > 0 ? message : "unknown error";
+}
+
+/** A short name for a JSON value's shape, for a read that answered something else. */
+function describeJsonShape(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "an array";
+  if (typeof value === "object") return "an object";
+  if (typeof value === "undefined") return "undefined";
+  return `a ${typeof value}`;
+}
+
+/**
+ * A failure reason on ONE line (flair#3128): a stored model string or an error
+ * message can carry CR, LF or another control character, which would split the
+ * reason across output lines and break the per-reason summary.
+ */
+function oneLine(text: string): string {
+  return text.replace(/\\/g, "\\\\").replace(/[\u0000-\u001f\u007f-\u009f]/g, (ch) => {
+    if (ch === "\n") return "\\n";
+    if (ch === "\r") return "\\r";
+    if (ch === "\t") return "\\t";
+    return `\\x${ch.charCodeAt(0).toString(16).padStart(2, "0")}`;
   });
-  if (!res.ok) return false;
-  let body: unknown;
-  try {
-    body = await res.json();
-  } catch {
-    return false;
+}
+
+/** One line per distinct failure reason, with the rows that share it (flair#3128). */
+function failureReasonLines(reasons: Map<string, number>, remedy: string): string[] {
+  return [...reasons].map(([reason, count]) => `  ❌ ${count} row(s) update unconfirmed: ${reason} — ${remedy}`);
+}
+
+function retryRemedy(agentId: string | undefined, httpPort: string | number, opsPort: string | number): string {
+  const ports = `--port ${httpPort} --ops-port ${opsPort}`;
+  if (agentId && /[\u0000-\u001f\u007f-\u009f]/.test(agentId)) {
+    return `fix the cause, then re-run with the same agent ID and ${ports}`;
   }
-  if ((body as { id?: unknown } | null)?.id !== id) return false;
-  return (await readStoredModel(id)) === intendedModel;
+  const agent = agentId ? ` --agent '${agentId.replace(/'/g, "'\\''")}'` : "";
+  return `re-run \`flair reembed${agent} ${ports}\` after fixing the cause`;
 }
 
 /**
@@ -297,6 +436,121 @@ export async function reembedServerSupportError(baseUrl: string): Promise<string
   return reembedUnsupportedMessage(healthVersion(body));
 }
 
+/** The remedy for a one-sided target: which side was supplied, which is missing (flair#3128). */
+function oneSidedTargetRemedy(supplied: "HTTP" | "ops", missing: "HTTP" | "ops"): string {
+  return `Only the ${supplied} port was supplied; the ${missing} port is missing. `
+    + "Pass the other port too (--port or FLAIR_URL with FLAIR_OPS_PORT), or complete ~/.flair/config.yaml.";
+}
+
+const REEMBED_LISTENER_UNAVAILABLE_REMEDY =
+  "This CLI could not read the OS listener table; run flair reembed where it can read Harper's listeners.";
+
+/** The remedy for a proven pair that differs from a target configuration bound (flair#3135). */
+const REEMBED_PAIR_MISMATCH_REMEDY =
+  "The configured pair does not match the running instance; check ~/.flair/config.yaml (or the data directory's harper-config.yaml).";
+
+/** The remedy for a proven pair that differs from two named ports (flair#3135). */
+const REEMBED_NAMED_PAIR_REMEDY =
+  "The named ports do not match the running instance; correct the --port or FLAIR_URL and FLAIR_OPS_PORT overrides.";
+
+/** The remedy for a proven pair that differs from a derived target (flair#3128). */
+const REEMBED_DERIVED_TARGET_REMEDY =
+  "No port was named and the configuration names no complete pair; name the instance (--port or FLAIR_URL with FLAIR_OPS_PORT) or complete ~/.flair/config.yaml.";
+
+/** The remedy for two ports that report different instance ids (flair#3128). */
+const REEMBED_IDENTITY_MISMATCH_REMEDY =
+  "The two ports report different instance ids; point both at one instance.";
+
+/** The remedy for a target whose HTTP and ops ports are the same port. */
+const REEMBED_EQUAL_PORTS_REMEDY =
+  "The HTTP and ops ports must differ; pass --port and FLAIR_OPS_PORT with two different ports.";
+
+/** Why the all-agent run refused its target pair (flair#3135); one reason per condition (flair#3128). */
+export type ReembedTargetRefusalReason =
+  | { kind: "one-sided"; supplied: "HTTP" | "ops"; missing: "HTTP" | "ops" }
+  | { kind: "listener-table-unavailable" }
+  | { kind: "pair-mismatch"; source: "configured" | "named" | "derived" }
+  | { kind: "identity-mismatch" }
+  | { kind: "equal-ports" }
+  | { kind: "unproven"; remedy: string | undefined };
+
+/** Picks the remedy for each ReembedTargetRefusalReason; one remedy per condition. (A conflict raised while resolving the target exits through the resolver's own error.) */
+export function reembedTargetRefusalRemedy(reason: ReembedTargetRefusalReason): string {
+  switch (reason.kind) {
+    case "one-sided":
+      return oneSidedTargetRemedy(reason.supplied, reason.missing);
+    case "listener-table-unavailable":
+      return REEMBED_LISTENER_UNAVAILABLE_REMEDY;
+    case "pair-mismatch":
+      return reason.source === "configured" ? REEMBED_PAIR_MISMATCH_REMEDY
+        : reason.source === "named" ? REEMBED_NAMED_PAIR_REMEDY
+          : REEMBED_DERIVED_TARGET_REMEDY;
+    case "identity-mismatch":
+      return REEMBED_IDENTITY_MISMATCH_REMEDY;
+    case "equal-ports":
+      return REEMBED_EQUAL_PORTS_REMEDY;
+    case "unproven":
+      return reason.remedy ?? "This CLI could not prove the local port pair; check the ops endpoint's configuration and listener visibility.";
+  }
+}
+
+/**
+ * flair#3135: the administrator's Basic credential goes to the HTTP port only
+ * after `proveLocalInstancePair` has proven, from the ops port and the OS
+ * listener table, that one Harper process listens on that ops port and on the
+ * HTTP port this run targets. This runs before any request to the HTTP port, so
+ * every refusal precedes any PATCH. After the proof, the two endpoints'
+ * reported instance identities are a second check: two different ids refuse.
+ * `source` is the remedy classification (configuration-bound, named and
+ * unbound, or derived), so a proven-pair mismatch gets the remedy for that
+ * classification (flair#3128).
+ */
+async function reembedTargetPairRefusal(
+  target: { httpPort: number; opsPort: number },
+  adminUser: string,
+  adminPass: string,
+  source: "configured" | "named" | "derived",
+): Promise<string | null> {
+  const refusal = (detail: string, reason: ReembedTargetRefusalReason): string =>
+    `❌ flair reembed stopped before its first write: ${ambiguousInstanceTargetError()} — ${detail}\n   ${reembedTargetRefusalRemedy(reason)}`;
+  if (target.httpPort === target.opsPort) {
+    return refusal(
+      `the target names HTTP port ${target.httpPort} and ops port ${target.opsPort}, which are the same port`,
+      { kind: "equal-ports" },
+    );
+  }
+  const authorization = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
+  const proof = await proveLocalInstancePair(target.opsPort, authorization);
+  if (proof.kind !== "proven") {
+    return refusal(
+      `the ops port ${target.opsPort} is not proven to pair with an HTTP port on this host: ${proof.detail}`,
+      proof.reason === "listener-table-unavailable" ? { kind: "listener-table-unavailable" } : { kind: "unproven", remedy: proof.remedy },
+    );
+  }
+  if (proof.httpPort !== target.httpPort) {
+    return refusal(
+      `the ops port ${target.opsPort} is proven to pair with HTTP port ${proof.httpPort}, not ${target.httpPort}`,
+      { kind: "pair-mismatch", source },
+    );
+  }
+  const [httpIdentity, opsIdentity] = await Promise.all([
+    readHttpInstanceIdentity(`http://127.0.0.1:${target.httpPort}`, adminUser, adminPass),
+    resolveTargetInstanceIdentity(agentHomeEndpoint(target.opsPort, adminUser, adminPass)),
+  ]);
+  const decision = decideProbedPairIdentity(httpIdentity, opsIdentity);
+  if (decision.kind === "different") {
+    return refusal(`the HTTP port reports instance ${decision.httpId}, the ops API reports instance ${decision.opsId}`, { kind: "identity-mismatch" });
+  }
+  return null;
+}
+
+/** Whether the caller named both ports of the all-agent target (flair#3128). */
+function bothTargetPortsNamed(opts: { port?: string | number; opsPort?: string | number }): boolean {
+  const httpNamed = (opts.port !== undefined && opts.port !== null) || /:\d+/.test(process.env.FLAIR_URL ?? "");
+  const opsNamed = (opts.opsPort !== undefined && opts.opsPort !== null) || Boolean(process.env.FLAIR_OPS_PORT);
+  return httpNamed && opsNamed;
+}
+
 export function register(program: Command): void {
 // ─── flair reembed ────────────────────────────────────────────────────────────
 //
@@ -326,15 +580,14 @@ export function register(program: Command): void {
 program
   .command("reembed")
   .description("Re-generate embeddings for memories with stale or missing model tags")
-  .option("--agent <id>", "Agent ID to re-embed memories for (defaults to all agents with stale rows)")
+  .option("--agent <id>", "Agent ID to re-embed memories for (defaults to all agents; add --stale-only to skip up-to-date rows)")
   .option("--stale-only", "Only re-embed memories with mismatched model tag")
   .option("--dry-run", "Show count without modifying")
   .option("--port <port>", "Harper HTTP port")
+  .option("--ops-port <port>", "Harper operations API port")
   .option("--batch-size <n>", "Records per batch", "50")
   .option("--delay-ms <ms>", "Delay between batches (ms)", "100")
   .action(async (opts) => {
-    const port = resolveHttpPort(opts);
-    const baseUrl = `http://127.0.0.1:${port}`;
     const agentId = opts.agent;
     const staleOnly = opts.staleOnly ?? false;
     const dryRun = opts.dryRun ?? false;
@@ -347,6 +600,37 @@ program
     if (!agentId && !adminPassEnv) {
       console.error("❌ Admin password required when --agent is not specified (set FLAIR_ADMIN_PASS or HDB_ADMIN_PASSWORD)");
       process.exit(1);
+    }
+
+    // flair#3135: the all-agent run sends the administrator's Basic credential to
+    // the HTTP port, so it resolves that port and the ops port as ONE target
+    // (`resolveAgentHomeTarget`'s pairing rule) — never independently. The
+    // single-agent PATCH is signed, so its HTTP port stays `resolveHttpPort`.
+    let target: ReturnType<ReembedCli["resolveAgentHomeTarget"]> | null = null;
+    let baseUrl: string;
+    let agentPorts: { http: number; ops: number } | null = null;
+    if (agentId) {
+      agentPorts = { http: resolveHttpPort(opts), ops: resolveOpsPort(opts) };
+      baseUrl = `http://127.0.0.1:${agentPorts.http}`;
+    } else {
+      try {
+        target = resolveAgentHomeTarget(opts);
+      } catch (err) {
+        console.error(err instanceof IncompleteInstancePairError
+          ? `❌ ${ambiguousInstanceTargetError()} — ${reembedTargetRefusalRemedy({ kind: "one-sided", supplied: err.reason.supplied, missing: err.reason.missing })}`
+          : `❌ ${errorText(err)}`);
+        process.exit(1);
+      }
+      baseUrl = `http://127.0.0.1:${target.httpPort}`;
+      // Prove the pair before a write run contacts HTTP with the administrator credential.
+      if (!dryRun) {
+        const source = target.pairBound ? "configured" : bothTargetPortsNamed(opts) ? "named" : "derived";
+        const pairRefusal = await reembedTargetPairRefusal(target, resolveAdminUser(undefined), adminPassEnv!, source);
+        if (pairRefusal) {
+          console.error(pairRefusal);
+          process.exit(1);
+        }
+      }
     }
 
     // flair#2337: require the advertised token before either PATCH loop.
@@ -396,7 +680,7 @@ program
     if (agentId) {
       console.log(`Re-embedding memories for agent: ${agentId}`);
     } else {
-      console.log("Re-embedding memories for all agents with stale rows");
+      console.log("Re-embedding memories for all agents");
     }
     console.log(`Current model: ${currentModel}`);
     if (staleOnly) console.log("Mode: stale-only (skipping up-to-date memories)");
@@ -419,8 +703,9 @@ program
       // Reads the pages before the first write (flair#3086). The read refuses
       // when its last page (MAX_MEMORY_READ_PAGES) comes back full, and the
       // command exits non-zero without writing.
-      const opsPort = resolveOpsPort(opts);
-      const opsAuth = `Basic ${Buffer.from(`${resolveAdminUser(undefined)}:${adminPass}`).toString("base64")}`;
+      const opsPort = target!.opsPort;
+      const adminUser = resolveAdminUser(undefined);
+      const opsAuth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
       const readStoredModel = opsStoredModelReader(opsPort, opsAuth);
       // The first page selects every row by id alone. An empty condition list
       // is refused (node_modules/harper/validation/searchValidator.ts:50-51), and
@@ -453,9 +738,13 @@ program
         byAgent.get(agent)!.push(m);
       }
 
-      // Process each agent
+      // Process each agent. The run already holds the administrator credential
+      // that listed these rows, and the re-embed PATCH changes no owner,
+      // provenance or authority field, so the same credential authorizes every
+      // row's write; no agent key is needed.
       let totalProcessed = 0;
       let totalErrors = 0;
+      const errorsByReason = new Map<string, number>();
       const agentCount = byAgent.size;
       let agentIndex = 0;
 
@@ -463,13 +752,6 @@ program
         agentIndex++;
         console.log(`\nAgent ${agentIndex}/${agentCount}: ${agent}`);
         console.log(`  Memories to re-embed: ${memories.length}`);
-
-        const keysDir = defaultKeysDir();
-        const privPath = privKeyPath(agent, keysDir);
-        if (!existsSync(privPath)) {
-          console.error(`  ❌ Key not found: ${privPath} — skipping`);
-          continue;
-        }
 
         if (dryRun) continue;
 
@@ -479,20 +761,34 @@ program
           const batch = memories.slice(i, i + batchSize);
           for (const memory of batch) {
             try {
-              if (await reembedRow(baseUrl, agent, privPath, memory.id, currentModel, readStoredModel)) processed++;
-              else errors++;
-            } catch { errors++; }
+              const outcome = await adminReembedRowOutcome(baseUrl, opsAuth, memory.id, currentModel, readStoredModel);
+              if (outcome.ok) processed++;
+              else {
+                const reason = outcome.reason ?? "unknown failure";
+                errors++;
+                errorsByReason.set(reason, (errorsByReason.get(reason) ?? 0) + 1);
+              }
+            } catch (err) {
+              errors++;
+              const reason = `unexpected error: ${oneLine(errorText(err))}`;
+              errorsByReason.set(reason, (errorsByReason.get(reason) ?? 0) + 1);
+            }
           }
           const pct = Math.round(((i + batch.length) / memories.length) * 100);
           process.stdout.write(`  \r  Re-embedded ${processed}/${memories.length} (${pct}%)${errors > 0 ? ` [${errors} errors]` : ""}`);
           if (i + batchSize < memories.length) await new Promise(r => setTimeout(r, delayMs));
         }
-        console.log(`\n  ✅ Agent ${agent}: ${processed} updated, ${errors} errors`);
+        console.log(`\n  ${errors > 0 ? "❌" : "✅"} Agent ${agent}: ${processed} updated, ${errors} errors`);
         totalProcessed += processed;
         totalErrors += errors;
       }
 
-      console.log(`\n\n✅ Re-embedding complete: ${totalProcessed} updated, ${totalErrors} errors`);
+      const failed = totalErrors > 0;
+      console.log(
+        `\n\n${failed ? "❌" : "✅"} Re-embedding complete: ${totalProcessed} updated, ${totalErrors} errors`,
+      );
+      for (const line of failureReasonLines(errorsByReason, retryRemedy(undefined, target!.httpPort, opsPort))) console.log(line);
+      if (failed) process.exitCode = 1;
       return;
     }
 
@@ -516,7 +812,7 @@ program
     // else a signed GET as this agent.
     let readStoredModel: StoredModelReader = agentStoredModelReader(baseUrl, agentId, privPath);
     if (adminPassSingle) {
-      const opsPort = resolveOpsPort(opts);
+      const opsPort = agentPorts!.ops;
       const opsAuth = `Basic ${Buffer.from(`${resolveAdminUser(undefined)}:${adminPassSingle}`).toString("base64")}`;
       readStoredModel = opsStoredModelReader(opsPort, opsAuth);
       try {
@@ -546,6 +842,19 @@ program
     // the listing may have been cut off, so the run must say so and fail.
     const keylessTruncated = !adminPassSingle && allMemories.length === KEYLESS_SEARCH_LIMIT;
 
+    // flair#3129: the keyless listing's read scope includes every other agent's
+    // non-private rows (resources/memory-read-scope.ts). Only this agent's rows
+    // are candidates — a PATCH as a non-admin agent to another agent's row is
+    // refused (an admin agent's signed PATCH passes the owner guard; the CLI
+    // filter still applies) — so drop the others before the candidate and
+    // up-to-date counts.
+    const keylessListed = allMemories.length;
+    let otherAgentRows = 0;
+    if (!adminPassSingle) {
+      allMemories = allMemories.filter((m: any) => m.agentId === agentId);
+      otherAgentRows = keylessListed - allMemories.length;
+    }
+
     const candidates = allMemories.filter((m: any) => {
       if (!m.content) return false;
       if (staleOnly) return !m.embeddingModel || !isCurrentSpace(m.embeddingModel);
@@ -556,13 +865,14 @@ program
     const skipped = allMemories.length - total;
 
     console.log(`Candidates for re-embedding: ${total}`);
+    if (otherAgentRows > 0) console.log(`Skipped (other agents): ${otherAgentRows}`);
     if (skipped > 0) console.log(`Skipped (up-to-date): ${skipped}`);
 
     if (dryRun || total === 0) {
-      if (total === 0) console.log("\n✅ All memories are up-to-date!");
+      if (total === 0 && !keylessTruncated) console.log("\n✅ All memories are up-to-date!");
       if (keylessTruncated) {
-        console.log(keylessTruncationNotice(allMemories.length));
-        process.exit(1);
+        console.log(keylessTruncationNotice(keylessListed));
+        process.exitCode = 1;
       }
       return;
     }
@@ -570,25 +880,35 @@ program
     console.log("");
     let processed = 0;
     let errors = 0;
+    const errorsByReason = new Map<string, number>();
 
     for (let i = 0; i < candidates.length; i += batchSize) {
       const batch = candidates.slice(i, i + batchSize);
       for (const memory of batch) {
         try {
-          if (await reembedRow(baseUrl, agentId, privPath, memory.id, currentModel, readStoredModel)) processed++;
-          else errors++;
-        } catch { errors++; }
+          const outcome = await reembedRowOutcome(baseUrl, agentId, privPath, memory.id, currentModel, readStoredModel);
+          if (outcome.ok) processed++;
+          else {
+            const reason = outcome.reason ?? "unknown failure";
+            errors++;
+            errorsByReason.set(reason, (errorsByReason.get(reason) ?? 0) + 1);
+          }
+        } catch (err) {
+          errors++;
+          const reason = `unexpected error: ${oneLine(errorText(err))}`;
+          errorsByReason.set(reason, (errorsByReason.get(reason) ?? 0) + 1);
+        }
       }
       const pct = Math.round(((i + batch.length) / total) * 100);
       process.stdout.write(`\rRe-embedded ${processed}/${total} (${pct}%)${errors > 0 ? ` [${errors} errors]` : ""}`);
       if (i + batchSize < candidates.length) await new Promise(r => setTimeout(r, delayMs));
     }
 
-    console.log(`\n\n✅ Re-embedding complete: ${processed} updated, ${errors} errors`);
-    if (keylessTruncated) {
-      console.log(keylessTruncationNotice(allMemories.length));
-      process.exit(1);
-    }
+    const failed = errors > 0 || keylessTruncated;
+    console.log(`\n\n${failed ? "❌" : "✅"} Re-embedding complete: ${processed} updated, ${errors} errors`);
+    for (const line of failureReasonLines(errorsByReason, retryRemedy(agentId, agentPorts!.http, agentPorts!.ops))) console.log(line);
+    if (keylessTruncated) console.log(keylessTruncationNotice(keylessListed));
+    if (failed) process.exitCode = 1;
   });
 
 }

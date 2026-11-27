@@ -1,0 +1,1 @@
+- **Remote `flair init` no longer refuses a cluster whose user list includes a user whose role holds only database grants.** Only the authenticated cluster administrator and `admin` records are checked for a boolean `super_user`; any other record needs only a readable username. A record whose username cannot be read still refuses before anything is staged or written (flair#3159).

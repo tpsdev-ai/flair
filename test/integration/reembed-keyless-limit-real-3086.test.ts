@@ -12,8 +12,7 @@
  * FLAIR_ADMIN_PASS, and exit 1.
  *
  * Throwaway HOME holding only the agent key, ephemeral ports asserted to be this
- * test's instance. The instance runs without the boot migration trigger and the
- * CLI runs with --dry-run; no assertion reads a vector.
+ * test's instance. The instance runs without the boot migration trigger.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -102,7 +101,7 @@ afterAll(async () => {
   if (home) rmSync(home, { recursive: true, force: true });
 }, HARPER_STOP_BUDGET_MS);
 
-async function runKeylessReembed(): Promise<{ code: number | null; stdout: string; stderr: string }> {
+async function runKeylessReembed(dryRun = true): Promise<{ code: number | null; stdout: string; stderr: string }> {
   const env: Record<string, string | undefined> = {
     ...process.env,
     HOME: home,
@@ -111,7 +110,7 @@ async function runKeylessReembed(): Promise<{ code: number | null; stdout: strin
   };
   delete env.FLAIR_ADMIN_PASS;
   delete env.HDB_ADMIN_PASSWORD;
-  const args = ["reembed", "--agent", AGENT_ID, "--stale-only", "--dry-run", "--port", new URL(harper.httpURL).port];
+  const args = ["reembed", "--agent", AGENT_ID, "--stale-only", ...(dryRun ? ["--dry-run"] : []), "--port", new URL(harper.httpURL).port];
   const child = spawnCli(args, { env, timeout: 180_000 });
   let stdout = "";
   let stderr = "";
@@ -144,5 +143,27 @@ for (const count of [KEYLESS_SEARCH_LIMIT, KEYLESS_SEARCH_LIMIT + 1]) {
     expect(notices).toHaveLength(1);
     expect(notices[0]).toContain(String(KEYLESS_SEARCH_LIMIT));
     expect(notices[0]).toContain("FLAIR_ADMIN_PASS");
+  }, 240_000);
+}
+
+
+for (const owned of [false, true]) {
+  test(`ckM2 capped ${owned ? "partly-owned" : "foreign"} listing omits success markers`, async () => {
+    await op({ operation: "delete", database: "flair", table: "Memory", ids: [memoryRow(KEYLESS_SEARCH_LIMIT + 1).id] });
+    for (let start = 1; start <= KEYLESS_SEARCH_LIMIT; start += SEED_BATCH) {
+      const end = Math.min(KEYLESS_SEARCH_LIMIT, start + SEED_BATCH - 1);
+      const records = Array.from({ length: end - start + 1 }, (_, i) => ({
+        ...memoryRow(start + i),
+        agentId: owned && start + i === 1 ? AGENT_ID : "p6k-other-owner",
+        visibility: "public",
+      }));
+      await op({ operation: "upsert", database: "flair", table: "Memory", records });
+    }
+    const { code, stdout, stderr } = await runKeylessReembed(false);
+    expect(code, stderr.slice(0, 800)).toBe(1);
+    expect(stdout).toContain(`Candidates for re-embedding: ${owned ? 1 : 0}`);
+    expect(stdout).toContain(`Read ${KEYLESS_SEARCH_LIMIT} memories`);
+    expect(stdout).not.toContain("✅");
+    if (owned) expect(stdout).toContain("1 updated, 0 errors");
   }, 240_000);
 }
