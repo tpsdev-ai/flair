@@ -4019,6 +4019,100 @@ async function assertSingleInstanceRowAfterWrite(endpoint: OpsEndpoint, expected
 // tarball with .env baked in, deploys via ops API, waits for restart, and
 // creates the super_user admin account.
 
+/**
+ * Categories of ops API refusal that select fixed descriptions. `callOpsApi` reads the
+ * parsed body's `error` string, or `message` only when the body has no `error`
+ * key at all, classifies it only when the response's status (and, for
+ * already-exists, operation) is the one that category describes, and throws a
+ * fixed, code-defined description; the body itself never reaches the message, in
+ * any encoding (issue #3144). already-exists requires the captured name to equal
+ * the username this request submitted.
+ */
+export type OpsApiErrorCategory = "already-exists" | "not-permitted" | "authentication-failed";
+
+const OPS_API_ERROR_DESCRIPTIONS: Record<OpsApiErrorCategory, string> = {
+  "already-exists": "the user already exists",
+  "not-permitted": "the operation is not permitted for this role",
+  "authentication-failed": "authentication failed",
+};
+
+const OPS_API_REFUSAL_DESCRIPTION = "the ops API refused the request (details withheld)";
+
+/**
+ * Harper's exact wording for each category, anchored to the whole field value.
+ * These strings are read here, for classification only, and are never copied
+ * into a message.
+ */
+const OPS_API_ERROR_PATTERNS: ReadonlyArray<readonly [OpsApiErrorCategory, RegExp]> = [
+  ["already-exists", /^User (.+) already exists$/],
+  ["not-permitted", /^This operation is not authorized due to role restrictions and\/or invalid database items$/],
+  ["authentication-failed", /^Login failed$/],
+];
+
+/** The status (and, for already-exists, operation) each category is defined by. */
+function categoryMatches(category: OpsApiErrorCategory, status: number, operation: string): boolean {
+  switch (category) {
+    case "already-exists":
+      return status === 409 && operation === "add_user";
+    case "not-permitted":
+      return status === 403;
+    case "authentication-failed":
+      return status === 401;
+  }
+}
+
+/** A non-2xx ops API response, reduced to a category and a fixed description. */
+export class OpsApiError extends Error {
+  readonly status: number;
+  readonly operation: string;
+  readonly category: OpsApiErrorCategory | null;
+
+  constructor(status: number, operation: string, category: OpsApiErrorCategory | null) {
+    super(
+      `Ops API call failed (${status}) for '${operation}': ` +
+        (category === null ? OPS_API_REFUSAL_DESCRIPTION : OPS_API_ERROR_DESCRIPTIONS[category]),
+    );
+    this.name = "OpsApiError";
+    this.status = status;
+    this.operation = operation;
+    this.category = category;
+  }
+}
+
+function classifyOpsApiError(
+  status: number,
+  operation: string,
+  body: Record<string, unknown>,
+  text: string,
+): OpsApiErrorCategory | null {
+  // Classify the parsed body's `error` string, or `message` only when the body
+  // has no `error` key at all, and only when the status (and, for already-exists,
+  // operation) is the category's own. Anything else — a non-JSON body, a value
+  // that is not a string, another field, another status, or another operation for
+  // already-exists — is unclassified. The value is never returned or printed.
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  const record = parsed as Record<string, unknown>;
+  const value = "error" in record ? record.error : record.message;
+  if (typeof value !== "string") return null;
+  for (const [category, pattern] of OPS_API_ERROR_PATTERNS) {
+    if (!categoryMatches(category, status, operation)) continue;
+    const match = pattern.exec(value);
+    if (match === null) continue;
+    if (category === "already-exists") {
+      // Match the submitted username, not another user named by the response.
+      if (typeof body.username !== "string" || match[1] !== body.username) return null;
+    }
+    return category;
+  }
+  return null;
+}
+
 export async function callOpsApi(
   opsUrl: string,
   body: Record<string, unknown>,
@@ -4036,16 +4130,35 @@ export async function callOpsApi(
       signal: AbortSignal.timeout(30_000),
     });
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
+    let target = "the configured ops target";
+    try {
+      const parsed = new URL(opsUrl);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") target = parsed.origin;
+    } catch {}
+    let category = "no response";
+    const seen = new Set<unknown>();
+    for (let current = err; current && typeof current === "object" && !seen.has(current);) {
+      seen.add(current);
+      const failure = current as { code?: unknown; name?: unknown; cause?: unknown };
+      if (failure.code === "ECONNREFUSED" || failure.code === "ConnectionRefused") {
+        category = "connection refused";
+        break;
+      }
+      if (failure.name === "TimeoutError" || failure.code === "ETIMEDOUT" || failure.code === "UND_ERR_CONNECT_TIMEOUT") {
+        category = "timed out";
+        break;
+      }
+      current = failure.cause;
+    }
     throw new Error(
-      `ops API unreachable at ${opsUrl} (derived from --target). ` +
-      `Set --ops-target or FLAIR_OPS_TARGET to override. ` +
-      `(${message})`,
+      `ops API request got no response from ${target} (${category}). ` +
+      `Set --ops-target or FLAIR_OPS_TARGET to override.`,
     );
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`Ops API call failed (${res.status}): ${text}`);
+    const operation = typeof body.operation === "string" ? body.operation : "unknown";
+    throw new OpsApiError(res.status, operation, classifyOpsApiError(res.status, operation, body, text));
   }
   return res.json();
 }
