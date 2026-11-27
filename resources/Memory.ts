@@ -2615,9 +2615,9 @@ export class Memory extends (databases as any).flair.Memory {
     // retry is not refused. A change another writer commits to that target
     // after this read and before the plan is still refused; a content change
     // with ownership unchanged answers 409 skill_target_changed. When the
-    // target is gone by this read, the snapshot row is kept and the plan
-    // refuses with 409 skill_target_changed, recreating no row and appending
-    // no InstructionVersion. The body may omit `tags` and inherit the skill
+    // target is gone by this read, the plan refuses with 409
+    // skill_target_changed, recreating no row and appending no
+    // InstructionVersion. The body may omit `tags` and inherit the skill
     // tag from the stored row, the source prepareSkillBody uses, so either
     // row's tags decide whether this read applies.
     const postStoredRead = !!(postSnapshot && !postInPlace && (isSkillWrite(content) || rowIsSkill(postSnapshot)));
