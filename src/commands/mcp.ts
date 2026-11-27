@@ -13,7 +13,7 @@
  * non-strict entry into the strict check.
  */
 import { Command } from "commander";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSync, type Stats } from "node:fs";
 
 import { dirname, join } from "node:path";
 import nacl from "tweetnacl";
@@ -55,6 +55,7 @@ import {
 import { resolveHome } from "../lib/home.js";
 import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
 import { agentHomeEndpoint, resolveTargetInstanceId } from "../lib/agent-home.js";
+import { createAgentKeyFile, ensureAgentKeysDir, type KeyFileIdentity } from "../lib/agent-key-file.js";
 
 export type McpCli = {
   resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
@@ -248,11 +249,39 @@ export interface McpGrantDeps {
   now?: () => string;
   /** Injectable Ed25519 keypair generator (tests only; defaults to tweetnacl). */
   generateKeyPair?: () => { publicKey: Uint8Array; secretKey: Uint8Array };
+  unlinkKeyFile?: (path: string) => void;
+  /** Injectable lstat for the pre-removal identity check (tests only). */
+  lstatKeyFile?: (path: string) => Stats;
 }
 
 export interface McpGrantResult {
   entry: McpClientManifestEntry;
   config: Record<string, unknown>;
+}
+
+function preflightMcpGrantKeyPaths(name: string, keysDir: string): { privPath: string; pubPath: string } {
+  if (!isValidAgentId(name) || !/^[a-zA-Z0-9]/.test(name)) {
+    throw new Error(`Invalid machine client name '${name}' — ${invalidAgentIdMessage(name)}; must start with a letter or digit.`);
+  }
+  const privPath = privKeyPath(name, keysDir);
+  const pubPath = pubKeyPath(name, keysDir);
+  // An occupied path may retain an existing mode and contents; refuse it
+  // before key generation or network requests.
+  const existingKeyPaths: string[] = [];
+  for (const path of [privPath, pubPath]) {
+    try {
+      lstatSync(path);
+      existingKeyPaths.push(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  if (existingKeyPaths.length > 0) {
+    throw new Error(
+      `Key file ${existingKeyPaths.join(", ")} already exists — remove it, or grant under another name.`,
+    );
+  }
+  return { privPath, pubPath };
 }
 
 /**
@@ -282,6 +311,8 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
     throw new McpClientNameExistsError(name);
   }
 
+  const { privPath, pubPath } = preflightMcpGrantKeyPaths(name, keysDir);
+
   // Defense-in-depth: refuse to silently reuse/clobber an unrelated
   // pre-existing Agent id (e.g. a human-run principal sharing this name).
   const opsUrl = typeof opsPortOrUrl === "number" ? `http://127.0.0.1:${opsPortOrUrl}/` : `${opsPortOrUrl.replace(/\/$/, "")}/`;
@@ -305,71 +336,111 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
     }
   }
 
-  mkdirSync(keysDir, { recursive: true });
-  const privPath = privKeyPath(name, keysDir);
-  const pubPath = pubKeyPath(name, keysDir);
+  ensureAgentKeysDir(keysDir);
   const kp = generateKeyPair();
   const seed = kp.secretKey.slice(0, 32);
   const pubKeyB64url = b64url(kp.publicKey);
 
-  writeFileSync(privPath, Buffer.from(seed), { mode: 0o600 });
-  chmodSync(privPath, 0o600);
-  writeFileSync(pubPath, Buffer.from(kp.publicKey));
-
-  const nowIso = now();
-  // flair#2433 — the new Agent row's home is THIS instance's federation id,
-  // resolved through the one shared rule; a create stamps it.
-  const home = await resolveTargetInstanceId(agentHomeEndpoint(opsUrl, adminUser, adminPass, fetchImpl));
-  const insertRes = await fetchImpl(opsUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: authHeader },
-    body: JSON.stringify({
-      operation: "insert",
-      database: "flair",
-      table: "Agent",
-      records: [{
-        id: name,
-        name,
-        type: "agent",
-        kind: "agent",
-        status: "active",
-        displayName: name,
-        admin: false,
-        defaultTrustTier: "unverified",
-        runtime: "headless",
-        publicKey: pubKeyB64url,
-        originatorInstanceId: home,
-        createdAt: nowIso,
-        updatedAt: nowIso,
-      }],
-    }),
-  });
-  if (!insertRes.ok) {
-    // Roll back the key files we just wrote — nothing left behind locally
-    // on a failed grant.
-    for (const p of [privPath, pubPath]) {
-      try { const { unlinkSync } = await import("node:fs"); unlinkSync(p); } catch { /* best effort */ }
-    }
-    const text = await insertRes.text().catch(() => "");
-    throw new Error(`Failed to create Agent '${name}' via operations API (${insertRes.status}): ${text}`);
-  }
-
-  const clientId = `${issuer.replace(/\/+$/, "")}/MCPClientMetadata/${name}`;
-  const entry: McpClientManifestEntry = {
-    name,
-    agentId: name,
-    clientId,
-    keyFile: privPath,
-    pubKeyFile: pubPath,
-    issuer,
-    createdAt: nowIso,
-    status: "active",
+  const createdKeyFiles: Array<{ path: string; dev: number; ino: number }> = [];
+  const trackKeyFile = (path: string, identity: KeyFileIdentity) => {
+    createdKeyFiles.push({ path, dev: identity.dev, ino: identity.ino });
   };
-  writeMcpClientManifest(manifestPath, [...manifest, entry]);
+  try {
+    createAgentKeyFile(privPath, Buffer.from(seed), trackKeyFile);
+    createAgentKeyFile(pubPath, Buffer.from(kp.publicKey), trackKeyFile);
 
-  const resource = `${issuer.replace(/\/+$/, "")}/mcp`;
-  const config = buildMcpGrantConfig({ name, resource, keyFile: privPath });
-  return { entry, config };
+    const nowIso = now();
+    // flair#2433 — the new Agent row's home is THIS instance's federation id,
+    // resolved through the one shared rule; a create stamps it.
+    const home = await resolveTargetInstanceId(agentHomeEndpoint(opsUrl, adminUser, adminPass, fetchImpl));
+    const insertRes = await fetchImpl(opsUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: authHeader },
+      body: JSON.stringify({
+        operation: "insert",
+        database: "flair",
+        table: "Agent",
+        records: [{
+          id: name,
+          name,
+          type: "agent",
+          kind: "agent",
+          status: "active",
+          displayName: name,
+          admin: false,
+          defaultTrustTier: "unverified",
+          runtime: "headless",
+          publicKey: pubKeyB64url,
+          originatorInstanceId: home,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        }],
+      }),
+    });
+    if (!insertRes.ok) {
+      const text = await insertRes.text().catch(() => "");
+      throw new Error(`Failed to create Agent '${name}' via operations API (${insertRes.status}): ${text}`);
+    }
+
+    const clientId = `${issuer.replace(/\/+$/, "")}/MCPClientMetadata/${name}`;
+    const entry: McpClientManifestEntry = {
+      name,
+      agentId: name,
+      clientId,
+      keyFile: privPath,
+      pubKeyFile: pubPath,
+      issuer,
+      createdAt: nowIso,
+      status: "active",
+    };
+    writeMcpClientManifest(manifestPath, [...manifest, entry]);
+
+    const resource = `${issuer.replace(/\/+$/, "")}/mcp`;
+    const config = buildMcpGrantConfig({ name, resource, keyFile: privPath });
+    return { entry, config };
+  } catch (error) {
+    // On failure, try to remove the key files this call created. File identity decides
+    // eligibility at the check: a path is removed (by path) only if, when
+    // checked, it still names the file this grant created. A path replaced
+    // between that check and the unlink can still be removed; a POSIX unlink by
+    // name cannot close that window. On POSIX the keys directory has no group or
+    // world permissions: a new directory requests 0700, and an existing narrower
+    // one keeps its mode. A path that no longer names the
+    // created file, or whose check or unlink fails with an error other than
+    // ENOENT, is named in the error; a created file moved to another name is
+    // not tracked.
+    if (createdKeyFiles.length > 0) {
+      const leftBehind: string[] = [];
+      for (const created of createdKeyFiles) {
+        let current: Stats;
+        try {
+          current = (deps.lstatKeyFile ?? (lstatSync as (path: string) => Stats))(created.path);
+        } catch (statError) {
+          const code = (statError as NodeJS.ErrnoException).code;
+          if (code !== "ENOENT") {
+            leftBehind.push(`${created.path} (not removed: could not check it (${code ?? "lstat failed"}))`);
+          }
+          continue;
+        }
+        if (!current.isFile() || current.dev !== created.dev || current.ino !== created.ino) {
+          leftBehind.push(`${created.path} (not removed: the path no longer names the file this grant created)`);
+          continue;
+        }
+        try {
+          (deps.unlinkKeyFile ?? unlinkSync)(created.path);
+        } catch (cleanupError) {
+          const code = (cleanupError as NodeJS.ErrnoException).code;
+          if (code !== "ENOENT") leftBehind.push(`${created.path} (not removed: ${code ?? "unlink failed"})`);
+        }
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      const cleanup = leftBehind.length === 0
+        ? "removed the key paths that still named this call's files when checked"
+        : `could not remove key file(s): ${leftBehind.join("; ")}`;
+      throw new Error(`${message}; ${cleanup}`, { cause: error });
+    }
+    throw error;
+  }
 }
 
 export interface McpRevokeParams {
@@ -685,6 +756,14 @@ export function register(program: Command): void {
         process.exit(1);
       }
 
+      const keysDir: string = opts.keysDir ?? defaultKeysDir();
+      try {
+        preflightMcpGrantKeyPaths(name, keysDir);
+      } catch (err: any) {
+        console.error(`Error: ${err.message}`);
+        process.exit(1);
+      }
+
       // Workflow gate: proof `flair mcp enable` has actually run against this
       // instance — a live probe of the OAuth metadata endpoint (flair#756;
       // replaces the old DCR-gate-token presence check, which a CIMD-only
@@ -704,7 +783,6 @@ export function register(program: Command): void {
         process.exit(1);
       }
 
-      const keysDir: string = opts.keysDir ?? defaultKeysDir();
       const manifestPath: string = opts.manifest ?? defaultMcpClientManifestPath();
       const opsPort = resolveOpsPort(opts);
 

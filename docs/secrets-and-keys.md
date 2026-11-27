@@ -7,7 +7,7 @@ Flair owns **identity**. Flair does **not** own arbitrary secrets. This page dra
 For each registered agent, Flair stores:
 
 - A **public key** in the `Agent` table (server-side; used to verify signed requests).
-- A **private key** at `~/.flair/keys/<agent>.key` on the host that owns that agent — the raw 32-byte Ed25519 seed. `flair init --agent <id>` and `flair agent add <id>` write a new key, then set mode `0600`; existing keys are reused as-is.
+- A **private key** at `~/.flair/keys/<agent>.key` on the host that owns that agent — a 32-byte Ed25519 seed, or an exported base64 key string that `flair import` restores unchanged. `flair init --agent <id>`, `flair agent add <id>`, `flair principal add`, `flair import`, and `flair agent rotate-key <id>` create or stage a new key owner-only (`0600`) from the first byte on POSIX; an existing key with group or world bits is refused with `chmod 600 <path>` and left unchanged on the create and reuse paths, while rotation reports it. A successful rotation replaces the file; a failed update leaves it. The keys directory is requested with mode `0700` (the umask may make it narrower; an owned directory with group or world bits is tightened). On Windows mode bits do not establish owner-only.
 
 Agents sign requests to Flair with this key. The server verifies signatures against the registered public key. The signed payload is `<agentId>:<timestamp>:<nonce>:<METHOD>:<path+query>` with a 30-second replay window and nonce dedup — replays inside that window are rejected.
 
@@ -140,7 +140,8 @@ Hermes uses `~/.hermes/.env` for provider API keys (managed by `hermes auth`). T
 Treat `~/.flair/keys/<agent>.key` like an SSH private key:
 
 - **Stays on the host that owns the agent.** If your agent runs on a given host, the key lives on that host. If you spin up the same agent on another machine, **don't copy the key** — register a new agent identity (`flair agent add <id>-on-<other-host>`) on that machine. Different identities, same Flair instance can store memories for both, you decide cross-agent visibility.
-- **Mode `0600` applied after writing a new key** by `flair agent add`; existing keys retain their mode. Don't relax it.
+- **On POSIX, created owner-only (`0600`) from the first byte** by `flair agent add`, `flair init`, `flair principal add`, and `flair import`; an existing key with group or world bits is refused, not changed (`chmod 600 <path>`). `flair doctor` warns about such a key file, and `flair status` does the same for a local target, naming its mode and the fix; the check covers the standard `resolveKeyPath` locations: `$FLAIR_KEY_DIR/<agent>.key` when set, `~/.flair/keys/<agent>.key` and the legacy `~/.tps/secrets/flair/<agent>-priv.key`; explicit key paths (such as `--key`) are outside this scan; a symlinked agent key is reported as not checked. Don't relax it.
+- `flair export --include-key` creates its default output exclusively at `0600` and refuses an existing path; with an explicit `--output` it replaces the file through a `0600` temp file. Keystore seeds replace existing files through a `0600` temp file. A generated passphrase is published at `0600` if its path is absent; when the generated passphrase file is used (`FLAIR_KEY_PASSPHRASE` unset), an existing file with group or world bits is refused unchanged before reading (`chmod 600 <path>`). On Windows the mode bits do not apply.
 - **Don't check it into git.** `.gitignore` should already exclude `~/.flair/keys/`; if you're ever tempted to share keys for "convenience," rotate first (`flair agent rotate-key <id>`).
 - **Backup separately**, encrypted. The `flair backup` command excludes private keys by default. Roll your own backup of `~/.flair/keys/` via age-encrypted archive if you want offsite recovery.
 

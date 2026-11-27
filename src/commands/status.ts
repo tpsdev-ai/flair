@@ -9,6 +9,7 @@
 import { Command } from "commander";
 import { envAdminPass, resolveAdminUser } from "../lib/auth-resolve.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
+import { agentKeyLocations, formatKeyModeFinding, keyModesUnsupported, KEY_MODES_UNSUPPORTED_MESSAGE, type KeyLocation, scanAgentKeyModes } from "../lib/key-dir.js";
 import { escapeTerminalText } from "../lib/terminal-text.js";
 import * as render from "../render.js";
 import { checkVersion, formatVersionNudge, FLAIR_PKG_NAME } from "../version-check.js";
@@ -159,6 +160,27 @@ export function localOpsApiWarnings(
     out.push({ level: "warn", message: `${finding.message} — run \`flair doctor\` for the fix` });
   }
   return out;
+}
+
+/**
+ * Local agent-key mode warnings (flair#3077). Read-only, and judged for a
+ * loopback URL only: the keys directory belongs to this host.
+ */
+export function localKeyModeWarnings(
+  baseUrl: string,
+  locations: KeyLocation[] = agentKeyLocations(),
+): Array<{ level: string; message: string }> {
+  if (!isLocalhostUrl(baseUrl)) return [];
+  if (keyModesUnsupported()) return [{ level: "info", message: KEY_MODES_UNSUPPORTED_MESSAGE }];
+  const scan = scanAgentKeyModes(locations);
+  const warnings: Array<{ level: string; message: string }> = scan.unreadable.map(({ dir, code }) => ({
+    level: "warn",
+    message: `agent key directory ${dir} could not be read (${code}) — key file modes not checked`,
+  }));
+  for (const finding of scan.findings) {
+    warnings.push({ level: "warn", message: formatKeyModeFinding(finding) });
+  }
+  return warnings;
 }
 
 function federationPeerCountParts(peers: {
@@ -396,7 +418,7 @@ const statusCmd = program
     // harper-config.yaml; the two commands must not disagree. A bare ops port
     // is Harper's all-interfaces default, so reporting "all checks passing"
     // while it is exposed is a lying green.
-    const localWarnings = localOpsApiWarnings(baseUrl);
+    const localWarnings = [...localOpsApiWarnings(baseUrl), ...localKeyModeWarnings(baseUrl)];
 
     // When unreachable on a localhost URL, probe candidate ports to detect
     // config-vs-daemon port drift. Surface the actually-listening
@@ -464,6 +486,7 @@ const statusCmd = program
     if (!healthy) {
       console.log(`Flair v${__pkgVersion} — 🔴 unreachable`);
       console.log(`  URL:  ${baseUrl}`);
+      for (const warning of localWarnings) console.log(`  ⚠ ${warning.message}`);
       if (registryNotice.line) console.log(`  ${registryNotice.line}`);
       if (registryNotice.error) console.log(`  ⚠ ${registryNotice.error}`);
       if (discoveredPort != null) {
@@ -502,12 +525,10 @@ const statusCmd = program
     const pid = healthData?.pid ?? "";
     const agents = healthData?.agents;
     const memories = healthData?.memories;
-    const warnings: Array<{ level: string; message: string }> = [
-      ...localWarnings,
-      ...(Array.isArray(healthData?.warnings) ? healthData.warnings : []),
-    ];
+    const warnings: Array<{ level: string; message: string }> =
+      Array.isArray(healthData?.warnings) ? healthData.warnings : [];
     // Scope warnings to the filtered agent if --agent is set
-    const scopedWarnings = opts.agent && healthData?.agents?.perAgent
+    const scopedWarnings = [...localWarnings, ...(opts.agent && healthData?.agents?.perAgent
       ? warnings.filter((w: any) => {
           // Hash-fallback warnings contain agent-specific counts
           if (w.message.includes("hash-fallback")) {
@@ -534,7 +555,7 @@ const statusCmd = program
           // Default: keep fleet-wide warnings
           return !w.message.includes(opts.agent);
         })
-      : warnings;
+      : warnings)];
 
     const hasWarn = scopedWarnings.some((w) => w.level === "warn");
     const headerIcon = hasWarn ? render.icons.warn : render.icons.ok;
@@ -957,15 +978,16 @@ statusCmd
     const opts = this.optsWithGlobals();
     const { healthy, baseUrl, healthData } = await fetchHealthDetail(opts);
 
-    // `flair status deep` reports the same local ops API bind warning as plain status.
-    const localWarnings = localOpsApiWarnings(baseUrl);
+    // `flair status deep` reports the same local install warnings as plain status.
+    const localWarnings = [...localOpsApiWarnings(baseUrl), ...localKeyModeWarnings(baseUrl)];
 
     if (!healthy) {
       if (opts.json) {
-        console.log(JSON.stringify({ healthy: false, url: baseUrl, error: "unreachable" }, null, 2));
+        console.log(JSON.stringify({ healthy: false, url: baseUrl, error: "unreachable", warnings: localWarnings }, null, 2));
       } else {
         console.log(`Flair v${__pkgVersion} — 🔴 unreachable`);
         console.log(`  URL:  ${baseUrl}`);
+        for (const warning of localWarnings) console.log(`  ⚠ ${warning.message}`);
         console.log(`\n  Run: flair start  or  flair doctor`);
       }
       process.exit(1);

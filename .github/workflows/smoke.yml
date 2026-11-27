@@ -73,7 +73,8 @@ jobs:
           echo "sfw bun install failed after 3 attempts"; exit 1
 
       - name: Install linux-x64 native binary for embeddings
-        run: bun add --no-save @node-llama-cpp/linux-x64@3
+        run: |
+          node scripts/ci/install-llama-native.mjs
 
       - name: Build Flair resources and CLI
         run: bun run build && bun run build:cli

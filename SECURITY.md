@@ -143,9 +143,32 @@ are restricted to admin-only.
 
 ### Key Storage
 
-New private keys at `~/.flair/keys/<agentId>.key` are written, then set to
-`0600` (owner read/write); existing keys are reused as-is. Legacy path
-`~/.tps/secrets/flair/<agentId>-priv.key` is also supported.
+Private keys at `~/.flair/keys/<agentId>.key` are created owner-only
+(`0600`) from the first byte on POSIX by `flair agent add`, `flair init` (local
+and remote agent provisioning), `flair principal add`, `flair import` and
+`flair agent rotate-key` (which stages the replacement before it updates Flair
+and renames it over the current key once Flair holds its public key). On
+POSIX the keys directory is requested with mode `0700` (the umask may make it
+narrower), and an owned directory with group or world bits is tightened to
+`0700`; on the create and reuse paths an existing key with group or world
+bits is refused with `chmod 600 <path>`, while rotation reports it. A successful
+rotation replaces the file; a failed update leaves it. `flair doctor` warns
+about an existing agent key file with group or world bits, and `flair status`
+warns about it for a local target; both name the path, its mode and
+`chmod 600 <path>`, and neither changes the file. The check covers the standard
+`resolveKeyPath` locations: `$FLAIR_KEY_DIR/<agentId>.key` when that variable is
+set, `~/.flair/keys/<agentId>.key`, and the legacy
+`~/.tps/secrets/flair/<agentId>-priv.key`; explicit key paths (such as `--key`)
+are outside this scan. A symlinked agent key is
+reported as not checked. On Windows mode bits
+do not establish owner-only.
+
+`flair export --include-key` publishes its output through a `0600` temp file
+renamed over the target, so an existing output file's wider mode does not apply
+to the new contents. The keystore seed file is replaced the same way.
+A generated passphrase is published at `0600` if its path is absent. When used
+(`FLAIR_KEY_PASSPHRASE` unset), an existing generated passphrase file with group
+or world bits is refused unchanged before reading, with `chmod 600 <path>`. On Windows the mode bits do not apply.
 
 ### Key Generation
 
@@ -155,8 +178,11 @@ runtime.
 
 ### Key Rotation
 
-`flair agent rotate-key <id>` generates a new key pair, updates the
-public key in Flair, and backs up the old key as `<agentId>.key.bak`.
+`flair agent rotate-key <id>` generates a new key pair, stages the new private
+key owner-only (`0600`) from creation on POSIX, updates the public key in
+Flair, reads the row back to confirm the stored key, then renames the staged
+key over the current one. The old key is backed up as a new
+`<agentId>.key.bak.<UTC timestamp>`; an existing backup is left untouched.
 
 ## Threat Model
 

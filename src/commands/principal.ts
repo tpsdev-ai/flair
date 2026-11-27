@@ -22,15 +22,15 @@
  */
 import { Command } from "commander";
 import nacl from "tweetnacl";
-import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import * as render from "../render.js";
-import {
-  defaultKeysDir,
+import { defaultKeysDir,
   resolveLocalAdminPass,
   resolveAdminUser,
   addAdminPassOptions,
 } from "../lib/auth-resolve.js";
+import { ensureAgentKeysDir, readOrCreateAgentKey } from "../lib/agent-key-file.js";
 import { resolveOpsUrl } from "../lib/mcp-enable.js";
 import { writeConfirmed } from "../lib/instance-identity-row.js";
 import { agentHomeEndpoint, planAgentHomeWrite, readStoredAgentHome, resolveTargetInstanceId, AGENT_HOME_IMMUTABLE_ERROR, AGENT_PRINCIPAL_WRITE_BACK_FIELD, AGENT_PRINCIPAL_WRITE_BACK_NO_ROW_ERROR } from "../lib/agent-home.js";
@@ -324,24 +324,27 @@ export function register(program: Command): void {
       }
 
       // Generate Ed25519 keypair (agents always get one; humans get one for instance-attestation)
-      mkdirSync(keysDir, { recursive: true });
       const privPath = privKeyPath(id, keysDir);
       const pubPath = pubKeyPath(id, keysDir);
       let pubKeyB64url: string;
 
-      if (existsSync(privPath)) {
-        console.log(`Reusing existing key: ${privPath}`);
-        const seed = new Uint8Array(readFileSync(privPath));
-        const kp = nacl.sign.keyPair.fromSeed(seed);
+      try {
+        ensureAgentKeysDir(keysDir);
+        const keyFile = readOrCreateAgentKey(privPath, () => {
+          const kp = nacl.sign.keyPair();
+          return Buffer.from(kp.secretKey.slice(0, 32));
+        });
+        const kp = nacl.sign.keyPair.fromSeed(new Uint8Array(keyFile.bytes));
         pubKeyB64url = b64url(kp.publicKey);
-      } else {
-        const kp = nacl.sign.keyPair();
-        const seed = kp.secretKey.slice(0, 32);
-        writeFileSync(privPath, Buffer.from(seed));
-        chmodSync(privPath, 0o600);
-        writeFileSync(pubPath, Buffer.from(kp.publicKey));
-        pubKeyB64url = b64url(kp.publicKey);
-        console.log(`Keypair written: ${privPath}`);
+        if (keyFile.created) {
+          writeFileSync(pubPath, Buffer.from(kp.publicKey));
+          console.log(`Keypair written: ${privPath}`);
+        } else {
+          console.log(`Reusing existing key: ${privPath}`);
+        }
+      } catch (err: unknown) {
+        console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
       }
 
       // Insert via operations API with Principal fields
