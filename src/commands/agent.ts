@@ -820,8 +820,6 @@ export function register(program: Command): void {
           );
           process.exit(1);
         }
-        console.log(`Public key updated in Flair ✓`);
-
         // A 2xx that changed no row is a failure: require the stored public key
         // to match the staged key before the rename.
         const readback = await readAgentPublicKeyAfterUpdate(opsPort, id, adminUser, adminPass);
@@ -837,6 +835,7 @@ export function register(program: Command): void {
           );
           process.exit(1);
         }
+        console.log(`Public key updated in Flair ✓`);
 
         // Replace the current key by rename. A failed rename keeps the staged file.
         try {

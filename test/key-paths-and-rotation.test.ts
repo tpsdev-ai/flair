@@ -596,6 +596,7 @@ describe("agent rotate-key (real command, POSIX)", () => {
 
     expect(result.code).toBe(0);
     if (process.platform !== "win32") expect(result.stdout).toContain("has group or world permission bits and is being replaced");
+    expect(result.stdout).toContain("Public key updated in Flair ✓");
     expect(observedModes.length).toBeGreaterThanOrEqual(2);
     if (process.platform !== "win32") expect(observedModes.every((mode) => mode === 0o600)).toBe(true);
     expect(Number(statSync(privPath).ino)).toBe(stagedInode);
@@ -663,6 +664,7 @@ describe("agent rotate-key (real command, POSIX)", () => {
     expect(staged.length).toBe(1);
     if (process.platform !== "win32") expect(modeOf(staged[0])).toBe(0o600);
     expect(result.stderr).toContain("does not match the new key");
+    expect(result.stdout).not.toContain("Public key updated in Flair");
   });
 
   it("(e) a failed rename keeps the staged key and its public key is the one Flair stored", async () => {
