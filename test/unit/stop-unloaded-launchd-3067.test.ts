@@ -370,7 +370,11 @@ function isMissingFile(error: unknown): boolean {
 
 /** Wait for `path` to hold a complete positive pid. A create-before-write
  *  window reads as "", which is why a bare existsSync-then-read can see 0. */
-async function waitForPidFile(path: string, timeoutMs = 5000): Promise<number> {
+async function waitForPidFile(
+  path: string,
+  timeoutMs = 5000,
+  onRead?: (text: string | undefined) => void,
+): Promise<number> {
   const deadline = Date.now() + timeoutMs;
   let last = "missing";
   for (;;) {
@@ -382,6 +386,7 @@ async function waitForPidFile(path: string, timeoutMs = 5000): Promise<number> {
         throw new Error(`pid-file-unreadable: ${path}: ${String(error)}`);
       }
     }
+    onRead?.(text);
     if (text !== undefined) {
       last = JSON.stringify(text);
       const pid = Number(text);
@@ -396,7 +401,12 @@ async function waitForPidFile(path: string, timeoutMs = 5000): Promise<number> {
   }
 }
 
-async function waitForFileContent(path: string, expected: string, timeoutMs = 5000): Promise<void> {
+async function waitForFileContent(
+  path: string,
+  expected: string,
+  timeoutMs = 5000,
+  onRead?: (text: string | undefined) => void,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let last = "missing";
   for (;;) {
@@ -406,6 +416,7 @@ async function waitForFileContent(path: string, expected: string, timeoutMs = 50
     } catch (error) {
       if (!isMissingFile(error)) throw new Error(`file-unreadable: ${path}: ${String(error)}`);
     }
+    onRead?.(text);
     if (text === expected) return;
     if (text !== undefined) last = JSON.stringify(text);
     if (Date.now() >= deadline) {
@@ -669,4 +680,54 @@ describe("flair#3067 — stop when the launchd job was never loaded", () => {
     expect(result.out).not.toContain("the process serving the port");
     expect(unloadCalls(f)).toEqual([]);
   }, 30_000);
+});
+
+describe("flair#3067 — the pid and content helpers wait for a real file to hold a valid value", () => {
+  test("waitForPidFile returns the pid written only after it read the empty file", async () => {
+    const pidFile = join(tempDir("stop-3067-pidfile-"), "hdb.pid");
+    writeFileSync(pidFile, "");
+    const reads: string[] = [];
+    const pid = await waitForPidFile(pidFile, 5000, (text) => {
+      reads.push(String(text));
+      if (text === "") writeFileSync(pidFile, String(process.pid));
+    });
+    expect(reads[0]).toBe("");
+    expect(pid).toBe(process.pid);
+  }, 10_000);
+
+  test("waitForPidFile throws its named timeout error when the file never holds a pid", async () => {
+    const pidFile = join(tempDir("stop-3067-pidfile-"), "hdb.pid");
+    writeFileSync(pidFile, "0");
+    const reads: string[] = [];
+    const error = await waitForPidFile(pidFile, 150, (text) => {
+      reads.push(String(text));
+    }).then(() => undefined, (caught: Error) => caught);
+    expect(error?.name).toBe("PidFileNotReadyError");
+    expect(error?.message).toContain("pid-file-not-ready");
+    expect(reads.at(-1)).toBe("0");
+  }, 5_000);
+
+  test("waitForFileContent resolves on the expected value written only after it read the wrong one", async () => {
+    const readyFile = join(tempDir("stop-3067-content-"), "ready");
+    writeFileSync(readyFile, "warming");
+    const reads: string[] = [];
+    await waitForFileContent(readyFile, "1", 5000, (text) => {
+      reads.push(String(text));
+      if (text === "warming") writeFileSync(readyFile, "1");
+    });
+    expect(reads[0]).toBe("warming");
+    expect(reads.at(-1)).toBe("1");
+  }, 10_000);
+
+  test("waitForFileContent throws its named timeout error when the value never matches", async () => {
+    const readyFile = join(tempDir("stop-3067-content-"), "ready");
+    writeFileSync(readyFile, "warming");
+    const reads: string[] = [];
+    const error = await waitForFileContent(readyFile, "1", 150, (text) => {
+      reads.push(String(text));
+    }).then(() => undefined, (caught: Error) => caught);
+    expect(error?.name).toBe("FileContentNotReadyError");
+    expect(error?.message).toContain("file-content-not-ready");
+    expect(reads.at(-1)).toBe("warming");
+  }, 5_000);
 });
