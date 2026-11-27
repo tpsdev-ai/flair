@@ -4228,7 +4228,7 @@ export async function provisionFabric(
   }
   const users = userInfo;
   const usernames: string[] = [];
-  const superUsers: boolean[] = [];
+  const superUsers: (boolean | undefined)[] = [];
   for (const record of users) {
     const username =
       record !== null && typeof record === "object" && !Array.isArray(record)
@@ -4238,15 +4238,30 @@ export async function provisionFabric(
             ? record.user.username
             : undefined
         : undefined;
-    const permission = record?.role?.permission ?? record?.permission;
-    const superUser = permission?.super_user;
-    if (username === undefined || username === "" || typeof superUser !== "boolean") {
+    // A record with no readable username could be the cluster administrator,
+    // so it still refuses before anything is staged or written.
+    if (username === undefined || username === "") {
       throw new Error(
-        "The cluster's list_users response contained a malformed record, so provisioning refused to change anything",
+        "The cluster's list_users response contained a record with no readable username, so provisioning refused to change anything",
       );
     }
     usernames.push(username);
-    superUsers.push(superUser);
+    // Only the authenticated cluster administrator and `admin` decide
+    // provisioning, so only their records need a boolean super_user. Harper
+    // accepts a role that holds database grants and no super_user flag, and
+    // such an unrelated user must not make remote init refuse.
+    if (username === clusterAdminUser || username === DEFAULT_ADMIN_USER) {
+      const permission = record?.role?.permission ?? record?.permission;
+      const superUser = permission?.super_user;
+      if (typeof superUser !== "boolean") {
+        throw new Error(
+          "The cluster's list_users response contained a malformed record for a user that decides provisioning, so provisioning refused to change anything",
+        );
+      }
+      superUsers.push(superUser);
+    } else {
+      superUsers.push(undefined);
+    }
   }
   const clusterAdminRecords = usernames.filter((name) => name === clusterAdminUser).length;
   if (clusterAdminRecords !== 1) {
