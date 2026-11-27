@@ -2614,10 +2614,11 @@ export class Memory extends (databases as any).flair.Memory {
     // plan, so the stale-target check compares two committed reads and the
     // retry is not refused. A change another writer commits to that target
     // after this read and before the plan is still refused; a content change
-    // answers 409 skill_target_changed. A target that reads as gone keeps the
-    // snapshot row and the plan refuses it. The body may omit `tags` and
-    // inherit the skill tag from the stored row, the source prepareSkillBody
-    // uses, so either row's tags decide whether this read applies.
+    // with ownership unchanged answers 409 skill_target_changed. A target that
+    // reads as gone keeps the snapshot row and the plan refuses it. The body
+    // may omit `tags` and inherit the skill tag from the stored row, the
+    // source prepareSkillBody uses, so either row's tags decide whether this
+    // read applies.
     const postStored = postSnapshot && !postInPlace && (isSkillWrite(content) || rowIsSkill(postSnapshot))
       ? ((await (databases as any).flair.Memory.get(String(postSnapshot.id), {})) ?? postSnapshot)
       : postSnapshot;
