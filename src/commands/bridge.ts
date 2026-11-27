@@ -15,7 +15,7 @@
 import { Command } from "commander";
 import * as render from "../render.js";
 import { resolveKeyPath, buildEd25519Auth, readSecretFileSecure, requestTarget, requestUrl } from "../lib/auth-resolve.js";
-import { requireAgentId } from "../lib/key-dir.js";
+import { AgentKeyPathRefusal, requireAgentId } from "../lib/key-dir.js";
 import type { BridgeOptionSpec } from "../bridges/types.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { protoSafeRecord } from "../lib/proto-safe-record.js";
@@ -433,6 +433,9 @@ export function register(program: Command): void {
           });
         }
       } catch (err: any) {
+        // The shared agent-ID refusal prints its own message, as it does when
+        // the flag or environment id is checked above.
+        if (err instanceof AgentKeyPathRefusal) throw err;
         if (err instanceof BridgeRuntimeError) {
           printBridgeError(err, bridgeApiKey);
           process.exit(1);

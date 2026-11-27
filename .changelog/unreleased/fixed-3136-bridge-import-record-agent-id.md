@@ -1,0 +1,1 @@
+- **`flair bridge import` refuses an invalid agent id carried by an imported record.**

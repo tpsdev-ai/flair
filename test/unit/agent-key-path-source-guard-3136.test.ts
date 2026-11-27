@@ -2,8 +2,9 @@
  * flair#3136 item 1: every ID-derived key path in src/ is built by a validated
  * helper in src/lib/key-dir.ts, which applies the shared agent-ID rule before
  * joining. The guard fails on any string literal or template-literal text chunk
- * outside that module that is, or ends with, `.key`, `-priv.key` or `.pub`. A
- * named allowlist covers non-agent literals.
+ * outside that module that is, or ends with, `.key`, `-priv.key` or `.pub`;
+ * string literals inside a template interpolation are scanned too, at any
+ * depth. A named allowlist covers non-agent literals.
  */
 import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
@@ -15,7 +16,8 @@ const HELPER = join(SRC, "lib", "key-dir.ts");
 const KEY_SUFFIXES = [".key", "-priv.key", ".pub"];
 
 /** Named non-agent uses that genuinely need such a literal. `expression` must
- *  contain the flagged literal, so another literal on the same line still fails. */
+ *  contain the flagged literal's own span, so another literal on the same line
+ *  still fails. */
 const ALLOWLIST: Array<{ name: string; file: string; expression: string; reason: string }> = [
   {
     name: "prune-discovered-filenames",
@@ -83,63 +85,123 @@ function lineCounter(source: string): (index: number) => number {
 }
 
 /** Each string literal and template-literal text chunk in `source`, with
- *  `${...}` expressions skipped so the text around them stays separate. */
+ *  `${...}` expressions scanned recursively so a literal inside one is found
+ *  too. */
 function literals(source: string): Literal[] {
   const found: Literal[] = [];
   const lineAt = lineCounter(source);
-  let i = 0;
-  while (i < source.length) {
-    const ch = source[i];
-    if (ch === '"' || ch === "'") {
-      let j = i + 1;
-      let text = "";
-      while (j < source.length && source[j] !== ch && source[j] !== "\n") {
-        if (source[j] === "\\") {
-          text += source[j + 1] ?? "";
-          j += 2;
-          continue;
+  scan(source, 0, source.length);
+  return found;
+
+  function scan(text: string, start: number, end: number): void {
+    let i = start;
+    while (i < end) {
+      const ch = text[i];
+      if (ch === '"' || ch === "'") {
+        const stop = Math.min(skipQuoted(text, i), end);
+        let literalText = "";
+        for (let j = i + 1; j < stop - 1; j++) {
+          if (text[j] === "\\") {
+            literalText += text[j + 1] ?? "";
+            j++;
+            continue;
+          }
+          literalText += text[j];
         }
-        text += source[j];
-        j++;
+        found.push({ text: literalText, line: lineAt(i), index: i });
+        i = stop;
+        continue;
       }
-      found.push({ text, line: lineAt(i), index: i });
-      i = j + 1;
+      if (ch === "`") {
+        let j = i + 1;
+        let textStart = i + 1;
+        let chunk = "";
+        while (j < end) {
+          if (text[j] === "\\") {
+            chunk += text[j + 1] ?? "";
+            j += 2;
+            continue;
+          }
+          if (text[j] === "`") break;
+          if (text[j] === "$" && text[j + 1] === "{") {
+            found.push({ text: chunk, line: lineAt(textStart), index: textStart });
+            const close = matchingBrace(text, j + 1);
+            if (close === -1) {
+              j = end;
+              break;
+            }
+            scan(text, j + 2, close);
+            j = close + 1;
+            textStart = j;
+            chunk = "";
+            continue;
+          }
+          chunk += text[j];
+          j++;
+        }
+        found.push({ text: chunk, line: lineAt(textStart), index: textStart });
+        i = j + 1;
+        continue;
+      }
+      i++;
+    }
+  }
+}
+
+/** The index of the `}` that closes the `{` at `openIndex`, or -1. Braces inside
+ *  quoted strings and template literals do not count. */
+function matchingBrace(text: string, openIndex: number): number {
+  let depth = 0;
+  let i = openIndex;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '"' || ch === "'") {
+      i = skipQuoted(text, i);
       continue;
     }
     if (ch === "`") {
-      let j = i + 1;
-      let text = "";
-      let textStart = i + 1;
-      while (j < source.length) {
-        if (source[j] === "\\") {
-          text += source[j + 1] ?? "";
-          j += 2;
-          continue;
-        }
-        if (source[j] === "`") break;
-        if (source[j] === "$" && source[j + 1] === "{") {
-          found.push({ text, line: lineAt(textStart), index: textStart });
-          let depth = 1;
-          j += 2;
-          while (j < source.length && depth > 0) {
-            if (source[j] === "{") depth++;
-            else if (source[j] === "}") depth--;
-            j++;
-          }
-          text = "";
-          textStart = j;
-          continue;
-        }
-        text += source[j];
-        j++;
-      }
-      found.push({ text, line: lineAt(textStart), index: textStart });
-      i = j + 1;
+      i = skipTemplate(text, i);
+      continue;
+    }
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return i;
+    }
+    i++;
+  }
+  return -1;
+}
+
+function skipQuoted(text: string, start: number): number {
+  let i = start + 1;
+  while (i < text.length && text[i] !== text[start] && text[i] !== "\n") {
+    if (text[i] === "\\") {
+      i += 2;
       continue;
     }
     i++;
   }
-  return found;
+  return i + 1;
+}
+
+function skipTemplate(text: string, start: number): number {
+  let i = start + 1;
+  while (i < text.length) {
+    if (text[i] === "\\") {
+      i += 2;
+      continue;
+    }
+    if (text[i] === "`") return i + 1;
+    if (text[i] === "$" && text[i + 1] === "{") {
+      const close = matchingBrace(text, i + 1);
+      if (close === -1) return text.length;
+      i = close + 1;
+      continue;
+    }
+    i++;
+  }
+  return text.length;
 }
 
 function keyLiterals(source: string): Literal[] {
@@ -190,12 +252,13 @@ function offenders(): string[] {
   return found;
 }
 
-test("the detector sees each guarded assembly shape (self-proof)", () => {
+test("the detector sees string, concatenation and nested template-literal shapes (self-proof)", () => {
   const samples = [
     "join(dir, `${agentId}.key`)",
     'join(dir, agentId.concat(".key"))',
     'join(dir, agentId + "-priv.key")',
     'join(dir, agentId + ".pub")',
+    'join(dir, `${agentId}${".key"}`)',
   ];
   for (const sample of samples) {
     expect(keyLiterals(sample).length, sample).toBeGreaterThan(0);

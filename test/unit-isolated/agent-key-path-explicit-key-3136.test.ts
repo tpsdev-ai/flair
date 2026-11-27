@@ -1,9 +1,10 @@
 /**
- * flair#3136 item 1: a command given `--agent <invalid>` together with an
- * explicit `--key <path>` refuses with the shared agent-ID message before the
- * key file is opened or a request is sent. Each case runs the built CLI against
- * a local stub server with a real Ed25519 key file; the child's preload records
- * the readFileSync/openSync path arguments.
+ * flair#3136 item 1: a command given an invalid agent id — from `--agent`,
+ * `FLAIR_AGENT_ID` or an imported record — together with an explicit `--key`
+ * refuses with the shared agent-ID message before the key file is opened or a
+ * request is sent. Each case runs the built CLI against a local stub server
+ * with a real Ed25519 key file; the child's preload records the
+ * readFileSync/openSync path arguments.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createServer, type Server } from "node:http";
@@ -29,7 +30,7 @@ interface CliResult {
   reads: string[];
 }
 
-function runCli(args: string[], home: string): Promise<CliResult> {
+function runCli(args: string[], home: string, extraEnv: NodeJS.ProcessEnv = {}): Promise<CliResult> {
   const readLog = join(home, "reads.log");
   writeFileSync(readLog, "");
   const env: NodeJS.ProcessEnv = Object.fromEntries(
@@ -40,6 +41,7 @@ function runCli(args: string[], home: string): Promise<CliResult> {
     USERPROFILE: home,
     NO_COLOR: "1",
     FLAIR_TEST_KEY_READ_LOG: readLog,
+    ...extraEnv,
   });
   return new Promise((resolvePromise, reject) => {
     const startedAt = Date.now();
@@ -115,7 +117,32 @@ const CASES: CommandCase[] = [
   },
 ];
 
-describe("flair#3136 — an invalid --agent with --key is refused before the key is opened", () => {
+const RECORD_BRIDGE = "record-id-bridge";
+
+/** A project YAML bridge whose map reads the agent id from each record. */
+function writeRecordBridge(home: string, records: string[]): void {
+  mkdirSync(join(home, ".flair-bridge"), { recursive: true });
+  writeFileSync(
+    join(home, ".flair-bridge", `${RECORD_BRIDGE}.yaml`),
+    [
+      `name: ${RECORD_BRIDGE}`,
+      "version: 1",
+      "kind: file",
+      "import:",
+      "  sources:",
+      "    - path: records.jsonl",
+      "      format: jsonl",
+      "      map:",
+      '        content: "$.text"',
+      '        id: "$.id"',
+      '        agentId: "$.agent"',
+      "",
+    ].join("\n"),
+  );
+  writeFileSync(join(home, "records.jsonl"), records.map((record) => `${record}\n`).join(""));
+}
+
+describe("flair#3136 — an invalid agent id with --key is refused before the key is opened", () => {
   for (const command of CASES) {
     test(`${command.name} refuses ${JSON.stringify(BAD_ID)} with --key`, async () => {
       const home = join(scratch, `home-${command.name.replace(/[^a-z]+/gi, "-")}`);
@@ -134,6 +161,45 @@ describe("flair#3136 — an invalid --agent with --key is refused before the key
       expect(requests).toBe(0);
     }, 30_000);
   }
+
+  test("flair bridge import refuses an invalid agent id carried by a record", async () => {
+    const home = join(scratch, "home-bridge-record-id");
+    mkdirSync(home, { recursive: true });
+    writeRecordBridge(home, [JSON.stringify({ id: "rec-1", agent: BAD_ID, text: "hello there" })]);
+    requests = 0;
+
+    const { stdout, stderr, code, reads } = await runCli(
+      ["bridge", "import", RECORD_BRIDGE, "--cwd", home, "--key", keyPath, "--url", `http://127.0.0.1:${port}`],
+      home,
+    );
+
+    const out = stdout + stderr;
+    expect(code, out).toBe(1);
+    expect(out).toContain(invalidAgentIdMessage(BAD_ID));
+    expect(reads).not.toContain(keyPath);
+    expect(requests).toBe(0);
+  }, 30_000);
+
+  test("flair bridge import refuses an invalid FLAIR_AGENT_ID", async () => {
+    const home = join(scratch, "home-bridge-env-id");
+    mkdirSync(home, { recursive: true });
+    // The record carries its own VALID agent id, so only the environment id
+    // can be what refuses the run.
+    writeRecordBridge(home, [JSON.stringify({ id: "rec-1", agent: "agent-a", text: "hello there" })]);
+    requests = 0;
+
+    const { stdout, stderr, code, reads } = await runCli(
+      ["bridge", "import", RECORD_BRIDGE, "--cwd", home, "--key", keyPath, "--url", `http://127.0.0.1:${port}`],
+      home,
+      { FLAIR_AGENT_ID: BAD_ID },
+    );
+
+    const out = stdout + stderr;
+    expect(code, out).toBe(1);
+    expect(out).toContain(invalidAgentIdMessage(BAD_ID));
+    expect(reads).not.toContain(keyPath);
+    expect(requests).toBe(0);
+  }, 30_000);
 });
 
 describe("the read/fetch preload records normalised path arguments", () => {

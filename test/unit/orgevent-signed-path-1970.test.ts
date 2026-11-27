@@ -2,8 +2,9 @@
  * orgevent-signed-path-1970.test.ts — flair#1970.
  *
  * `publishOrgEvent` signs the final request target, including a base URL path
- * prefix. The signature must cover the SAME pathname and query that are sent,
- * and that path must carry the id as one encoded segment.
+ * prefix. The signature must cover the SAME pathname and query that are sent.
+ * The id `publishOrgEvent` generates is plain text, so this file proves
+ * path/signature agreement, not reserved-character encoding.
  *
  * A real Ed25519 key and a real signature check prove it: the test captures the
  * request, recomputes `agentId:ts:nonce:PUT:<path>` from the request's own
@@ -70,7 +71,7 @@ describe("flair#1970: orgevent signs the exact encoded path it sends", () => {
     const url = new URL(captured[0].url);
     const path = `${url.pathname}${url.search}`;
 
-    // One id segment, that decodes to the id (which carries reserved chars).
+    // One id segment that decodes to the generated id.
     const segments = path.split("/");
     const prefix = baseUrl.endsWith("/flair") ? "/flair" : "";
     expect(segments).toHaveLength(prefix ? 4 : 3);

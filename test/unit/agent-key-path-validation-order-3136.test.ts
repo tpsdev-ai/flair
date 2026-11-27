@@ -1,7 +1,7 @@
 /**
  * flair#3136 item 2: each key-path helper applies the shared agent-ID rule
- * before it joins. A Symbol has no string form, so a join that ran first would
- * throw a TypeError instead of the refusal with the shared message.
+ * before it joins. A Symbol cannot be passed to `path.join`, so a join that ran
+ * first would throw a TypeError instead of the refusal with the shared message.
  */
 import { expect, test } from "bun:test";
 import { invalidAgentIdMessage } from "../../src/lib/agent-id-rule.js";
