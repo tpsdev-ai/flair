@@ -2,12 +2,11 @@
  * key-dir.ts — the keys-directory walk shared by `flair keys prune`,
  * `flair doctor` and `flair status` (flair#3077).
  *
- * Prune retains its entry classification; mode checks use the Agent ID rule
- * because signing can read a .key without a .pub sibling.
+ * Prune retains its entry classification; mode checks cover every file with a
+ * location's key suffix, because signing can read any such file.
  */
 import { existsSync, lstatSync, readdirSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { isValidAgentId } from "./agent-id-rule.js";
 import { resolveHome } from "./home.js";
 
 export type KeyDirEntryKind = "dir" | "other" | "key";
@@ -69,7 +68,6 @@ export function keyPathIn(location: KeyLocation, agentId: string): string {
   return join(location.dir, `${agentId}${location.suffix}`);
 }
 
-const KEY_SUFFIX = ".key";
 
 function errorCode(error: unknown): string {
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
@@ -96,21 +94,6 @@ function keyModeFindingForPath(path: string): KeyModeFinding | null {
     return { kind: "wide", path, mode: (stats.mode & 0o777).toString(8).padStart(4, "0") };
   }
   return null;
-}
-
-/** After the directory read, lstat each valid-id .key, including directories.
- * Non-regular entries are reported as not checked; entry symlinks are not
- * followed. No key content is read and no file is changed. */
-export function keyModeFindings(keysDir: string, entries: KeyDirEntry[]): KeyModeFinding[] {
-  const names = entries.map((e) => e.name).filter((name) =>
-    name.endsWith(KEY_SUFFIX) && isValidAgentId(name.slice(0, -KEY_SUFFIX.length)),
-  ).sort();
-  const findings: KeyModeFinding[] = [];
-  for (const name of names) {
-    const finding = keyModeFindingForPath(join(keysDir, name));
-    if (finding) findings.push(finding);
-  }
-  return findings;
 }
 
 export interface KeyModeScanResult {
@@ -154,7 +137,7 @@ export function scanAgentKeyModes(
       continue;
     }
     const names = scan.entries.map((e) => e.name).filter((name) =>
-      name.endsWith(location.suffix) && isValidAgentId(name.slice(0, -location.suffix.length)),
+      name.endsWith(location.suffix) && name.length > location.suffix.length,
     ).sort();
     for (const name of names) {
       const path = join(location.dir, name);

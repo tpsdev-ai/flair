@@ -190,14 +190,14 @@ describe("agent key file modes are reported by doctor and status", () => {
 });
 
 
-test.skipIf(POSIX_ONLY)("valid node-shaped id without a public sibling warns in doctor and status", async () => {
+test.skipIf(POSIX_ONLY)("a node-shaped id and a name outside the Agent ID rule both warn in doctor and status", async () => {
   const home = makeHome("node-shaped");
   const key = writeKey(home, "flair_deadbeef", 0o644);
   const invalid = writeKey(home, "invalid.id", 0o644);
   for (const args of [["doctor"], ["status", "--url", url]]) {
     const { output } = await runCli(args, home);
     expect(output).toContain(`agent key file ${key} has mode 0644`);
-    expect(output).not.toContain(`agent key file ${invalid}`);
+    expect(output).toContain(`agent key file ${invalid} has mode 0644`);
   }
 }, 60_000);
 
