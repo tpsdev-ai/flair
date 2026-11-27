@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Validate the node-llama-cpp packages entry in bun.lock (flair#3133).
-// Floating versions can drift from the checkout resolution.
+// Read embeddings' declared platform native version from bun.lock (flair#3133, #3153).
+// The benchmark's node-llama-cpp can drift from harper-fabric-embeddings' native.
 
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -13,6 +13,12 @@ export const LOCKFILE = resolve(ROOT, "bun.lock");
 
 /** Accepted version shape for native installs. */
 export const SEMVER = /^[0-9]+\.[0-9]+\.[0-9]+$/;
+
+/** The embeddings package that declares platform native versions. */
+export const EMBEDDINGS_PACKAGE = "harper-fabric-embeddings";
+
+/** The native package a linux CI lane installs. */
+export const PLATFORM_PACKAGE = "@node-llama-cpp/linux-x64";
 
 function stripTrailingCommas(text) {
   let result = "";
@@ -36,8 +42,8 @@ function stripTrailingCommas(text) {
   return result;
 }
 
-/** Validate the packages entry and return its x.y.z version. */
-export function readLlamaNativeVersion(lockText) {
+/** Return the platform native version harper-fabric-embeddings declares. */
+export function readLlamaNativeVersion(lockText, packageName = PLATFORM_PACKAGE) {
   let lock;
   try {
     lock = JSON.parse(stripTrailingCommas(lockText));
@@ -49,17 +55,24 @@ export function readLlamaNativeVersion(lockText) {
   if (!packages || typeof packages !== "object" || Array.isArray(packages)) {
     throw new Error("llama-native-version: missing or malformed packages map in bun.lock");
   }
-  if (!Object.hasOwn(packages, "node-llama-cpp")) {
-    throw new Error('llama-native-version: missing packages["node-llama-cpp"] in bun.lock');
+  if (!Object.hasOwn(packages, EMBEDDINGS_PACKAGE)) {
+    throw new Error(`llama-native-version: missing packages["${EMBEDDINGS_PACKAGE}"] in bun.lock`);
   }
-  const entry = packages["node-llama-cpp"];
-  const match = Array.isArray(entry) && typeof entry[0] === "string"
-    ? /^node-llama-cpp@([0-9]+\.[0-9]+\.[0-9]+)$/.exec(entry[0])
-    : null;
-  if (!match || entry[0] !== match[0]) {
-    throw new Error('llama-native-version: malformed packages["node-llama-cpp"] in bun.lock: expected ["node-llama-cpp@x.y.z", ...]');
+  const entry = packages[EMBEDDINGS_PACKAGE];
+  const shape = /^harper-fabric-embeddings@([0-9]+\.[0-9]+\.[0-9]+)$/;
+  const match = Array.isArray(entry) && typeof entry[0] === "string" ? shape.exec(entry[0]) : null;
+  if (!match || entry[0] !== match[0] || !entry[2] || typeof entry[2] !== "object" || Array.isArray(entry[2])) {
+    throw new Error(`llama-native-version: malformed packages["${EMBEDDINGS_PACKAGE}"] in bun.lock: expected ["${EMBEDDINGS_PACKAGE}@x.y.z", ...]`);
   }
-  return match[1];
+  const declared =
+    entry[2].dependencies?.[packageName] ?? entry[2].optionalDependencies?.[packageName];
+  if (typeof declared !== "string") {
+    throw new Error(`llama-native-version: packages["${EMBEDDINGS_PACKAGE}"] does not declare ${packageName} in bun.lock`);
+  }
+  if (!SEMVER.test(declared)) {
+    throw new Error(`llama-native-version: declared ${packageName} "${declared}" in bun.lock is not x.y.z`);
+  }
+  return declared;
 }
 
 const isEntryPoint =
