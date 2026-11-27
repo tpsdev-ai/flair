@@ -149,10 +149,13 @@ export function scanAgentKeyModes(
   return { findings, unreadable };
 }
 
-/** POSIX single-quoting for a path used in a command an operator will run. */
+/** POSIX single-quoting for a path used in a command an operator will run. A
+ *  relative path that starts with `-` is prefixed with `./`, so the command
+ *  does not read it as an option. */
 function shellQuotePath(path: string): string {
-  if (/^[A-Za-z0-9._\-/]+$/.test(path)) return path;
-  return `'${path.replace(/'/g, `'\\''`)}'`;
+  const operand = path.startsWith("-") ? `./${path}` : path;
+  if (/^[A-Za-z0-9._\-/]+$/.test(operand)) return operand;
+  return `'${operand.replace(/'/g, `'\\''`)}'`;
 }
 
 /** The one rendering of a finding, so doctor and status cannot word it

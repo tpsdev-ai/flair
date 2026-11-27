@@ -60,6 +60,7 @@ function runCli(
   home: string,
   windows = false,
   extraEnv: Record<string, string> = {},
+  cwd?: string,
 ): Promise<{ output: string; status: number | null }> {
   const preload = join(home, "health-fixture.cjs");
   writeFileSync(preload, `${windows ? 'Object.defineProperty(process, "platform", { value: "win32" });' : ""}
@@ -75,6 +76,7 @@ function runCli(
   `);
   const startedAt = Date.now();
   const child = spawn("bun", ["--preload", preload, CLI, ...args], {
+    cwd,
     env: { HOME: home, USERPROFILE: home, PATH: process.env.PATH ?? "", TERM: "dumb", TMPDIR: tmpdir(), ...extraEnv },
     timeout: 30_000,
     killSignal: "SIGTERM",
@@ -481,6 +483,33 @@ test.skipIf(POSIX_ONLY)("the printed chmod remedy runs for a path with a space a
   expect(command).not.toBe(`chmod 600 ${key}`);
   const remedy = spawnSync("sh", ["-c", 'eval "$FLAIR_KEY_MODE_REMEDY_3077"'], {
     cwd: scratch,
+    encoding: "utf8",
+    timeout: 10_000,
+    env: {
+      ...process.env,
+      FLAIR_KEY_MODE_REMEDY_3077: command,
+      FLAIR_TEST_ALLOW_BUN_HARPER: "Exercise the printed key-mode chmod remedy through the POSIX shell",
+    },
+  });
+  expect(remedy.stderr).toBe("");
+  expect(remedy.status).toBe(0);
+  expect(statSync(key).mode & 0o777).toBe(0o600);
+}, 60_000);
+
+test.skipIf(POSIX_ONLY)("the printed chmod remedy runs for a relative key path that starts with -", async () => {
+  const home = makeHome("dash-relative");
+  const cwd = join(scratch, "dash-relative-cwd");
+  mkdirSync(join(cwd, "-keys"), { recursive: true });
+  const key = join(cwd, "-keys", "agent-a.key");
+  writeFileSync(key, "seed-agent-a-3077");
+  chmodSync(key, 0o644);
+  const { output } = await runCli(["status", "--url", url], home, false, { FLAIR_KEY_DIR: "-keys" }, cwd);
+  const match = output.match(/chmod 600 [^\n]*/);
+  expect(match).not.toBeNull();
+  const command = match![0].replace(/\u001b\[[0-9;]*m/g, "").trim();
+  expect(command).toBe("chmod 600 ./-keys/agent-a.key");
+  const remedy = spawnSync("sh", ["-c", 'eval "$FLAIR_KEY_MODE_REMEDY_3077"'], {
+    cwd,
     encoding: "utf8",
     timeout: 10_000,
     env: {
