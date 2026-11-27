@@ -39,15 +39,21 @@ function runCli(args: string[], home: string): Promise<RunResult> {
   const env = { ...ambient, HOME: home, USERPROFILE: home, NO_COLOR: "1", FLAIR_TEST_EXPORT_CLOCK_MS: String(CLOCK_MS) } as Record<string, string>;
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
-    const child = spawn(nodeBin({ env }), [CLI_PATH, ...args], {
-      env,
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 20_000, // literal for the spawn-budget gate
-    });
+    const previousUmask = process.umask(0o022);
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(nodeBin({ env }), [CLI_PATH, ...args], {
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 20_000, // literal for the spawn-budget gate
+      });
+    } finally {
+      process.umask(previousUmask);
+    }
     let stdout = "";
     let stderr = "";
-    child.stdout.on("data", (d) => (stdout += d));
-    child.stderr.on("data", (d) => (stderr += d));
+    child.stdout!.on("data", (d) => (stdout += d));
+    child.stderr!.on("data", (d) => (stderr += d));
     child.on("close", (code, signal) => {
       if (signal !== null) {
         reject(new Error(childOverranDeadline("flair CLI", cliLeg(args), CHILD_DEADLINE_MS, { status: code, signal, elapsedMs: Date.now() - startedAt, stdout, stderr })));
@@ -93,6 +99,7 @@ describe("flair export: default output is created exclusively (#3136)", () => {
     const parsed = JSON.parse(readFileSync(defaultPath(home), "utf8"));
     expect(parsed).toMatchObject({ version: 1, type: "agent-export", agent: { id: AGENT } });
     expect(parsed.source).toBe(harper.httpURL);
+    expect(statSync(defaultPath(home)).mode & 0o777).toBe(0o644);
   }, 60_000);
 
   test("an existing path at the default name is refused for both key modes", async () => {
@@ -112,6 +119,17 @@ describe("flair export: default output is created exclusively (#3136)", () => {
       expect(readdirSync(exportsDir)).toEqual([`${AGENT}-${CLOCK_MS}.json`]);
     }
   }, 120_000);
+
+  test("a regular file at the default name is refused without changing its contents", async () => {
+    const home = tempDir("flair-3136-home-");
+    const planted = defaultPath(home);
+    mkdirSync(join(home, ".flair", "exports"), { recursive: true });
+    writeFileSync(planted, "sentinel");
+    const result = await runCli(exportArgs(home), home);
+    expect(result.code, `${result.stdout}${result.stderr}`).toBe(1);
+    expect(result.stderr).toContain(planted);
+    expect(readFileSync(planted, "utf8")).toBe("sentinel");
+  }, 60_000);
 
   test("with --include-key a new default file is created at mode 0600", async () => {
     const home = tempDir("flair-3136-home-");

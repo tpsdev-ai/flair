@@ -5,8 +5,8 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { readdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { readdirSync, readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
@@ -82,6 +82,24 @@ describe("flair export: the agent-ID rule runs before any request or write (#313
       expect(listTree(keysDir)).toEqual([]);
     }, 25_000);
   }
+
+  test("an invalid id with --include-key is refused before reading its planted key", async () => {
+    const agentId = "bad/id";
+    const keysDir = join(scratch, "include-key-keys");
+    const keyPath = join(keysDir, `${agentId}.key`);
+    const keyReadLog = join(scratch, "key-reads.log");
+    mkdirSync(dirname(keyPath), { recursive: true });
+    writeFileSync(keyPath, "planted-key-material");
+    writeFileSync(keyReadLog, "");
+    const { stderr, code, paths } = await runCli(
+      ["export", agentId, "--include-key", "--url", URL, "--admin-pass", "test-pass-3136", "--keys-dir", keysDir],
+      { MOCK_AGENT_STATUS: "200", MOCK_AGENT_ID: agentId, MOCK_KEY_READ_PATH: keyPath, MOCK_KEY_READ_LOG: keyReadLog }, scratch,
+    );
+    expect(code).toBe(1);
+    expect(stderr).toContain(invalidAgentIdMessage(agentId));
+    expect(readFileSync(keyReadLog, "utf8")).toBe("");
+    expect(paths).toEqual([]);
+  }, 25_000);
 });
 
 describe("flair export: default output stays inside the exports directory (#3136)", () => {

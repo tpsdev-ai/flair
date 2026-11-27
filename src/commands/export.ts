@@ -66,7 +66,7 @@ function defaultExportClockMs(): number {
   return Number.isFinite(parsed) ? parsed : Date.now();
 }
 
-/** Create `outputPath` exclusively at `mode`, write `content`, fsync and close.
+/** Create `outputPath` exclusively at requested `mode` and write `content`.
  *  An existing path — file, symlink or anything else — is refused and nothing
  *  is written. */
 function writeDefaultExport(outputPath: string, content: string, mode: number): void {
