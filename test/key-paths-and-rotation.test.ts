@@ -608,6 +608,7 @@ describe("agent rotate-key (real command, POSIX)", () => {
 
     expect(result.code).toBe(0);
     if (process.platform !== "win32") expect(result.stdout).toContain("has group or world permission bits and is being replaced");
+    expect(result.stdout).toContain("Public key updated in Flair ✓");
     expect(observedModes.length).toBeGreaterThanOrEqual(2);
     if (process.platform !== "win32") expect(observedModes.every((mode) => mode === 0o600)).toBe(true);
     expect(Number(statSync(privPath).ino)).toBe(stagedInode);
@@ -675,6 +676,7 @@ describe("agent rotate-key (real command, POSIX)", () => {
     expect(staged.length).toBe(1);
     if (process.platform !== "win32") expect(modeOf(staged[0])).toBe(0o600);
     expect(result.stderr).toContain("does not match the new key");
+    expect(result.stdout).not.toContain("Public key updated in Flair");
   });
 
   it("(e) a failed rename keeps the staged key and its public key is the one Flair stored", async () => {
@@ -906,5 +908,77 @@ describe("agent rotate-key (real command, POSIX)", () => {
     expect(stagedOf(keysDir)).toEqual([]);
     expect(requestCount).toBe(0);
   });
+
+  it("releases the lock when the update fails and the process exits 1, so the next rotation succeeds", async () => {
+    const oldSeed = seedCurrentKey();
+    const lockPath = join(keysDir, `${id}.rotate-key.lock`);
+    const cliPath = join(import.meta.dirname, "..", "src", "cli.ts");
+    const childEnv: Record<string, string> = { ...process.env } as Record<string, string>;
+    for (const key of ["FLAIR_ADMIN_PASS", "FLAIR_AGENT_ID", "FLAIR_TOKEN", "HDB_ADMIN_PASSWORD", "FLAIR_KEY_DIR", "FLAIR_TEST_ROTATE_KEY_PAUSE"]) delete childEnv[key];
+    childEnv.HOME = tmpDir;
+    // No server on this port: the update request fails and the action calls
+    // process.exit(1), where `finally` does not run.
+    const proc = Bun.spawn([
+      "bun", cliPath, "agent", "rotate-key", id,
+      "--ops-port", "11901", "--port", "11902",
+      "--admin-pass", "throwaway-admin-pass-not-a-secret", "--admin-user", "admin",
+      "--keys-dir", keysDir,
+    ], { env: childEnv, stdout: "pipe", stderr: "pipe", timeout: 60_000 });
+    const stderr = await new Response(proc.stderr).text();
+    const code = await proc.exited;
+
+    expect(code, stderr.slice(0, 500)).toBe(1);
+    expect(stderr).toContain("the update request failed");
+    expect(existsSync(lockPath)).toBe(false);
+    expect(readFileSync(privPath).equals(oldSeed)).toBe(true);
+
+    // The failed run staged a key; remove this run's own leftover so the
+    // fixture's one-staged-file expectation holds for the next rotation.
+    for (const staged of stagedOf(keysDir)) rmSync(staged);
+    const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
+    expect(result.code, result.stderr.slice(0, 500)).toBe(0);
+    expect(publicKeyOfSeed(readFileSync(privPath))).toBe(storedPublicKey);
+    expect(existsSync(lockPath)).toBe(false);
+  }, 90_000);
+
+  it("refuses a lock left by a dead run, naming the lock file and touching no key", async () => {
+    const oldSeed = seedCurrentKey();
+    const lockPath = join(keysDir, `${id}.rotate-key.lock`);
+    writeFileSync(lockPath, `999999 ${new Date().toISOString()} host-a\n`);
+    const before = readFileSync(privPath);
+
+    const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(lockPath);
+    expect(result.stderr).toMatch(/Remove .* only once no rotation of that agent is running\./);
+    expect(readFileSync(privPath).equals(before)).toBe(true);
+    expect(readFileSync(privPath).equals(oldSeed)).toBe(true);
+    expect(stagedOf(keysDir)).toEqual([]);
+    expect(backupsOf(keysDir, id)).toEqual([]);
+    expect(requestCount).toBe(0);
+    // A leftover lock is never reclaimed.
+    expect(existsSync(lockPath)).toBe(true);
+  }, 20_000);
+
+  it("with an existing lock, a rotation reads no key and sends no request", async () => {
+    const oldSeed = seedCurrentKey();
+    const lockPath = join(keysDir, `${id}.rotate-key.lock`);
+    writeFileSync(lockPath, `999999 ${new Date().toISOString()} host-a\n`);
+    let keyRead = false;
+    setAgentKeyFileTestHooks({ beforeKeyRead: () => { keyRead = true; } });
+
+    const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("an existing lock");
+    expect(result.stderr).toContain(lockPath);
+    expect(keyRead).toBe(false);
+    expect(requestCount).toBe(0);
+    expect(readFileSync(privPath).equals(oldSeed)).toBe(true);
+    expect(stagedOf(keysDir)).toEqual([]);
+    expect(backupsOf(keysDir, id)).toEqual([]);
+    expect(existsSync(lockPath)).toBe(true);
+  }, 20_000);
 
 });
