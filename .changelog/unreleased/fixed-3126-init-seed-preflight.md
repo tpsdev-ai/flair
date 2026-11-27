@@ -1,0 +1,1 @@
+- **Remote init checks the using-flair skill seed before its first write, so a refused seed leaves no role, user or Agent behind.**
