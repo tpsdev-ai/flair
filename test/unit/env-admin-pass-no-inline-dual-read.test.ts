@@ -2,15 +2,19 @@
  * env-admin-pass-no-inline-dual-read.test.ts — Issue #3093.
  *
  * Asserts that ambient admin password reads in src/ use the shared envAdminPass()
- * helper, walking the TypeScript AST of each file and counting every
- * process.env.FLAIR_ADMIN_PASS and process.env.HDB_ADMIN_PASSWORD property access
- * and process.env["..."] string-literal element access, however formatted.
+ * helper, walking the TypeScript AST of each file and counting property access
+ * and string-literal element access on process.env naming either variable
+ * (FLAIR_ADMIN_PASS or HDB_ADMIN_PASSWORD), through parentheses and type
+ * assertions (as, satisfies, <Type>, !).
  *
- * The scanner pins how many ambient reads each file has and which expressions
- * they are, but not where in the file they sit (moving an allowed read into a
- * different function of the same file would still pass). It requires the total
- * AST reads in each file to equal the sum of that file's allowed counts, and each
- * allowed expression to occur exactly its listed number of times.
+ * Other forms (destructuring process.env, an alias such as const env = process.env,
+ * or a computed key that is not a literal) are not counted.
+ *
+ * The scanner pins how many ambient reads each file has and requires each AST
+ * read to be authorized by an allowlist entry matching its AST construct; comments
+ * never authorize a read. It requires the total AST reads in each file to equal
+ * the sum of that file's allowed read counts, and each allowlist entry to authorize
+ * exactly its expected number of AST reads.
  *
  * Each exception names the exact expression it allows, how many times it may
  * appear in that file, how many AST reads it accounts for, and its rationale:
@@ -84,7 +88,7 @@ export const ALLOWED_READS: AllowedRead[] = [
   },
   {
     file: "lib/auth-resolve.ts",
-    pattern: /:\s*process\.env\.HDB_ADMIN_PASSWORD \? "HDB_ADMIN_PASSWORD" : undefined/,
+    pattern: /process\.env\.HDB_ADMIN_PASSWORD \? "HDB_ADMIN_PASSWORD" : undefined/,
     count: 1,
     reads: 1,
     reason: "Diagnostic recording of HDB_ADMIN_PASSWORD ambient env var in auth resolution",
@@ -122,7 +126,7 @@ export const ALLOWED_READS: AllowedRead[] = [
   },
   {
     file: "commands/init.ts",
-    pattern: /\} else if \(process\.env\.FLAIR_ADMIN_PASS\) \{/,
+    pattern: /if \(process\.env\.FLAIR_ADMIN_PASS\)/,
     count: 1,
     reads: 1,
     reason: "init branch condition intentionally checks only FLAIR_ADMIN_PASS",
@@ -136,7 +140,7 @@ export const ALLOWED_READS: AllowedRead[] = [
   },
   {
     file: "commands/init.ts",
-    pattern: /\} else if \(process\.env\.HDB_ADMIN_PASSWORD\) \{/,
+    pattern: /if \(process\.env\.HDB_ADMIN_PASSWORD\)/,
     count: 1,
     reads: 1,
     reason: "init fallback branch condition intentionally checks only HDB_ADMIN_PASSWORD",
@@ -292,16 +296,39 @@ export const ALLOWED_READS: AllowedRead[] = [
   },
 ];
 
-function isProcessEnv(node: ts.Node): boolean {
-  if (!ts.isPropertyAccessExpression(node)) return false;
+function unwrapExpression(node: ts.Expression): ts.Expression {
+  let curr: ts.Expression = node;
+  while (true) {
+    if (ts.isParenthesizedExpression(curr)) {
+      curr = curr.expression;
+    } else if (ts.isAsExpression(curr)) {
+      curr = curr.expression;
+    } else if (ts.isTypeAssertionExpression(curr)) {
+      curr = curr.expression;
+    } else if (ts.isNonNullExpression(curr)) {
+      curr = curr.expression;
+    } else if (ts.isSatisfiesExpression && ts.isSatisfiesExpression(curr)) {
+      curr = curr.expression;
+    } else {
+      break;
+    }
+  }
+  return curr;
+}
+
+function isProcessEnv(node: ts.Expression): boolean {
+  const unwrapped = unwrapExpression(node);
+  if (!ts.isPropertyAccessExpression(unwrapped)) return false;
+  const innerReceiver = unwrapExpression(unwrapped.expression);
   return (
-    ts.isIdentifier(node.expression) &&
-    node.expression.text === "process" &&
-    node.name.text === "env"
+    ts.isIdentifier(innerReceiver) &&
+    innerReceiver.text === "process" &&
+    unwrapped.name.text === "env"
   );
 }
 
 export interface AmbientReadAst {
+  node: ts.Node;
   variable: string;
   line: number;
   character: number;
@@ -318,6 +345,7 @@ export function findAmbientReadsInAst(sourceFile: ts.SourceFile): AmbientReadAst
         if (prop === "FLAIR_ADMIN_PASS" || prop === "HDB_ADMIN_PASSWORD") {
           const { line, character } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
           reads.push({
+            node,
             variable: prop,
             line: line + 1,
             character: character + 1,
@@ -328,12 +356,14 @@ export function findAmbientReadsInAst(sourceFile: ts.SourceFile): AmbientReadAst
     } else if (ts.isElementAccessExpression(node)) {
       if (isProcessEnv(node.expression)) {
         let arg: string | null = null;
-        if (ts.isStringLiteral(node.argumentExpression) || ts.isNoSubstitutionTemplateLiteral(node.argumentExpression)) {
-          arg = node.argumentExpression.text;
+        const argExpr = node.argumentExpression ? unwrapExpression(node.argumentExpression) : null;
+        if (argExpr && (ts.isStringLiteral(argExpr) || ts.isNoSubstitutionTemplateLiteral(argExpr))) {
+          arg = argExpr.text;
         }
         if (arg === "FLAIR_ADMIN_PASS" || arg === "HDB_ADMIN_PASSWORD") {
           const { line, character } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
           reads.push({
+            node,
             variable: arg,
             line: line + 1,
             character: character + 1,
@@ -347,6 +377,30 @@ export function findAmbientReadsInAst(sourceFile: ts.SourceFile): AmbientReadAst
 
   visit(sourceFile);
   return reads;
+}
+
+function matchesAstRead(read: AmbientReadAst, entry: AllowedRead, sf: ts.SourceFile): boolean {
+  if (!entry.pattern.source.includes(read.variable)) {
+    return false;
+  }
+  let curr: ts.Node | undefined = read.node;
+  while (curr && !ts.isSourceFile(curr)) {
+    if (
+      ts.isBlock(curr) ||
+      ts.isFunctionDeclaration(curr) ||
+      ts.isMethodDeclaration(curr) ||
+      ts.isFunctionExpression(curr) ||
+      ts.isArrowFunction(curr)
+    ) {
+      break;
+    }
+    const text = curr.getText(sf);
+    if (entry.pattern.test(text)) {
+      return true;
+    }
+    curr = curr.parent;
+  }
+  return false;
 }
 
 function walkTsFiles(dir: string): string[] {
@@ -377,8 +431,10 @@ export function scanFileLines(
     return [];
   }
 
-  // 1. Walk AST to count every property access and string-literal element access
-  const sf = ts.createSourceFile(relPath, content, ts.ScriptTarget.Latest, false);
+  // 1. Walk AST to find property access and string-literal element access on process.env
+  // naming either variable, through parentheses and type assertions. Other forms (destructuring,
+  // aliases, computed non-literal keys) are not counted.
+  const sf = ts.createSourceFile(relPath, content, ts.ScriptTarget.Latest, true);
   const astReads = findAmbientReadsInAst(sf);
   const totalActualReads = astReads.length;
   const totalAllowedReads = fileEntries.reduce(
@@ -395,31 +451,40 @@ export function scanFileLines(
     });
   }
 
-  // 2. Require each allowed expression to occur exactly its listed number of times
+  // 2. Authorize AST reads via allowlist entries. Exceptions authorize AST reads,
+  // not source text; comments never authorize an AST read.
+  const readsAuthorizedPerEntry = new Map<AllowedRead, number>();
   for (const entry of fileEntries) {
-    const patternWithG = new RegExp(entry.pattern.source, "g");
-    const occurrences = content.match(patternWithG)?.length || 0;
-    if (occurrences !== entry.count) {
+    readsAuthorizedPerEntry.set(entry, 0);
+  }
+
+  for (const read of astReads) {
+    const matchedEntry = fileEntries.find((entry) => matchesAstRead(read, entry, sf));
+    if (!matchedEntry) {
+      violations.push({
+        file: relPath,
+        line: read.line,
+        text: read.text,
+        message: `Unexpected ambient read outside allowlist at line ${read.line}: ${read.text}`,
+      });
+    } else {
+      readsAuthorizedPerEntry.set(
+        matchedEntry,
+        (readsAuthorizedPerEntry.get(matchedEntry) ?? 0) + 1
+      );
+    }
+  }
+
+  // 3. Verify each allowlist entry authorizes its exact expected AST read count.
+  for (const entry of fileEntries) {
+    const actualReads = readsAuthorizedPerEntry.get(entry) ?? 0;
+    const expectedReads = entry.reads ?? entry.count;
+    if (actualReads !== expectedReads) {
       violations.push({
         file: relPath,
         line: 0,
         text: entry.pattern.source,
-        message: `Allowed expression (${entry.reason}) occurred ${occurrences} time(s); expected exactly ${entry.count}.`,
-      });
-    }
-  }
-
-  // 3. Line inspection: every AST read must occur within an allowed expression
-  const lines = content.split("\n");
-  for (const read of astReads) {
-    const lineText = lines[read.line - 1] ?? "";
-    const isAllowed = fileEntries.some((entry) => entry.pattern.test(lineText));
-    if (!isAllowed) {
-      violations.push({
-        file: relPath,
-        line: read.line,
-        text: lineText.trim(),
-        message: `Unexpected ambient read outside allowlist at line ${read.line}: ${read.text}`,
+        message: `Allowed expression (${entry.reason}) authorized ${actualReads} read(s) in AST; expected exactly ${expectedReads}.`,
       });
     }
   }
@@ -428,7 +493,7 @@ export function scanFileLines(
 }
 
 describe("source scanner: envAdminPass allowlist (#3093)", () => {
-  test("pins AST ambient reads and exact expression occurrences for each file in src/", () => {
+  test("pins AST property access and string-literal element access on process.env through parentheses and type assertions", () => {
     const tsFiles = walkTsFiles(SRC_DIR);
     const violations: { file: string; line: number; text: string }[] = [];
 
@@ -439,7 +504,7 @@ describe("source scanner: envAdminPass allowlist (#3093)", () => {
     }
 
     expect(violations).toEqual([]);
-  });
+  }, 20000);
 
   describe("mutation cases", () => {
     test("a fixture with a bare read fails", () => {
@@ -567,7 +632,50 @@ describe("source scanner: envAdminPass allowlist (#3093)", () => {
       expect(mutated).not.toBe(original);
       const violations = scanFileLines("commands/agent.ts", mutated, ALLOWED_READS);
       expect(violations.length).toBeGreaterThanOrEqual(1);
-      expect(violations.some((v) => v.message?.includes("Unexpected ambient read") || v.message?.includes("occurred 1 time(s)"))).toBe(true);
+      expect(violations.some((v) => v.message?.includes("Unexpected ambient read") || v.message?.includes("occurred 1 time(s)") || v.message?.includes("authorized"))).toBe(true);
+    });
+
+    test("scanner goes red on parenthesized receiver: (process.env).FLAIR_ADMIN_PASS", () => {
+      const original = readFileSync(join(SRC_DIR, "commands", "agent.ts"), "utf-8");
+      expect(scanFileLines("commands/agent.ts", original, ALLOWED_READS)).toEqual([]);
+
+      const mutated = original.replace(
+        "opts.adminPass || envAdminPass() || \"\"",
+        "opts.adminPass || (process.env).FLAIR_ADMIN_PASS || \"\""
+      );
+      expect(mutated).not.toBe(original);
+      const violations = scanFileLines("commands/agent.ts", mutated, ALLOWED_READS);
+      expect(violations.length).toBeGreaterThanOrEqual(1);
+      expect(violations.some((v) => v.text.includes("(process.env).FLAIR_ADMIN_PASS"))).toBe(true);
+    });
+
+    test("scanner goes red on type-asserted receiver with bracket access: (process.env as NodeJS.ProcessEnv)[\"HDB_ADMIN_PASSWORD\"]", () => {
+      const original = readFileSync(join(SRC_DIR, "commands", "agent.ts"), "utf-8");
+      expect(scanFileLines("commands/agent.ts", original, ALLOWED_READS)).toEqual([]);
+
+      const mutated = original.replace(
+        "opts.adminPass || envAdminPass() || \"\"",
+        'opts.adminPass || (process.env as NodeJS.ProcessEnv)["HDB_ADMIN_PASSWORD"] || ""'
+      );
+      expect(mutated).not.toBe(original);
+      const violations = scanFileLines("commands/agent.ts", mutated, ALLOWED_READS);
+      expect(violations.length).toBeGreaterThanOrEqual(1);
+      expect(violations.some((v) => v.text.includes("HDB_ADMIN_PASSWORD"))).toBe(true);
+    });
+
+    test("replacing an allowed read with bracket access and putting old expression in same-line comment fails", () => {
+      const original = readFileSync(join(SRC_DIR, "commands", "agent.ts"), "utf-8");
+      expect(scanFileLines("commands/agent.ts", original, ALLOWED_READS)).toEqual([]);
+
+      const target = 'const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";';
+      const mutated = original.replace(
+        target,
+        'const adminPass: string = opts.adminPass ?? process.env["FLAIR_ADMIN_PASS"] ?? ""; // const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";'
+      );
+      expect(mutated).not.toBe(original);
+      const violations = scanFileLines("commands/agent.ts", mutated, ALLOWED_READS);
+      expect(violations.length).toBeGreaterThanOrEqual(1);
+      expect(violations.some((v) => v.message?.includes("Unexpected ambient read") || v.message?.includes("authorized"))).toBe(true);
     });
   });
 });
