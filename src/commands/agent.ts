@@ -49,6 +49,7 @@ import {
   stageAgentKeyFile,
   type AgentKeyFileContents,
 } from "../lib/agent-key-file.js";
+import { acquireAgentRotationLock, agentRotationTestPause } from "../lib/agent-rotation-lock.js";
 import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
 import {
   agentHomeEndpoint,
@@ -722,148 +723,166 @@ export function register(program: Command): void {
         }
         throw err;
       }
-      const currentPrivPath = privKeyPath(id, keysDir);
-      const currentPubPath = pubKeyPath(id, keysDir);
-
-      // Read before writing: POSIX uses a no-follow descriptor; Windows reads by path.
-      // A wide POSIX mode is reported; successful rotation replaces the file.
-      let current: ReturnType<typeof readAgentKeyForRotation>;
+      // flair#3151 — the lock serializes rotations of this agent that use this
+      // keys directory on a filesystem with reliable exclusive create. It is
+      // taken before the current key is read and held through the read-back
+      // check, the rename and the public-key write. A
+      // second rotation of this agent in this keys directory retries and, if the
+      // lock still exists, refuses here; a rotation in a different keys
+      // directory uses a different lock file.
+      const lockResult = acquireAgentRotationLock({ id, keysDir });
+      if (lockResult.ok === false) {
+        console.error(`Error: ${lockResult.message}`);
+        process.exit(1);
+      }
+      const rotationLock = lockResult.lock;
       try {
-        current = readAgentKeyForRotation(currentPrivPath);
-      } catch (err) {
-        if (err instanceof AgentKeyFileRefusal) {
-          console.error(`Error: ${err.message}`);
-          process.exit(1);
-        }
-        throw err;
-      }
-      if (current?.widerThanOwnerOnly) {
-        console.log(`Old key ${currentPrivPath} has group or world permission bits and is being replaced.`);
-      }
+        const currentPrivPath = privKeyPath(id, keysDir);
+        const currentPubPath = pubKeyPath(id, keysDir);
 
-      // Generate new keypair
-      console.log(`Generating new keypair for agent '${id}'...`);
-      const kp = nacl.sign.keyPair();
-      const newSeed = kp.secretKey.slice(0, 32);
-      const newPubKeyB64url = b64url(kp.publicKey);
-
-      // Back up the current key to a NEW timestamped file. An existing backup
-      // is never replaced or written into.
-      let backupPrivPath: string | undefined;
-      if (current) {
-        backupPrivPath = `${currentPrivPath}.bak.${rotationBackupStamp()}`;
+        // Read before writing: POSIX uses a no-follow descriptor; Windows reads by path.
+        // A wide POSIX mode is reported; successful rotation replaces the file.
+        let current: ReturnType<typeof readAgentKeyForRotation>;
         try {
-          createAgentKeyBackup(backupPrivPath, current.bytes);
+          current = readAgentKeyForRotation(currentPrivPath);
         } catch (err) {
-          if ((err as NodeJS.ErrnoException)?.code === "EEXIST") {
-            console.error(`Error: backup path ${backupPrivPath} already exists; move it aside and run again.`);
+          if (err instanceof AgentKeyFileRefusal) {
+            console.error(`Error: ${err.message}`);
             process.exit(1);
           }
           throw err;
         }
-        console.log(`Old key backed up to: ${backupPrivPath}`);
-      }
+        if (current?.widerThanOwnerOnly) {
+          console.log(`Old key ${currentPrivPath} has group or world permission bits and is being replaced.`);
+        }
 
-      // Stage the new private key before the update is sent. A staging failure
-      // sends nothing and leaves the current key unchanged.
-      let stagedPrivPath: string;
-      try {
-        stagedPrivPath = stageAgentKeyFile(currentPrivPath, newSeed);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(`Error: could not stage the new private key next to ${currentPrivPath}: ${message}. No update was sent; the current key is unchanged.`);
-        process.exit(1);
-      }
+        // Generate new keypair
+        console.log(`Generating new keypair for agent '${id}'...`);
+        const kp = nacl.sign.keyPair();
+        const newSeed = kp.secretKey.slice(0, 32);
+        const newPubKeyB64url = b64url(kp.publicKey);
 
-      // Update publicKey in Flair via operations API
-      console.log(`Updating public key in Flair via operations API...`);
-      const opsUrl = `http://127.0.0.1:${opsPort}/`;
-      const auth = Buffer.from(`${adminUser}:${adminPass}`).toString("base64");
-      const updateBody = {
-        operation: "update",
-        database: "flair",
-        table: "Agent",
-        records: [{ id, publicKey: newPubKeyB64url, updatedAt: new Date().toISOString() }],
-      };
-      let updateRes: Response;
-      try {
-        updateRes = await fetch(opsUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
-          body: JSON.stringify(updateBody),
-          signal: AbortSignal.timeout(10_000),
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(rotationStagedKeyMessage(id, stagedPrivPath, currentPrivPath, `the update request failed (${message}).`));
-        process.exit(1);
-      }
-      if (!updateRes.ok) {
-        const text = await updateRes.text().catch(() => "");
-        console.error(
-          rotationStagedKeyMessage(id, stagedPrivPath, currentPrivPath, `Flair refused the update (${updateRes.status}): ${text}`),
-        );
-        process.exit(1);
-      }
-      console.log(`Public key updated in Flair ✓`);
+        // Back up the current key to a NEW timestamped file. An existing backup
+        // is never replaced or written into.
+        let backupPrivPath: string | undefined;
+        if (current) {
+          backupPrivPath = `${currentPrivPath}.bak.${rotationBackupStamp()}`;
+          try {
+            createAgentKeyBackup(backupPrivPath, current.bytes);
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException)?.code === "EEXIST") {
+              console.error(`Error: backup path ${backupPrivPath} already exists; move it aside and run again.`);
+              process.exit(1);
+            }
+            throw err;
+          }
+          console.log(`Old key backed up to: ${backupPrivPath}`);
+        }
 
-      // A 2xx that changed no row is a failure: require the stored public key
-      // to match the staged key before the rename.
-      const readback = await readAgentPublicKeyAfterUpdate(opsPort, id, adminUser, adminPass);
-      if (readback.ok === false) {
-        console.error(
-          rotationStagedKeyMessage(id, stagedPrivPath, currentPrivPath, `the update was sent, but reading the Agent row back failed: ${readback.reason}.`),
-        );
-        process.exit(1);
-      }
-      if (readback.publicKey !== newPubKeyB64url) {
-        console.error(
-          rotationStagedKeyMessage(id, stagedPrivPath, currentPrivPath, "the update was sent, but the Agent row's public key does not match the new key."),
-        );
-        process.exit(1);
-      }
+        // Stage the new private key before the update is sent. A staging failure
+        // sends nothing and leaves the current key unchanged.
+        let stagedPrivPath: string;
+        try {
+          stagedPrivPath = stageAgentKeyFile(currentPrivPath, newSeed);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.error(`Error: could not stage the new private key next to ${currentPrivPath}: ${message}. No update was sent; the current key is unchanged.`);
+          process.exit(1);
+        }
 
-      // Replace the current key by rename. A failed rename keeps the staged file.
-      try {
-        replaceAgentKeyFile(currentPrivPath, stagedPrivPath);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(
-          rotationStagedKeyMessage(id, stagedPrivPath, currentPrivPath, `the update was verified, but replacing ${currentPrivPath} failed (${message}).`),
-        );
-        process.exit(1);
-      }
+        // Update publicKey in Flair via operations API
+        console.log(`Updating public key in Flair via operations API...`);
+        const opsUrl = `http://127.0.0.1:${opsPort}/`;
+        const auth = Buffer.from(`${adminUser}:${adminPass}`).toString("base64");
+        const updateBody = {
+          operation: "update",
+          database: "flair",
+          table: "Agent",
+          records: [{ id, publicKey: newPubKeyB64url, updatedAt: new Date().toISOString() }],
+        };
+        let updateRes: Response;
+        try {
+          updateRes = await fetch(opsUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
+            body: JSON.stringify(updateBody),
+            signal: AbortSignal.timeout(10_000),
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.error(rotationStagedKeyMessage(id, stagedPrivPath, currentPrivPath, `the update request failed (${message}).`));
+          process.exit(1);
+        }
+        if (!updateRes.ok) {
+          const text = await updateRes.text().catch(() => "");
+          console.error(
+            rotationStagedKeyMessage(id, stagedPrivPath, currentPrivPath, `Flair refused the update (${updateRes.status}): ${text}`),
+          );
+          process.exit(1);
+        }
+        // A 2xx that changed no row is a failure: require the stored public key
+        // to match the staged key before the rename.
+        const readback = await readAgentPublicKeyAfterUpdate(opsPort, id, adminUser, adminPass);
+        if (readback.ok === false) {
+          console.error(
+            rotationStagedKeyMessage(id, stagedPrivPath, currentPrivPath, `the update was sent, but reading the Agent row back failed: ${readback.reason}.`),
+          );
+          process.exit(1);
+        }
+        if (readback.publicKey !== newPubKeyB64url) {
+          console.error(
+            rotationStagedKeyMessage(id, stagedPrivPath, currentPrivPath, "the update was sent, but the Agent row's public key does not match the new key."),
+          );
+          process.exit(1);
+        }
+        console.log(`Public key updated in Flair ✓`);
 
-      try {
-        writeFileSync(currentPubPath, Buffer.from(kp.publicKey));
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(rotationReplacedKeyMessage(currentPrivPath, `writing the public key to ${currentPubPath} failed (${message}).`, backupPrivPath));
-        process.exit(1);
-      }
-      console.log(`New private key written: ${currentPrivPath} ✓`);
+        // Replace the current key by rename. A failed rename keeps the staged file.
+        try {
+          replaceAgentKeyFile(currentPrivPath, stagedPrivPath);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.error(
+            rotationStagedKeyMessage(id, stagedPrivPath, currentPrivPath, `the update was verified, but replacing ${currentPrivPath} failed (${message}).`),
+          );
+          process.exit(1);
+        }
 
-      // Verify new key works
-      console.log(`Verifying new Ed25519 auth...`);
-      const httpUrl = `http://127.0.0.1:${httpPort}`;
-      let verifyRes: Response;
-      try {
-        verifyRes = await authFetch(httpUrl, id, currentPrivPath, "GET", `/Agent/${encodeRecordId(id)}`);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(rotationReplacedKeyMessage(currentPrivPath, `the new key's auth verification failed (${message}).`, backupPrivPath));
-        process.exit(1);
-      }
-      if (!verifyRes.ok) {
-        console.error(rotationReplacedKeyMessage(currentPrivPath, `the new key's auth verification failed (${verifyRes.status}).`, backupPrivPath));
-        process.exit(1);
-      }
-      console.log(`Ed25519 auth verified ✓`);
+        try {
+          writeFileSync(currentPubPath, Buffer.from(kp.publicKey));
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.error(rotationReplacedKeyMessage(currentPrivPath, `writing the public key to ${currentPubPath} failed (${message}).`, backupPrivPath));
+          process.exit(1);
+        }
+        console.log(`New private key written: ${currentPrivPath} ✓`);
 
-      console.log(`\n✅ Key rotation complete for agent '${id}'`);
-      console.log(`   New public key: ${newPubKeyB64url}`);
-      console.log(`   Private key:    ${currentPrivPath}`);
-      if (backupPrivPath) console.log(`   Old key backup: ${backupPrivPath}`);
+        await agentRotationTestPause();
+
+        // Verify new key works
+        console.log(`Verifying new Ed25519 auth...`);
+        const httpUrl = `http://127.0.0.1:${httpPort}`;
+        let verifyRes: Response;
+        try {
+          verifyRes = await authFetch(httpUrl, id, currentPrivPath, "GET", `/Agent/${encodeRecordId(id)}`);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.error(rotationReplacedKeyMessage(currentPrivPath, `the new key's auth verification failed (${message}).`, backupPrivPath));
+          process.exit(1);
+        }
+        if (!verifyRes.ok) {
+          console.error(rotationReplacedKeyMessage(currentPrivPath, `the new key's auth verification failed (${verifyRes.status}).`, backupPrivPath));
+          process.exit(1);
+        }
+        console.log(`Ed25519 auth verified ✓`);
+
+        console.log(`\n✅ Key rotation complete for agent '${id}'`);
+        console.log(`   New public key: ${newPubKeyB64url}`);
+        console.log(`   Private key:    ${currentPrivPath}`);
+        if (backupPrivPath) console.log(`   Old key backup: ${backupPrivPath}`);
+      } finally {
+        rotationLock.release();
+      }
     });
 
   // ─── flair agent remove ──────────────────────────────────────────────────────
