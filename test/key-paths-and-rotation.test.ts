@@ -358,10 +358,17 @@ describe("agent rotate-key (real command, POSIX)", () => {
       syncKeysDir: (fd) => {
         expect(fstatSync(fd).isDirectory()).toBe(true);
         if (++syncs === 1) {
+          // The existing keys directory's parent is synced before staging.
+          const actual = fstatSync(fd);
+          const parent = statSync(fs.realpathSync(dirname(keysDir)));
+          expect([actual.dev, actual.ino]).toEqual([parent.dev, parent.ino]);
+          expect(stagedOf(keysDir)).toHaveLength(0);
+          rotationEvents.push("ensure parent sync");
+        } else if (syncs === 2) {
           expect(stagedOf(keysDir)).toHaveLength(1);
           expect(readFileSync(privPath).equals(oldSeed)).toBe(true);
           rotationEvents.push("staged sync");
-        } else if (syncs === 2) {
+        } else if (syncs === 3) {
           const actual = fstatSync(fd);
           const parent = statSync(fs.realpathSync(dirname(keysDir)));
           expect([actual.dev, actual.ino]).toEqual([parent.dev, parent.ino]);
@@ -381,8 +388,8 @@ describe("agent rotate-key (real command, POSIX)", () => {
     const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
 
     expect(result.code).toBe(0);
-    expect(syncs).toBe(3);
-    expect(rotationEvents).toEqual(["staged sync", "parent sync", "update", "rename", "installed sync"]);
+    expect(syncs).toBe(4);
+    expect(rotationEvents).toEqual(["ensure parent sync", "staged sync", "parent sync", "update", "rename", "installed sync"]);
   });
 
   for (const missing of [1, 3, "dotdot"] as const) {
@@ -471,13 +478,14 @@ describe("agent rotate-key (real command, POSIX)", () => {
     mkdirSync(keysDir);
     privPath = join(keysDir, `${id}.key`);
     seedCurrentKey();
-    const directories = [keysDir, fs.realpathSync(target), keysDir];
+    const directories = [fs.realpathSync(target), keysDir, fs.realpathSync(target), keysDir];
     let syncs = 0;
     setAgentKeyFileTestHooks({ syncKeysDir: (fd) => {
       const actual = fstatSync(fd);
       const expected = statSync(directories[syncs]);
       expect([actual.dev, actual.ino]).toEqual([expected.dev, expected.ino]);
-      expect(updateBodies).toHaveLength(syncs < 2 ? 0 : 1);
+      // The first three syncs complete before the update is sent.
+      expect(updateBodies).toHaveLength(syncs < 3 ? 0 : 1);
       rotationEvents.push(`sync ${++syncs}`);
       fs.fsyncSync(fd);
     } });
@@ -485,29 +493,29 @@ describe("agent rotate-key (real command, POSIX)", () => {
     const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
 
     expect(result.code).toBe(0);
-    expect(syncs).toBe(3);
-    expect(rotationEvents).toEqual(["sync 1", "sync 2", "update", "sync 3"]);
+    expect(syncs).toBe(4);
+    expect(rotationEvents).toEqual(["sync 1", "sync 2", "sync 3", "update", "sync 4"]);
   });
 
   it.skipIf(process.platform === "win32")("refuses a pre-existing keys directory's failed parent sync before the update", async () => {
     const oldSeed = seedCurrentKey();
     let syncs = 0;
     setAgentKeyFileTestHooks({ syncKeysDir: (fd) => {
-      if (++syncs === 2) throw new Error("retry parent sync fixture failure");
-      fs.fsyncSync(fd);
+      syncs += 1;
+      throw new Error("parent sync fixture failure");
     } });
 
     const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
 
     expect(result.code).toBe(1);
-    expect(syncs).toBe(2);
+    expect(syncs).toBe(1);
     expect(requestCount).toBe(0);
     expect(updateBodies).toHaveLength(0);
     expect(readFileSync(privPath).equals(oldSeed)).toBe(true);
     expect(stagedOf(keysDir)).toEqual([]);
     expect(result.stderr).toContain(`flair could not sync parent directory ${fs.realpathSync(tmpDir)}`);
-    expect(result.stderr).toContain("No update was sent; the current key is unchanged");
-    expect(result.stderr).toContain("check the directory and filesystem, then retry rotation");
+    expect(result.stderr).toContain(`keys directory ${keysDir} is not confirmed durable`);
+    expect(result.stderr).toContain("check the directory and filesystem, then retry");
   });
 
   it.skipIf(process.platform === "win32")("refuses a failed created-directory parent sync before sending an update", async () => {
@@ -537,15 +545,19 @@ describe("agent rotate-key (real command, POSIX)", () => {
   it.skipIf(process.platform === "win32")("refuses a failed staging directory sync before sending an update", async () => {
     const oldSeed = seedCurrentKey();
     let syncs = 0;
-    setAgentKeyFileTestHooks({ syncKeysDir: () => {
-      syncs += 1;
+    setAgentKeyFileTestHooks({ syncKeysDir: (fd) => {
+      if (++syncs === 1) {
+        // The existing keys directory's parent sync succeeds first.
+        fs.fsyncSync(fd);
+        return;
+      }
       throw new Error("directory sync fixture failure");
     } });
 
     const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
 
     expect(result.code).toBe(1);
-    expect(syncs).toBe(1);
+    expect(syncs).toBe(2);
     expect(requestCount).toBe(0);
     expect(updateBodies).toHaveLength(0);
     expect(readFileSync(privPath).equals(oldSeed)).toBe(true);
@@ -559,14 +571,14 @@ describe("agent rotate-key (real command, POSIX)", () => {
     seedCurrentKey();
     let syncs = 0;
     setAgentKeyFileTestHooks({ syncKeysDir: (fd) => {
-      if (++syncs === 3) throw new Error("installed directory sync fixture failure");
+      if (++syncs === 4) throw new Error("installed directory sync fixture failure");
       fs.fsyncSync(fd);
     } });
 
     const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
 
     expect(result.code).toBe(0);
-    expect(syncs).toBe(3);
+    expect(syncs).toBe(4);
     expect(publicKeyOfSeed(readFileSync(privPath))).toBe(storedPublicKey);
     expect(stagedOf(keysDir)).toEqual([]);
     expect(result.stderr).toContain(`Warning: flair could not sync keys directory ${keysDir}`);
