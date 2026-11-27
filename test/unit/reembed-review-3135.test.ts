@@ -108,7 +108,7 @@ test("ckMU dry-run counts with an unavailable listener table without HTTP admin 
   expect(requests.filter(request => request.port === "18726" && request.auth !== null)).toEqual([]);
 });
 
-for (const agent of [undefined, "owner' $HOME; `false`", "owner\ncontinued"]) {
+for (const agent of [undefined] as Array<string | undefined>) {
   test(`ckMo retry preserves ports and agent ${JSON.stringify(agent)}`, async () => {
     const { logs } = await run({ agent });
     const reason = logs.find(line => line.includes("row(s)"))!;
@@ -124,6 +124,12 @@ for (const agent of [undefined, "owner' $HOME; `false`", "owner\ncontinued"]) {
     }
   }, 10_000);
 }
+
+test("ckMo an invalid agent id is refused before a key path or request (#3136)", async () => {
+  for (const agent of ["owner' $HOME; `false`", "owner\ncontinued"]) {
+    await expect(run({ agent })).rejects.toThrow("EXIT:1");
+  }
+}, 10_000);
 
 test("ckMo retry retains HTTP port 80", async () => {
   const { logs, requests } = await run({ agent: "owner", httpPort: 80 });

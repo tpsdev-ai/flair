@@ -17,7 +17,7 @@ import { ALL_CLIENTS, decideCodexPinOnly, decideJsonPinOnly, detectClients, type
 import { checkGlobalBinOnPath, resolveNpmGlobalPrefix } from "../install/global-bin-path.js";
 import { buildEd25519Auth, defaultAdminPassPath, defaultKeysDir, requestTarget, requestUrl, resolveAdminUser, resolveKeyPath, resolveLocalAdminPass } from "../lib/auth-resolve.js";
 import { proveLocalHarperListener, type LocalInstancePairProof } from "../lib/local-instance-pair.js";
-import { AGENT_ID_RULE } from "../lib/agent-id-rule.js";
+import { AGENT_ID_RULE, isValidAgentId } from "../lib/agent-id-rule.js";
 import { agentHomeEndpoint, readAgentHomeRows, resolveTargetInstanceIdentity } from "../lib/agent-home.js";
 import { describeInstructionEventImpostors, readInstructionEventTables } from "../lib/instruction-event-doctor.js";
 import { describeLiveSkillTombstones, readSkillTombstoneTables } from "../lib/skill-tombstone-doctor.js";
@@ -31,7 +31,7 @@ import { describeEmbedGpuDoctorFinding } from "../lib/embed-gpu-doctor.js";
 import { describeEmbeddingSpaceDoctorFinding } from "../lib/embedding-space-doctor.js";
 import { adminPassDesyncFinding, detectPersistedAdminUser } from "../lib/init-admin-pass.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
-import { formatKeyModeFinding, keyModesUnsupported, KEY_MODES_UNSUPPORTED_MESSAGE, scanAgentKeyModes, scanKeyDir, sameKeyDir } from "../lib/key-dir.js";
+import { agentKeyPath, formatKeyModeFinding, keyModesUnsupported, KEY_MODES_UNSUPPORTED_MESSAGE, scanAgentKeyModes, scanKeyDir, sameKeyDir } from "../lib/key-dir.js";
 import {
   instanceIdentityLines,
   probeInstanceIdentity,
@@ -582,6 +582,15 @@ program
   .option("--dry-run", "Show what --fix would do without making changes")
   .action(async (opts) => {
     signedOnlyTransport = false; // flair#2526: decided per run, below
+    const namedAgentId = opts.agent ?? (process.env.FLAIR_AGENT_ID || undefined);
+    if (namedAgentId !== undefined) {
+      try {
+        agentKeyPath(defaultKeysDir(), namedAgentId);
+      } catch (err) {
+        console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+    }
     const port = resolveHttpPort(opts);
     const autoFix = opts.fix ?? false;
     const dryRun = opts.dryRun ?? false;
@@ -988,7 +997,7 @@ program
           keyFiles.map((f: string) => f.replace(/\.key$/, "")),
           keysDir,
         );
-        keyAgentIds = partitioned.agentKeyIds;
+        keyAgentIds = partitioned.agentKeyIds.filter((id) => isValidAgentId(id));
         nodeKeyIds = partitioned.nodeKeyIds;
         if (keyAgentIds.length > 0) {
           console.log(`  ${render.icons.ok} Keys found: ${render.wrap(render.c.bold, String(keyAgentIds.length))} agent(s) in ${render.wrap(render.c.dim, keysDir)}`);
@@ -2360,7 +2369,7 @@ program
         for (const gate of agentGates) {
           const registered = renderAgentGateHeader(gate);
           if (!registered) continue;
-          const keyPath = resolveKeyPath(gate.id) ?? join(defaultKeysDir(), `${gate.id}.key`);
+          const keyPath = resolveKeyPath(gate.id) ?? agentKeyPath(defaultKeysDir(), gate.id);
           const headers: Record<string, string> = { Authorization: buildEd25519Auth(gate.id, "GET", requestTarget(presenceUrl), keyPath) };
           await fetchAndRenderFleetPresence(headers, true, "      ");
         }
@@ -2596,7 +2605,7 @@ program
         const passedGates = agentGates.filter((g) => describeAgentGateFinding(g.id, g.state, g.detail, { instanceReachable: harperResponding }) === null);
         for (const gate of passedGates) {
           renderAgentGateHeader(gate);
-          const keyPath = resolveKeyPath(gate.id) ?? join(defaultKeysDir(), `${gate.id}.key`);
+          const keyPath = resolveKeyPath(gate.id) ?? agentKeyPath(defaultKeysDir(), gate.id);
           const headers: Record<string, string> = { Authorization: buildEd25519Auth(gate.id, "GET", requestTarget(healthDetailUrl), keyPath) };
           issues += await fetchAndRenderMigrations(healthDetailUrl, headers, "      ");
         }

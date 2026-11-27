@@ -12,6 +12,7 @@
 import { closeSync, constants, existsSync, fstatSync, linkSync, mkdirSync, openSync, readFileSync, unlinkSync, type Stats } from "node:fs";
 import { join } from "node:path";
 import { resolveHome } from "./lib/home.js";
+import { agentKeyPath } from "./lib/key-dir.js";
 import { writeFilesAtomically } from "./lib/atomic-write.js";
 import {
   randomBytes,
@@ -44,7 +45,7 @@ function keysDir(): string {
 function keyPath(instanceId: string): string {
   // Sanitize instanceId to prevent directory traversal
   const safe = instanceId.replace(/[^a-zA-Z0-9_-]/g, "_");
-  return join(keysDir(), `${safe}.key`);
+  return agentKeyPath(keysDir(), safe);
 }
 
 /**

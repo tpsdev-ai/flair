@@ -3,14 +3,12 @@
  *
  * `publishOrgEvent` signs the final request target, including a base URL path
  * prefix. The signature must cover the SAME pathname and query that are sent,
- * and that path must carry the id as one encoded segment — otherwise an id with
- * reserved URL characters signs one path and requests another.
+ * and that path must carry the id as one encoded segment.
  *
  * A real Ed25519 key and a real signature check prove it: the test captures the
  * request, recomputes `agentId:ts:nonce:PUT:<path>` from the request's own
  * Authorization header and the path it received, and verifies it with the
- * public key. The agent id carries `#`, `?`, and `%` so the encoded and raw
- * spellings differ while the id still satisfies the server auth-header grammar.
+ * public key. The id satisfies the shared agent-ID rule (flair#3136).
  */
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -21,7 +19,7 @@ import { publishOrgEvent } from "../../src/commands/orgevent.js";
 import { authFetch, authedRequest } from "../../src/lib/auth-resolve.js";
 import { encodeRecordId } from "../../src/lib/record-id-path.js";
 
-const AGENT = "org-agent#1?%x"; // no ":" or whitespace: accepted by TPS_ED25519_HEADER_RE
+const AGENT = "org-agent-1"; // satisfies the shared agent-ID rule
 const BASE = "http://example.test";
 
 const realFetch = globalThis.fetch;

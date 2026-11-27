@@ -7,6 +7,7 @@
  */
 import { existsSync, lstatSync, readdirSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { invalidAgentIdMessage, isValidAgentId } from "./agent-id-rule.js";
 import { resolveHome } from "./home.js";
 
 export type KeyDirEntryKind = "dir" | "other" | "key";
@@ -63,8 +64,34 @@ export function agentKeyLocations(): KeyLocation[] {
   return locations;
 }
 
+/** A refusal for an agent id that cannot name a key file: the id is checked
+ *  before any path is built. Callers map it to their own error style. */
+export class AgentKeyPathRefusal extends Error {
+  readonly code = "invalid_agent_id" as const;
+  /** The CLI prints the message alone and exits 1 when a command lets it propagate. */
+  readonly flairFriendly = true;
+  constructor(message: string) {
+    super(message);
+    this.name = "AgentKeyPathRefusal";
+  }
+}
+
+function requireAgentId(agentId: string): void {
+  if (!isValidAgentId(agentId)) throw new AgentKeyPathRefusal(invalidAgentIdMessage(agentId));
+}
+
+/**
+ * The private-key path for `agentId`; the shared agent-ID rule runs before
+ * the join.
+ */
+export function agentKeyPath(keysDir: string, agentId: string): string {
+  requireAgentId(agentId);
+  return join(keysDir, `${agentId}.key`);
+}
+
 /** The path signing reads for `agentId` in `location`. */
 export function keyPathIn(location: KeyLocation, agentId: string): string {
+  requireAgentId(agentId);
   return join(location.dir, `${agentId}${location.suffix}`);
 }
 

@@ -70,12 +70,12 @@ import {
   statSync,
 } from "node:fs";
 
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { Option, type Command } from "commander";
 import { createPrivateKey, randomUUID, sign as nodeCryptoSign } from "node:crypto";
 import type { SigningIdentitySource } from "./signing-identity.js";
 import { resolveHome } from "./home.js";
-import { agentKeyLocations, defaultKeysDir, keyPathIn } from "./key-dir.js";
+import { agentKeyLocations, agentKeyPath, defaultKeysDir, keyPathIn } from "./key-dir.js";
 import { isConnectPhaseFailure } from "./connect-phase.js";
 
 export { isConnectPhaseFailure, REFUSED_CODES } from "./connect-phase.js";
@@ -1363,9 +1363,10 @@ export interface SignedOnlyHintContext {
 function noCredentialsHint(isLocal: boolean, signedOnly: SignedOnlyHintContext | undefined): string {
   if (signedOnly) {
     // No admin password leaves a signedOnly request, so only an agent key helps.
-    const remedy = signedOnly.agentId
-      ? `Provide the key of agent '${signedOnly.agentId}' at ${join(defaultKeysDir(), `${signedOnly.agentId}.key`)} ` +
-        `(or set FLAIR_KEY_DIR to a directory containing ${signedOnly.agentId}.key).`
+    const keyPath = signedOnly.agentId ? agentKeyPath(defaultKeysDir(), signedOnly.agentId) : null;
+    const remedy = keyPath
+      ? `Provide the key of agent '${signedOnly.agentId}' at ${keyPath} ` +
+        `(or set FLAIR_KEY_DIR to a directory containing ${basename(keyPath)}).`
       : `Provide the key of an agent registered on the target instance at ${join(signedOnly.keysDir, "<agent-id>.key")}.`;
     return `This request can send only an Ed25519 agent signature; the admin password is not sent on this path. ${remedy}`;
   }
@@ -1877,7 +1878,7 @@ export async function authedRequest(
     if (!keyPath) {
       throw new Error(
         `--agent '${opts.agentId}' has no signing key. Expected a key at ` +
-        `${join(defaultKeysDir(), `${opts.agentId}.key`)} (or set FLAIR_KEY_DIR ` +
+        `${agentKeyPath(defaultKeysDir(), opts.agentId)} (or set FLAIR_KEY_DIR ` +
         `to a directory containing it). Refusing to fall back to FLAIR_ADMIN_PASS ` +
         `or the local admin-pass file.`
       );

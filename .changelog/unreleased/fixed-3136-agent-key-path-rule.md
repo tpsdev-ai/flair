@@ -1,0 +1,1 @@
+- **Every CLI agent key path applies the shared agent-ID rule before it is built.** An id outside the rule is refused with the shared message before any key file is opened or request is sent, including commands that only read or sign with a key.

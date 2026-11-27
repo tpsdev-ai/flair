@@ -54,6 +54,7 @@ import {
 } from "../lib/mcp-enable.js";
 import { resolveHome } from "../lib/home.js";
 import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
+import { AgentKeyPathRefusal } from "../lib/key-dir.js";
 import { agentHomeEndpoint, resolveTargetInstanceId } from "../lib/agent-home.js";
 import { createAgentKeyFile, ensureAgentKeysDir, type KeyFileIdentity } from "../lib/agent-key-file.js";
 
@@ -624,7 +625,16 @@ export function register(program: Command): void {
     .option("--json", "Print machine-readable JSON instead of a human summary")
     .action(async (opts) => {
       const agentId: string = opts.agentId;
-      const keyPath = resolveAgentKeyPath(agentId, opts.keysDir);
+      let keyPath: string | null;
+      try {
+        keyPath = resolveAgentKeyPath(agentId, opts.keysDir);
+      } catch (err) {
+        if (err instanceof AgentKeyPathRefusal) {
+          console.error(`Error: ${err.message}`);
+          process.exit(1);
+        }
+        throw err;
+      }
       if (!keyPath) {
         console.error(
           `Error: no private key found for agent '${agentId}'. Checked --keys-dir, FLAIR_KEY_DIR, ` +
