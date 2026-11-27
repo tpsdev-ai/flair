@@ -246,7 +246,8 @@ export function acquireAgentRotationLock(opts: AgentRotationLockOptions): AgentR
   if (kind !== "regular" && kind !== "missing") {
     return { ok: false, message: nonRegularLockRefusal(lockPath, opts.id, kind) };
   }
-  const hookFlags = kind === "regular" ? beforeHolderOpen?.(lockPath) : undefined;
+  const hookResult = kind === "regular" ? beforeHolderOpen?.(lockPath) : undefined;
+  const hookFlags = typeof hookResult === "object" ? hookResult : undefined;
   const holder = kind === "regular" ? readLockHolder(lockPath, hookFlags ?? constants) : null;
   return { ok: false, message: refusalLine(lockPath, opts.id, holder) };
 }
