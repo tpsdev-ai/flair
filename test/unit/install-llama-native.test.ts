@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { installLlamaNative, type InstallRunner } from "../../scripts/ci/install-llama-native.mjs";
-import { LOCKFILE, ROOT, readLlamaNativeVersion } from "../../scripts/ci/llama-native-version.mjs";
+import { EMBEDDINGS_PACKAGE, LOCKFILE, PLATFORM_PACKAGE, ROOT, SEMVER, readLlamaNativeVersion } from "../../scripts/ci/llama-native-version.mjs";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -138,5 +138,14 @@ describe("install-llama-native", () => {
       return { status: null, error: new Error("missing executable") };
     } })).toThrow(/install-llama-native: missing executable/);
     expect(calls).toBe(1);
+  });
+});
+
+describe("llama-native-version declared API", () => {
+  test("names its packages and reads a platform package's version from the lockfile", () => {
+    expect(EMBEDDINGS_PACKAGE).toBe("harper-fabric-embeddings");
+    expect(PLATFORM_PACKAGE.startsWith("@node-llama-cpp/")).toBe(true);
+    const version: string = readLlamaNativeVersion(readFileSync(LOCKFILE, "utf8"), PLATFORM_PACKAGE);
+    expect(SEMVER.test(version)).toBe(true);
   });
 });
