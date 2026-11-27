@@ -571,7 +571,7 @@ test.skipIf(process.platform === "win32")("a keys directory another process crea
   expect(statSync(dir).mode & 0o777).toBe(0o700);
 });
 
-test.skipIf(process.platform === "win32")("a parent sync failure after another process created the keys directory refuses with nothing registered", () => {
+test.skipIf(process.platform === "win32")("a parent sync failure after another process created the keys directory refuses before a key is written", () => {
   const dir = keysDir();
   const keyPath = join(dir, "agent-a.key");
   setAgentKeyFileTestHooks({
