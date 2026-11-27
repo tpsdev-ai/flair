@@ -2608,18 +2608,25 @@ export class Memory extends (databases as any).flair.Memory {
     // request-snapshot target read and the caller's transaction (flair#3170).
     const postInPlace = [content?.id, postUrlTargetId].some((candidate) => isReservedSeedId("Memory", candidate));
     // flair#3170: a skill POST that supersedes a target present in the request
-    // snapshot decides on that target as currently committed. A commit that
-    // lands after the request transaction opened and before this read — the
-    // previous write's embedding backfill — is seen here and again by the
+    // snapshot reads the target as committed when it still exists. A commit
+    // that lands after the request transaction opened and before this read —
+    // the previous write's embedding backfill — is seen here and again by the
     // plan, so the stale-target check compares two committed reads and the
     // retry is not refused. A change another writer commits to that target
     // after this read and before the plan is still refused; a content change
-    // with ownership unchanged answers 409 skill_target_changed. A target that
-    // reads as gone keeps the snapshot row and the plan refuses it. The body
-    // may omit `tags` and inherit the skill tag from the stored row, the
-    // source prepareSkillBody uses, so either row's tags decide whether this
-    // read applies.
-    const postStored = postSnapshot && !postInPlace && (isSkillWrite(content) || rowIsSkill(postSnapshot))
+    // with ownership unchanged answers 409 skill_target_changed. When the
+    // target is gone by this read, the snapshot row is kept and the plan
+    // refuses with 409 skill_target_changed, recreating no row and appending
+    // no InstructionVersion. The body may omit `tags` and inherit the skill
+    // tag from the stored row, the source prepareSkillBody uses, so either
+    // row's tags decide whether this read applies.
+    const postStoredRead = !!(postSnapshot && !postInPlace && (isSkillWrite(content) || rowIsSkill(postSnapshot)));
+    // Test-only: holds a skill POST after its request-snapshot read and before
+    // its committed target read, so a concurrent delete can land in between
+    // (flair#3170).
+    const committedReadPause = postStoredRead ? txnPausePoint("memory-post-committed-read") : undefined;
+    if (committedReadPause) await committedReadPause;
+    const postStored = postStoredRead && postSnapshot
       ? ((await (databases as any).flair.Memory.get(String(postSnapshot.id), {})) ?? postSnapshot)
       : postSnapshot;
     // flair#2561: the fields this request supplies that `stored` can report —

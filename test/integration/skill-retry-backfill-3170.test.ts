@@ -3,14 +3,18 @@
  * retry is not refused by the previous write's embedding backfill.
  *
  * A skill POST that supersedes a target present in the request snapshot reads
- * that target as committed, then plans under the lock. When the previous
- * write's embedding backfill commits after the retry's request transaction
- * opens and before its target read, the retry must still commit a successor; a
- * change another writer commits after that read and before the plan is still
- * refused. This file makes the ordering deterministic with two test-only pause
- * points:
+ * that target as committed when it still exists, then plans under the lock.
+ * When the previous write's embedding backfill commits after the retry's
+ * request transaction opens and before its target read, the retry must still
+ * commit a successor; a change another writer commits after that read and
+ * before the plan is still refused. A target deleted between the snapshot read
+ * and the committed read answers 409 `skill_target_changed`, with no row
+ * recreated and no InstructionVersion appended. This file makes the ordering
+ * deterministic with three test-only pause points:
  * `memory-post-target-read` holds the retry after its request transaction opened
- * and before it takes the target's lock and reads it, and
+ * and before it takes the target's lock and reads it,
+ * `memory-post-committed-read` holds it after its request-snapshot read and
+ * before its committed target read, and
  * `memory-post-skill-plan` holds it before its plan runs under the lock.
  *
  * The instance is home-isolated and ephemeral; every URL is asserted to be
@@ -30,6 +34,7 @@ import { SEED_SKILL_ROW_ID } from "../../resources/seed-ids.js";
 // leaves the middleware's backfill a vector to compute.
 const writer = newAgent("srb3170-writer");
 const TARGET_READ = "memory-post-target-read";
+const COMMITTED_READ = "memory-post-committed-read";
 const PLAN = "memory-post-skill-plan";
 const BACKFILL_COMMIT = "backfill-embedding-commit";
 const SHORT_EMBEDDING = [0.01, 0.02, 0.03];
@@ -172,6 +177,34 @@ afterAll(async () => {
     expect(successor?.agentId).toBe(writer.id);
     expect(successor?.supersedes).toBe(skillId);
     expect(successor?.tags).toContain("skill");
+  }, 120_000);
+
+  it("CONTROL: a target deleted after the request-snapshot read and before the committed read answers 409 skill_target_changed without a row or a version", async () => {
+    const skillId = `srb-skill-${randomUUID()}`;
+    const body = skillBody("a skill deleted under the retry");
+    const first = await h.signed(writer, "POST", memPath(skillId), body);
+    expect(first.status, await first.clone().text()).toBeLessThan(300);
+    // The first write's own backfill must not be a competing change here.
+    expect((await waitForLongVector(skillId)).embedding.length).toBeGreaterThan(100);
+    const versionsBefore = await versionsOf(skillId);
+    h.arm(COMMITTED_READ);
+    const retry = h.signed(writer, "POST", memPath(skillId), body);
+    let deleted = false;
+    try {
+      await h.assertPaused(COMMITTED_READ);
+      await h.ops({ operation: "delete", database: "flair", table: "Memory", ids: [skillId] });
+      expect(await h.readRow(skillId), "the target row was not deleted").toBeNull();
+      deleted = true;
+    } finally {
+      h.letGo(COMMITTED_READ);
+    }
+    expect(deleted, "the target delete did not commit").toBe(true);
+    const res = await retry;
+    const text = await res.text();
+    expect(res.status, `retry ${res.status}: ${text.slice(0, 200)}`).toBe(409);
+    expect(JSON.parse(text).error).toBe("skill_target_changed");
+    expect(await h.readRow(skillId), "the retry recreated the deleted target").toBeNull();
+    expect(await versionsOf(skillId), "the retry appended a version row").toEqual(versionsBefore);
   }, 120_000);
 
   it("CONTROL: a content change another writer commits after the target read and before the plan still answers 409 skill_target_changed", async () => {
