@@ -127,6 +127,11 @@ function canonicalDir(dir: string): string {
   }
 }
 
+/** Whether two key-location paths name the same directory entry after resolving symlinks. */
+export function sameKeyDir(a: string, b: string): boolean {
+  return canonicalDir(a) === canonicalDir(b);
+}
+
 /** The mode scan over the standard `resolveKeyPath` locations. A path reached
  *  through two locations (e.g. `FLAIR_KEY_DIR` pointing at the default
  *  directory) is reported once. */

@@ -254,6 +254,18 @@ test.skipIf(POSIX_ONLY)("a non-directory keys path is named by doctor and status
   }
 }, 90_000);
 
+test.skipIf(POSIX_ONLY)("doctor reports an unreadable keys path once when FLAIR_KEY_DIR is a symlink to it", async () => {
+  const home = makeHome("alias-unreadable");
+  const keys = join(home, ".flair", "keys");
+  rmSync(keys, { recursive: true });
+  writeFileSync(keys, "not a directory");
+  const alias = join(home, "keys-alias");
+  symlinkSync(keys, alias);
+  const { output } = await runCli(["doctor"], home, false, { FLAIR_KEY_DIR: alias });
+  expect(output.split(`Keys directory could not be read: ${keys}`)).toHaveLength(2);
+  expect(output).not.toContain(`agent key directory ${alias} could not be read`);
+}, 60_000);
+
 test.skipIf(POSIX_ONLY)("remote status omits local key warnings in plain and deep output", async () => {
   const home = makeHome("remote");
   const key = writeKey(home, "agent-a", 0o644);

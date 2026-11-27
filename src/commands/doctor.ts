@@ -31,7 +31,7 @@ import { describeEmbedGpuDoctorFinding } from "../lib/embed-gpu-doctor.js";
 import { describeEmbeddingSpaceDoctorFinding } from "../lib/embedding-space-doctor.js";
 import { adminPassDesyncFinding, detectPersistedAdminUser } from "../lib/init-admin-pass.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
-import { formatKeyModeFinding, keyModesUnsupported, KEY_MODES_UNSUPPORTED_MESSAGE, scanAgentKeyModes, scanKeyDir } from "../lib/key-dir.js";
+import { formatKeyModeFinding, keyModesUnsupported, KEY_MODES_UNSUPPORTED_MESSAGE, scanAgentKeyModes, scanKeyDir, sameKeyDir } from "../lib/key-dir.js";
 import {
   instanceIdentityLines,
   probeInstanceIdentity,
@@ -1031,7 +1031,7 @@ program
     if (!keyModesUnsupported()) {
       const modeScan = scanAgentKeyModes();
       for (const { dir, code } of modeScan.unreadable) {
-        if (dir === keysDir && keysDirUnreadable) continue;
+        if (keysDirUnreadable && sameKeyDir(dir, keysDir)) continue;
         issues++;
         console.log(`  ${render.icons.warn} agent key directory ${render.wrap(render.c.dim, dir)} could not be read (${code}) — key file modes not checked`);
       }
