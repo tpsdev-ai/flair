@@ -148,7 +148,7 @@ import {
   type ResolvedSigningIdentity,
   type SigningIdentitySource,
 } from "./lib/signing-identity.js";
-import { AgentKeyPathRefusal, agentKeyPath } from "./lib/key-dir.js";
+import { AgentKeyPathRefusal, agentKeyPath, agentPubKeyPath } from "./lib/key-dir.js";
 import { validateSnapshotArchive, extractSnapshotSafely } from "./lib/safe-snapshot-extract.js";
 import { entityFormatHint, parseEntitiesCsv } from "./lib/entity-vocab-cli.js";
 import { escapeXml, unescapeXml } from "./lib/xml-escape.js";
@@ -2623,7 +2623,7 @@ function privKeyPath(agentId: string, keysDir: string): string {
 }
 
 function pubKeyPath(agentId: string, keysDir: string): string {
-  return join(keysDir, `${agentId}.pub`);
+  return agentPubKeyPath(keysDir, agentId);
 }
 
 

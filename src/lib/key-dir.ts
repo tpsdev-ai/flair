@@ -89,12 +89,26 @@ export function agentKeyPath(keysDir: string, agentId: string): string {
   return join(keysDir, `${agentId}.key`);
 }
 
+/** The public-key path for `agentId`; the shared agent-ID rule runs before
+ *  the join. */
+export function agentPubKeyPath(keysDir: string, agentId: string): string {
+  requireAgentId(agentId);
+  return join(keysDir, `${agentId}.pub`);
+}
+
 /** The path signing reads for `agentId` in `location`. */
 export function keyPathIn(location: KeyLocation, agentId: string): string {
   requireAgentId(agentId);
   return join(location.dir, `${agentId}${location.suffix}`);
 }
 
+
+/** The legacy `~/.tps/secrets/flair/<id>-priv.key` signing key for `agentId`;
+ *  the shared agent-ID rule runs before the join. */
+export function legacyAgentKeyPath(agentId: string): string {
+  requireAgentId(agentId);
+  return join(resolveHome(), ".tps", "secrets", "flair", `${agentId}-priv.key`);
+}
 
 function errorCode(error: unknown): string {
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
@@ -212,7 +226,7 @@ const NODE_KEY_ID_RE = /^flair_[0-9a-f]{8}$/;
 /** Match node-shaped ids without a sibling .pub; file type is unproven. */
 export function isNodeKeyId(id: string, keysDir: string): boolean {
   if (!NODE_KEY_ID_RE.test(id)) return false;
-  return !existsSync(join(keysDir, `${id}.pub`));
+  return !existsSync(agentPubKeyPath(keysDir, id));
 }
 
 /**

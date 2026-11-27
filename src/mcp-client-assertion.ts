@@ -66,7 +66,7 @@ import { existsSync, readFileSync } from "node:fs";
 
 import { join } from "node:path";
 import { resolveHome } from "./lib/home.js";
-import { agentKeyPath } from "./lib/key-dir.js";
+import { agentKeyPath, legacyAgentKeyPath } from "./lib/key-dir.js";
 
 // ─── RFC 7523 constants ─────────────────────────────────────────────────────
 
@@ -235,7 +235,7 @@ export function resolveAgentKeyPath(agentId: string, keysDirOverride?: string): 
     keysDirOverride ? agentKeyPath(keysDirOverride, agentId) : null,
     process.env.FLAIR_KEY_DIR ? agentKeyPath(process.env.FLAIR_KEY_DIR, agentId) : null,
     agentKeyPath(join(resolveHome(), ".flair", "keys"), agentId),
-    join(resolveHome(), ".tps", "secrets", "flair", `${agentId}-priv.key`),
+    legacyAgentKeyPath(agentId),
   ].filter((p): p is string => Boolean(p));
   return candidates.find((p) => existsSync(p)) ?? null;
 }

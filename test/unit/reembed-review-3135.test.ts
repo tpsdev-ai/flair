@@ -108,7 +108,7 @@ test("ckMU dry-run counts with an unavailable listener table without HTTP admin 
   expect(requests.filter(request => request.port === "18726" && request.auth !== null)).toEqual([]);
 });
 
-for (const agent of [undefined] as Array<string | undefined>) {
+for (const agent of [undefined, "owner"] as Array<string | undefined>) {
   test(`ckMo retry preserves ports and agent ${JSON.stringify(agent)}`, async () => {
     const { logs } = await run({ agent });
     const reason = logs.find(line => line.includes("row(s)"))!;

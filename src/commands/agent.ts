@@ -50,7 +50,7 @@ import {
   type AgentKeyFileContents,
 } from "../lib/agent-key-file.js";
 import { acquireAgentRotationLock, agentRotationTestPause } from "../lib/agent-rotation-lock.js";
-import { agentKeyPath } from "../lib/key-dir.js";
+import { agentKeyPath, agentPubKeyPath } from "../lib/key-dir.js";
 import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
 import {
   agentHomeEndpoint,
@@ -119,7 +119,7 @@ export function removeAgentKeyFiles(agentId: string, keysDir: string): { removed
   }
   const removed: string[] = [];
   const keyName = basename(agentKeyPath(keysDir, agentId));
-  for (const name of [keyName, `${agentId}.pub`, `${keyName}.bak`]) {
+  for (const name of [keyName, basename(agentPubKeyPath(keysDir, agentId)), `${keyName}.bak`]) {
     let real: string;
     try {
       real = realpathSync(join(keysDir, name));

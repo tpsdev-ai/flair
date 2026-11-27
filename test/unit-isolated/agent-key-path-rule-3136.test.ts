@@ -1,8 +1,9 @@
 /**
  * flair#3136 item 1: every command that builds an agent key path from an id
  * applies the shared agent-ID rule before it builds the path. Each case runs
- * the built CLI in a HOME-isolated child whose preload records every path the
- * process reads or opens and every fetch it sends. A planted sentinel sits at
+ * the built CLI in a HOME-isolated child whose preload records the readFileSync
+ * and openSync path arguments and the path of each global fetch request. A
+ * planted sentinel sits at
  * the path an unchecked `<id>.key` join would name; the run must refuse with
  * the shared message, open no key path (inside the keys directory or at the
  * escape path) and send no request.

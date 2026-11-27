@@ -1,8 +1,9 @@
 /**
- * Records every path the CLI reads or opens, and every fetch it sends, when the
- * matching env var names a log file. Used by the agent-key-path tests: a run
- * that refuses an agent id before building a key path leaves both logs empty
- * for the keys directory and the planted escape path.
+ * Records the path argument of each readFileSync and openSync call, and the
+ * path of each global fetch request, when the matching env var names a log
+ * file. Used by the agent-key-path tests: a run that refuses an agent id before
+ * building a key path leaves both logs empty for the keys directory and the
+ * planted escape path.
  */
 const fs = require("node:fs");
 const { appendFileSync } = fs;
