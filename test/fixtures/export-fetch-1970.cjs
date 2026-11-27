@@ -1,4 +1,16 @@
-const { appendFileSync } = require("node:fs");
+const fs = require("node:fs");
+const { appendFileSync } = fs;
+
+if (process.env.MOCK_KEY_READ_PATH) {
+  const readFileSync = fs.readFileSync;
+  fs.readFileSync = function (path, ...args) {
+    if (path === process.env.MOCK_KEY_READ_PATH) {
+      appendFileSync(process.env.MOCK_KEY_READ_LOG, `${path}\n`);
+    }
+    return readFileSync.call(this, path, ...args);
+  };
+  require("node:module").syncBuiltinESMExports();
+}
 
 globalThis.fetch = async (input) => {
   const url = new URL(String(input));
