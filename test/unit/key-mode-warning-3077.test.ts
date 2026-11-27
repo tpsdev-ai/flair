@@ -9,7 +9,8 @@
  * checked and its target is not read for a mode. Neither command changes a
  * key file's bytes or mode.
  *
- * Cases run the source CLI on a throwaway HOME with fixture health responses.
+ * CLI cases run the source CLI on a throwaway HOME with fixture health
+ * responses; scanner cases call `scanAgentKeyModes` directly.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, mock, spyOn, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
