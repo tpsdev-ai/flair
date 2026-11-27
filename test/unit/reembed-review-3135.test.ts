@@ -125,7 +125,7 @@ for (const agent of [undefined] as Array<string | undefined>) {
   }, 10_000);
 }
 
-test("ckMo an invalid agent id is refused before a key path or request (#3136)", async () => {
+test("ckMo an invalid agent id is refused (#3136)", async () => {
   for (const agent of ["owner' $HOME; `false`", "owner\ncontinued"]) {
     await expect(run({ agent })).rejects.toThrow("EXIT:1");
   }
