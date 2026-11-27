@@ -254,6 +254,22 @@ export function grantedSkillClose(closed: Record<string, any> | null | undefined
   return { granteeId: auth.agentId, ownerId: closed.agentId };
 }
 
+/** The fields the embedding backfill's incremental update stages
+ *  (resources/auth-middleware.ts); a committed target read may differ from the
+ *  request snapshot by these without refusing the POST (flair#3170). */
+const BACKFILL_WRITTEN_FIELDS = new Set<string>(["embedding", "embeddingModel", "embeddedContentHash"]);
+
+/** Does a committed target row differ from the request snapshot outside the
+ *  embedding backfill's fields? Such a change refuses the POST with 409
+ *  skill_target_changed (flair#3170). */
+export function skillTargetSnapshotChanged(snapshot: Record<string, any>, committed: Record<string, any>): boolean {
+  for (const field of new Set([...Object.keys(snapshot), ...Object.keys(committed)])) {
+    if (BACKFILL_WRITTEN_FIELDS.has(field)) continue;
+    if (!isDeepStrictEqual(snapshot[field], committed[field])) return true;
+  }
+  return false;
+}
+
 export async function validateSkillSnapshots(stored: any, predecessor: any, targetId: string | null, shared: any): Promise<Response | null> {
   for (const [id, expected] of [[targetId, stored], [predecessor?.id, predecessor]]) {
     if (!id) continue;

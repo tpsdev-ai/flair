@@ -39,7 +39,7 @@ flair init --target https://<cluster>.<org>.harperfabric.com \
 
 - `--force` is required — this writes to a live instance.
 - `--remote` marks it a federation **hub** and creates the `flair_pair_initiator` role; without it, pairing later fails role-not-found.
-- Generated admin password lands in `~/.tps/secrets/flair-fabric-hdb` (mode `0600`); `--flair-admin-pass` to choose your own.
+- Before attempting to set `admin`'s password, init saves the chosen or generated password locally in a mode-`0600` file; `--flair-admin-pass` chooses your own. The final credential path is `~/.tps/secrets/flair-fabric-hdb`. Init attempts this save only when it selects the branch that will try to create or update `admin`; an existing `super_user` cluster administrator is reused without writing a password file. With no file present the password is written directly and kept even if the deployment is refused; with one present, the new value is staged beside it and moved into place after the cluster accepts it and the staged copy verifies. If the cluster accepts the change but the saved copy cannot be confirmed, init prints the recovery step.
 
 ### Operations endpoint
 

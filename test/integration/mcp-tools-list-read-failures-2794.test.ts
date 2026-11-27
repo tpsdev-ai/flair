@@ -86,7 +86,8 @@ async function expectOk(res: Response, what: string): Promise<void> {
 
 async function mintToken(sub: string): Promise<string> {
   const key = await importPKCS8(privateKeyPem, "RS256");
-  return new SignJWT({ client_id: "mcp-read-failure-client", scope: "openid" })
+  // The scopes memory_get and memory_store require (flair#3076).
+  return new SignJWT({ client_id: "mcp-read-failure-client", scope: "memory:read memory:write" })
     .setProtectedHeader({ alg: "RS256", kid: KID, typ: "at+jwt" })
     .setIssuer(ISSUER)
     .setAudience(RESOURCE)

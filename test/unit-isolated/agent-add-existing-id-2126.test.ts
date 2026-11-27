@@ -8,12 +8,13 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { chmodSync, fstatSync, mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { program } from "../../src/cli.js";
+import { setAgentKeyFileTestHooks } from "../../src/lib/agent-key-file.js";
 
 interface AgentRow {
   id: string;
@@ -298,6 +299,49 @@ describe("flair#2126 — agent add does not claim a registration it did not stor
     expect(ops).toEqual(["search_by_value", "sql", "insert", "search_by_value"]);
     expect(result.stderr).toContain("name");
     expect(outputHasRegistered(result.stdout, result.stderr)).toBe(false);
+  });
+});
+
+describe("flair#3077 — agent add checks the existing key file before reuse", () => {
+  test("a 0644 key is refused before any registration and stays byte-for-byte unchanged", async () => {
+    const id = "wide-key-3077";
+    mkdirSync(keysDir, { recursive: true });
+    const keyPath = join(keysDir, `${id}.key`);
+    const prior = Buffer.alloc(32, 9);
+    writeFileSync(keyPath, prior);
+    chmodSync(keyPath, 0o644);
+
+    const result = await agentAdd(id);
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(`chmod 600 ${keyPath}`);
+    expect(readFileSync(keyPath).equals(prior)).toBe(true);
+    expect(ops).not.toContain("insert");
+    expect(table.has(id)).toBe(false);
+    expect(existsSync(join(keysDir, `${id}.pub`))).toBe(false);
+    expect(statSync(keyPath).mode & 0o777).toBe(0o644);
+  });
+
+  test("a fresh key is 0600 at its first write under a zero umask", async () => {
+    const id = "first-write-3077";
+    const keyPath = join(keysDir, `${id}.key`);
+    const observed: number[] = [];
+    setAgentKeyFileTestHooks({
+      beforeFirstWrite: (fd) => {
+        observed.push(fstatSync(fd).mode & 0o777);
+      },
+    });
+    const previous = process.umask(0);
+    let result: { code: number; stdout: string; stderr: string };
+    try {
+      result = await agentAdd(id);
+    } finally {
+      process.umask(previous);
+      setAgentKeyFileTestHooks(undefined);
+    }
+    expect(result.code).toBe(0);
+    expect(observed).toEqual([0o600]);
+    expect(statSync(keyPath).mode & 0o777).toBe(0o600);
   });
 });
 

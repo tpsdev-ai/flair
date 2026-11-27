@@ -74,7 +74,7 @@ import { flairConfigPath, flairDataDir } from "./lib/flair-paths.js";
 import { encodeRecordId } from "./lib/record-id-path.js";
 import { invalidAgentIdMessage, isValidAgentId } from "./lib/agent-id-rule.js";
 import { agentHomeEndpoint, decideProbedPairIdentity, readHttpInstanceIdentity, resolveTargetInstanceId, resolveTargetInstanceIdentity, stampAgentHome, type ProbedPairIdentity } from "./lib/agent-home.js";
-import { proveLocalInstancePair, type LocalInstancePairProof } from "./lib/local-instance-pair.js";
+import { IncompleteInstancePairError, proveLocalInstancePair, type LocalInstancePairProof } from "./lib/local-instance-pair.js";
 import {
   httpBind,
   httpCorsAccessList,
@@ -221,7 +221,7 @@ import { applyRepointPlan, repointSystemdUserUnit, restartOnLinux, type MainServ
 // Aliased: this file also declares its own FileSnapshot (flair#2040's raw-bytes
 // snapshot for byte-exact restores); this is atomic-write's regular-file snapshot.
 import { snapshotRegularFile, type AtomicWriteHooks, type FileSnapshot as AtomicFileSnapshot } from "./lib/atomic-write.js";
-import { preferVersionManagerAlias } from "./lib/node-alias-path.js";
+import { homebrewOptAlias, preferVersionManagerAlias } from "./lib/node-alias-path.js";
 import { stabilizeMqttNetworkKeyOrder } from "./lib/stabilize-mqtt-network.js";
 import { MQTT_DISABLED_CONFIG } from "./lib/mqtt-config.js";
 import { FABRIC_OPS_PORT, resolveOpsUrlFromTarget } from "./lib/ops-url.js";
@@ -1541,6 +1541,19 @@ function resolveOpsPort(opts: { opsPort?: string | number; port?: string | numbe
 /** The named refusal for a configured-pair conflict or an unpaired one-sided target (flair#2474). */
 export const AMBIGUOUS_INSTANCE_TARGET_ERROR = "ambiguous_instance_target";
 
+/**
+ * The port pair one target addresses, and whether config bound it
+ * (flair#2474, flair#3135). `pairBound` is true when the pair came from a
+ * COMPLETE configured pair: both ports were recorded, and the target equals
+ * that pair (an unnamed port is taken from it). A pair the caller named that
+ * matches no complete configured pair, and a derived one, are not bound.
+ */
+export interface AgentHomeTarget {
+  httpPort: number;
+  opsPort: number;
+  pairBound: boolean;
+}
+
 /** The remedy appended to an {@link AMBIGUOUS_INSTANCE_TARGET_ERROR} refusal. */
 export const INSTANCE_TARGET_REMEDY = "Pass both ports (--port and --ops-port) for one instance.";
 
@@ -1579,7 +1592,7 @@ export interface AgentHomeTargetInputs {
  * Ports used "as given" are NOT VERIFIED: nothing here contacts an instance to
  * confirm that two named ports belong to one instance.
  */
-export function decideAgentHomeTarget(i: AgentHomeTargetInputs): { httpPort: number; opsPort: number } {
+export function decideAgentHomeTarget(i: AgentHomeTargetInputs): AgentHomeTarget {
   const { httpPort, httpNamed, namedOps, configuredHttp, configuredOps } = i;
   const remedy = INSTANCE_TARGET_REMEDY;
   if (configuredHttp !== null && configuredOps !== null) {
@@ -1592,18 +1605,22 @@ export function decideAgentHomeTarget(i: AgentHomeTargetInputs): { httpPort: num
           + `the config pairs HTTP ${configuredHttp} with ops ${configuredOps}. ${remedy}`,
       );
     }
-    return { httpPort, opsPort };
+    // Both sides equal the configured pair (or neither does — only when the
+    // caller named both, since an unnamed port is taken from the pair).
+    return { httpPort, opsPort, pairBound: httpMatches && opsMatches };
   }
   const opsNamed = namedOps !== null;
   if (httpNamed !== opsNamed) {
-    const [named, namedPort, other] = httpNamed ? ["HTTP", httpPort, "ops"] : ["ops", namedOps, "HTTP"];
-    throw new Error(
+    const [named, namedPort, other]: ["HTTP" | "ops", number, "HTTP" | "ops"] = httpNamed ? ["HTTP", httpPort, "ops"] : ["ops", namedOps!, "HTTP"];
+    throw new IncompleteInstancePairError(
       `${AMBIGUOUS_INSTANCE_TARGET_ERROR}: only the ${named} port (${namedPort}) was named, and no complete port pair could be resolved from config `
         + `(HTTP ${configuredHttp ?? "none"}, ops ${configuredOps ?? "none"}) to take the ${other} port from, so the two ports could address different instances. ${remedy}`,
+      named,
+      other,
     );
   }
-  if (namedOps !== null) return { httpPort, opsPort: namedOps };
-  return { httpPort, opsPort: i.deriveOps() };
+  if (namedOps !== null) return { httpPort, opsPort: namedOps, pairBound: false };
+  return { httpPort, opsPort: i.deriveOps(), pairBound: false };
 }
 
 /**
@@ -1626,10 +1643,7 @@ export function decideAgentHomeTarget(i: AgentHomeTargetInputs): { httpPort: num
  * ports when there is no complete pair) are used as given, without
  * verification. Every refusal is `ambiguous_instance_target`.
  */
-export function resolveAgentHomeTarget(opts: { port?: string | number; opsPort?: string | number; dataDir?: string }, httpPortOverride?: number): {
-  httpPort: number;
-  opsPort: number;
-} {
+export function resolveAgentHomeTarget(opts: { port?: string | number; opsPort?: string | number; dataDir?: string }, httpPortOverride?: number): AgentHomeTarget {
   // `flair doctor` probes the port it actually reached (a PID-discovered
   // `effectivePort` can differ from the configured one), so it passes that port
   // here; every other caller lets the resolver resolve it. When neither port is
@@ -1646,7 +1660,7 @@ export function resolveAgentHomeTarget(opts: { port?: string | number; opsPort?:
     const n = Number(opts.opsPort);
     if (!(Number.isInteger(n) && n >= 1 && n <= 65535)) {
       // An invalid --ops-port is refused by resolveOpsPort, which exits.
-      return { httpPort, opsPort: resolveOpsPort(opts) };
+      return { httpPort, opsPort: resolveOpsPort(opts), pairBound: false };
     }
     namedOps = n;
   } else if (process.env.FLAIR_OPS_PORT) {
@@ -4005,6 +4019,100 @@ async function assertSingleInstanceRowAfterWrite(endpoint: OpsEndpoint, expected
 // tarball with .env baked in, deploys via ops API, waits for restart, and
 // creates the super_user admin account.
 
+/**
+ * Categories of ops API refusal that select fixed descriptions. `callOpsApi` reads the
+ * parsed body's `error` string, or `message` only when the body has no `error`
+ * key at all, classifies it only when the response's status (and, for
+ * already-exists, operation) is the one that category describes, and throws a
+ * fixed, code-defined description; the body itself never reaches the message, in
+ * any encoding (issue #3144). already-exists requires the captured name to equal
+ * the username this request submitted.
+ */
+export type OpsApiErrorCategory = "already-exists" | "not-permitted" | "authentication-failed";
+
+const OPS_API_ERROR_DESCRIPTIONS: Record<OpsApiErrorCategory, string> = {
+  "already-exists": "the user already exists",
+  "not-permitted": "the operation is not permitted for this role",
+  "authentication-failed": "authentication failed",
+};
+
+const OPS_API_REFUSAL_DESCRIPTION = "the ops API refused the request (details withheld)";
+
+/**
+ * Harper's exact wording for each category, anchored to the whole field value.
+ * These strings are read here, for classification only, and are never copied
+ * into a message.
+ */
+const OPS_API_ERROR_PATTERNS: ReadonlyArray<readonly [OpsApiErrorCategory, RegExp]> = [
+  ["already-exists", /^User (.+) already exists$/],
+  ["not-permitted", /^This operation is not authorized due to role restrictions and\/or invalid database items$/],
+  ["authentication-failed", /^Login failed$/],
+];
+
+/** The status (and, for already-exists, operation) each category is defined by. */
+function categoryMatches(category: OpsApiErrorCategory, status: number, operation: string): boolean {
+  switch (category) {
+    case "already-exists":
+      return status === 409 && operation === "add_user";
+    case "not-permitted":
+      return status === 403;
+    case "authentication-failed":
+      return status === 401;
+  }
+}
+
+/** A non-2xx ops API response, reduced to a category and a fixed description. */
+export class OpsApiError extends Error {
+  readonly status: number;
+  readonly operation: string;
+  readonly category: OpsApiErrorCategory | null;
+
+  constructor(status: number, operation: string, category: OpsApiErrorCategory | null) {
+    super(
+      `Ops API call failed (${status}) for '${operation}': ` +
+        (category === null ? OPS_API_REFUSAL_DESCRIPTION : OPS_API_ERROR_DESCRIPTIONS[category]),
+    );
+    this.name = "OpsApiError";
+    this.status = status;
+    this.operation = operation;
+    this.category = category;
+  }
+}
+
+function classifyOpsApiError(
+  status: number,
+  operation: string,
+  body: Record<string, unknown>,
+  text: string,
+): OpsApiErrorCategory | null {
+  // Classify the parsed body's `error` string, or `message` only when the body
+  // has no `error` key at all, and only when the status (and, for already-exists,
+  // operation) is the category's own. Anything else — a non-JSON body, a value
+  // that is not a string, another field, another status, or another operation for
+  // already-exists — is unclassified. The value is never returned or printed.
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  const record = parsed as Record<string, unknown>;
+  const value = "error" in record ? record.error : record.message;
+  if (typeof value !== "string") return null;
+  for (const [category, pattern] of OPS_API_ERROR_PATTERNS) {
+    if (!categoryMatches(category, status, operation)) continue;
+    const match = pattern.exec(value);
+    if (match === null) continue;
+    if (category === "already-exists") {
+      // Match the submitted username, not another user named by the response.
+      if (typeof body.username !== "string" || match[1] !== body.username) return null;
+    }
+    return category;
+  }
+  return null;
+}
+
 export async function callOpsApi(
   opsUrl: string,
   body: Record<string, unknown>,
@@ -4022,16 +4130,35 @@ export async function callOpsApi(
       signal: AbortSignal.timeout(30_000),
     });
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
+    let target = "the configured ops target";
+    try {
+      const parsed = new URL(opsUrl);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") target = parsed.origin;
+    } catch {}
+    let category = "no response";
+    const seen = new Set<unknown>();
+    for (let current = err; current && typeof current === "object" && !seen.has(current);) {
+      seen.add(current);
+      const failure = current as { code?: unknown; name?: unknown; cause?: unknown };
+      if (failure.code === "ECONNREFUSED" || failure.code === "ConnectionRefused") {
+        category = "connection refused";
+        break;
+      }
+      if (failure.name === "TimeoutError" || failure.code === "ETIMEDOUT" || failure.code === "UND_ERR_CONNECT_TIMEOUT") {
+        category = "timed out";
+        break;
+      }
+      current = failure.cause;
+    }
     throw new Error(
-      `ops API unreachable at ${opsUrl} (derived from --target). ` +
-      `Set --ops-target or FLAIR_OPS_TARGET to override. ` +
-      `(${message})`,
+      `ops API request got no response from ${target} (${category}). ` +
+      `Set --ops-target or FLAIR_OPS_TARGET to override.`,
     );
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`Ops API call failed (${res.status}): ${text}`);
+    const operation = typeof body.operation === "string" ? body.operation : "unknown";
+    throw new OpsApiError(res.status, operation, classifyOpsApiError(res.status, operation, body, text));
   }
   return res.json();
 }
@@ -4140,17 +4267,138 @@ export async function waitForFlairRestart(
   throw new Error(`Flair did not respond within ${maxWaitMs / 1000}s`);
 }
 
+/**
+ * The Harper user provisioning selected for the rest of a remote `flair init`
+ * run, and the password that user has.
+ *
+ * `created` is true when provisioning set this user's password to the chosen
+ * Flair admin password (which init writes to the admin-pass file):
+ * `add_user` created `admin`, or `alter_user` reset an `admin` that already
+ * existed. It is false when the run reused an existing super_user cluster
+ * administrator, in which case `password` is the cluster administrator's own
+ * password that the operator supplied.
+ */
+export interface ProvisionedFabricPrincipal {
+  username: string;
+  password: string;
+  created: boolean;
+}
+
+/**
+ * Callbacks a caller (remote `flair init`) uses to persist the Flair
+ * administrator password around the cluster change (flair#3130).
+ */
+export interface FabricProvisionHooks {
+  /**
+   * Runs after the existing-user read decides this run will attempt to set `admin`'s
+   * password, and BEFORE the first cluster write. A throw aborts with nothing
+   * changed on the cluster.
+   */
+  beforeAdminPasswordApplied?: () => void;
+  /**
+   * Runs before attempting the add_user or alter_user request that sets
+   * `admin`'s password. A failure after this point may have reached the cluster
+   * even when this function throws.
+   */
+  adminPasswordRequestSent?: () => void;
+  /** Runs after add_user/alter_user for `admin` succeeded. */
+  afterAdminPasswordApplied?: () => void;
+}
+
 export async function provisionFabric(
   target: string,
   opsTarget: string,
   clusterAdminUser: string,
   clusterAdminPass: string,
   flairAdminPass: string,
-): Promise<void> {
+  hooks: FabricProvisionHooks = {},
+): Promise<ProvisionedFabricPrincipal> {
   const projectRoot = process.cwd();
 
-  // 1. Build and deploy component tarball. `target` is the served URL this
-  // function verifies against in step 2 — the same value the component must
+  // 1. Read the cluster's existing users BEFORE any cluster write. The answer
+  // decides whether this run attempts to set `admin`'s password, and a read that fails
+  // must refuse: treating an unknown as "not a super_user" would go on to
+  // change a cluster we could not read.
+  console.log("Checking existing cluster users via ops API...");
+  let userInfo: any;
+  try {
+    userInfo = await callOpsApi(opsTarget, {
+      operation: "list_users",
+    }, clusterAdminUser, clusterAdminPass);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `Could not read the cluster's existing users, so provisioning refused to change anything: ${message}`,
+    );
+  }
+  // list_users returns an array of user objects with role/permission info.
+  // A success response of any other shape is unknown, and an unknown is never
+  // "no super_user": refuse before the password is saved or anything is written.
+  if (!Array.isArray(userInfo)) {
+    throw new Error(
+      "The cluster's list_users response was not an array, so provisioning refused to change anything",
+    );
+  }
+  const users = userInfo;
+  const usernames: string[] = [];
+  const superUsers: (boolean | undefined)[] = [];
+  for (const record of users) {
+    const username =
+      record !== null && typeof record === "object" && !Array.isArray(record)
+        ? typeof record.username === "string"
+          ? record.username
+          : typeof record.user?.username === "string"
+            ? record.user.username
+            : undefined
+        : undefined;
+    // A record with no readable username could be the cluster administrator,
+    // so it still refuses before anything is staged or written.
+    if (username === undefined || username === "") {
+      throw new Error(
+        "The cluster's list_users response contained a record with no readable username, so provisioning refused to change anything",
+      );
+    }
+    usernames.push(username);
+    // Only the authenticated cluster administrator and `admin` decide
+    // provisioning, so only their records need a boolean super_user. Harper
+    // accepts a role that holds database grants and no super_user flag, and
+    // such an unrelated user must not make remote init refuse.
+    if (username === clusterAdminUser || username === DEFAULT_ADMIN_USER) {
+      const permission = record?.role?.permission ?? record?.permission;
+      const superUser = permission?.super_user;
+      if (typeof superUser !== "boolean") {
+        throw new Error(
+          "The cluster's list_users response contained a malformed record for a user that decides provisioning, so provisioning refused to change anything",
+        );
+      }
+      superUsers.push(superUser);
+    } else {
+      superUsers.push(undefined);
+    }
+  }
+  const clusterAdminRecords = usernames.filter((name) => name === clusterAdminUser).length;
+  if (clusterAdminRecords !== 1) {
+    throw new Error(
+      `The cluster's list_users response does not confirm the cluster administrator '${clusterAdminUser}' exactly once, so provisioning refused to change anything`,
+    );
+  }
+  const adminRecords = usernames.filter((name) => name === DEFAULT_ADMIN_USER).length;
+  if (adminRecords > 1) {
+    throw new Error(
+      `The cluster's list_users response lists more than one Flair administrator '${DEFAULT_ADMIN_USER}' record, so provisioning refused to change anything`,
+    );
+  }
+  const clusterAdminIndex = usernames.indexOf(clusterAdminUser);
+  const clusterAdminIsSuperUser = superUsers[clusterAdminIndex] === true;
+  const adminExists = adminRecords === 1;
+
+  if (!clusterAdminIsSuperUser) {
+    // Save the password before anything on the cluster changes.
+    hooks.beforeAdminPasswordApplied?.();
+  }
+
+  // 2. Build and deploy component tarball. `target` is the served URL this
+  // function verifies against in step 3 — the same value the component must
   // advertise in OAuth/A2A discovery, so it is what FLAIR_PUBLIC_URL is set from
   // (flair#1005). A loopback target supplies nothing: see resolveDeployPublicUrl.
   console.log("Building deploy tarball...");
@@ -4164,64 +4412,33 @@ export async function provisionFabric(
     restart: "rolling",
   }, clusterAdminUser, clusterAdminPass);
 
-  // 2. Wait for restart
+  // 3. Wait for restart
   console.log("Waiting for Flair to restart...");
   await waitForFlairRestart(target);
   console.log("Flair is running ✓");
 
-  // 3. Provision Harper super_user
+  // 4. Provision Harper super_user
   // Since custom-admin-username support is merged, the username doesn't have to be "admin".
   // We can use the cluster-admin user directly if it's already a super_user.
-  // Check if cluster admin is already a super_user first:
-  let clusterAdminIsSuperUser = false;
-  try {
-    const userInfo = await callOpsApi(opsTarget, {
-      operation: "list_users",
-    }, clusterAdminUser, clusterAdminPass);
-    // list_users returns an array of user objects with role/permission info
-    const users = Array.isArray(userInfo) ? userInfo : [];
-    const adminRecord = users.find(
-      (u: any) => u.username === clusterAdminUser || u.user?.username === clusterAdminUser,
-    );
-    clusterAdminIsSuperUser = !!(
-      adminRecord?.role?.permission?.super_user ??
-      adminRecord?.permission?.super_user ??
-      false
-    );
-  } catch {
-    // If we can't check, assume not and proceed with add_user
-  }
-
   if (clusterAdminIsSuperUser) {
-    console.log(`Cluster admin '${clusterAdminUser}' is already a super_user — skipping user provisioning`);
+    // Reuse branch: the cluster administrator is already a super_user, so the
+    // later calls authenticate as that administrator with the password the
+    // operator supplied; this run did not create `admin`.
+    console.log(`Cluster admin '${clusterAdminUser}' is already a super_user — reusing it as the init principal`);
+    return { username: clusterAdminUser, password: clusterAdminPass, created: false };
   } else {
     console.log(`Provisioning Harper user 'admin' as super_user...`);
-    try {
-      await callOpsApi(opsTarget, {
-        operation: "add_user",
-        username: "admin",
-        password: flairAdminPass,
-        role: "super_user",
-        active: true,
-      }, clusterAdminUser, clusterAdminPass);
-      console.log("User 'admin' created ✓");
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("already exists") || msg.includes("duplicate")) {
-        // Idempotent: fall back to alter_user
-        console.log("User 'admin' already exists — updating password...");
-        await callOpsApi(opsTarget, {
-          operation: "alter_user",
-          username: "admin",
-          password: flairAdminPass,
-          role: "super_user",
-          active: true,
-        }, clusterAdminUser, clusterAdminPass);
-        console.log("User 'admin' updated ✓");
-      } else {
-        throw err;
-      }
-    }
+    hooks.adminPasswordRequestSent?.();
+    await callOpsApi(opsTarget, {
+      operation: adminExists ? "alter_user" : "add_user",
+      username: "admin",
+      password: flairAdminPass,
+      role: "super_user",
+      active: true,
+    }, clusterAdminUser, clusterAdminPass);
+    console.log(adminExists ? "User 'admin' updated ✓" : "User 'admin' created ✓");
+    hooks.afterAdminPasswordApplied?.();
+    return { username: "admin", password: flairAdminPass, created: true };
   }
 }
 
@@ -4927,6 +5144,7 @@ bindInitCli({
   ensureFlairAgentRole,
   ensureFlairAgentUser,
   ensureFlairPairInitiatorRole,
+  FLAIR_AGENT_USERNAME,
   flairPackageDir,
   harperBin,
   harperConfigPath,
@@ -5474,8 +5692,8 @@ function readProcessState(pid: number, timeoutMs: number, onReadError?: StateRea
  * still answers signal 0. After the signal-0 probe succeeds, read the process
  * state and report a zombie as `gone`, so `flair doctor`'s stop wait stops
  * waiting on a process that has already exited (flair#2313). An unreadable
- * state stays `alive` — a read failure must never report a live process as
- * exited.
+ * state stays `alive` unless a re-probe reports ESRCH — a read failure must
+ * never report a live process as exited.
  *
  * The state reader is injectable so the unreadable and retried branches are
  * unit-testable without a real unreadable process.
@@ -5502,6 +5720,17 @@ export function probePidLiveness(
     state = readState(pid, timeoutMs, onReadError);
     if (state !== null) break;
   }
+  if (state === null) {
+    // The pid can exit between the signal-0 probe and the state reads: signal 0
+    // then says it exists while the reads find nothing. Re-probe the pid; ESRCH
+    // is evidence it is gone, where an unreadable state alone stays fail-safe.
+    try {
+      process.kill(pid, 0);
+    } catch (err: any) {
+      if (err?.code === "ESRCH") return { kind: "gone" };
+    }
+    return { kind: "alive" };
+  }
   return isExitedState(state) ? { kind: "gone" } : { kind: "alive" };
 }
 
@@ -5510,7 +5739,8 @@ export function probePidLiveness(
  * `deadlineMs` passes; return whether `gone` was read and the last read
  * (flair#2330). This is `flair doctor`'s stop wait.
  *
- * If both state reads fail, that poll stays `alive`.
+ * If both state reads fail and the pid still answers signal 0, that poll stays
+ * `alive`; an ESRCH at the re-probe reports it `gone`.
  * Check expiry before each read; an admitted read gets at least 1s to finish.
  * Readers honoring their timeout allow deadline + 1s, plus scheduling and subprocess overhead.
  */
@@ -6172,6 +6402,7 @@ function realRepointDeps(): RepointDeps {
     samePath: samePathCanonical,
     canonical: canonicalOr,
     treeVersion: (dir) => readFlairPackageAt(dir)?.version ?? null,
+    homebrewOptAlias: (nodeBin) => homebrewOptAlias(nodeBin),
   };
 }
 
@@ -6878,8 +7109,8 @@ export interface WriteInitLaunchdPlistDeps {
  *
  * `unchanged`, `not-repointed` and `refused` all mean NO plist write happened:
  * `unchanged` when the instance is already adopted with the pass-file shape
- * and already serves this CLI's tree, or pins another node for it (flair#1693 —
- * init must not downgrade it, and re-writing would only churn the file);
+ * and the re-point plan (src/lib/service-repoint.ts) has nothing to replace
+ * (flair#1693 — init must not downgrade it, and re-writing would only churn the file);
  * `not-repointed` when an adopted plist serves another tree but may not be
  * moved (flair#2034 — the detail names the file, what did not match and the
  * hand edit: a separately managed tree, a possible downgrade, a plist not
@@ -6911,8 +7142,8 @@ export type WriteInitLaunchdPlistResult =
  *   1. An on-disk plist that is provably ours IN THE PASS-FILE SHAPE is never
  *      regenerated. An adopted instance is never downgraded, and a re-run of
  *      init does not churn mtime / flap launchd state. Its runtime paths alone
- *      are re-pointed when it serves another npm-global tree (flair#2034,
- *      src/lib/service-repoint.ts); otherwise it is left byte-for-byte unchanged.
+ *      are re-pointed in the cases src/lib/service-repoint.ts lists (flair#2034);
+ *      otherwise it is left byte-for-byte unchanged.
  *   2. A plist that is provably another instance's (`foreign`) or cannot be
  *      attributed (`unattributable`) is refused, naming `flair doctor --fix`.
  *   3. Otherwise, resolve the pass file BEFORE writing anything: reuse an
@@ -8901,6 +9132,8 @@ bindReembedCli({
   privKeyPath,
   resolveHttpPort,
   resolveOpsPort,
+  resolveAgentHomeTarget,
+  ambiguousInstanceTargetError: AMBIGUOUS_INSTANCE_TARGET_ERROR,
 });
 registerReembed(program);
 

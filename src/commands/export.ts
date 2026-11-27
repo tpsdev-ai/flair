@@ -9,9 +9,11 @@
 import { Command } from "commander";
 import { defaultKeysDir, resolveAdminUser, addAdminPassOptions } from "../lib/auth-resolve.js";
 import * as render from "../render.js";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { writeFilesAtomically } from "../lib/atomic-write.js";
+import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
 
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { resolveHome } from "../lib/home.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 
@@ -40,6 +42,53 @@ const MEMORY_REQUIRED_FIELDS = ["id", "agentId", "content", "createdAt"] as cons
 const SOUL_REQUIRED_FIELDS = ["id", "agentId", "key", "value", "createdAt"] as const;
 const GRANT_REQUIRED_FIELDS = ["id", "ownerId", "granteeId", "scope"] as const;
 
+export function exportFileMode(outputPath: string, platform: NodeJS.Platform = process.platform): string {
+  return platform === "win32" ? "mode bits are not enforced on Windows" : (statSync(outputPath).mode & 0o7777).toString(8);
+}
+
+/** The default export path for `agentId` inside `exportsDir`, or null when the
+ *  resolved path is not a direct child of the resolved exports directory. */
+export function defaultExportOutputPath(
+  exportsDir: string,
+  agentId: string,
+  now: number = Date.now(),
+): string | null {
+  const dir = resolve(exportsDir);
+  const candidate = resolve(dir, `${agentId}-${now}.json`);
+  return dirname(candidate) === dir ? candidate : null;
+}
+
+/** The clock the default export name reads. `FLAIR_TEST_EXPORT_CLOCK_MS` fixes
+ *  it so a test can plant a path at the exact default name. */
+function defaultExportClockMs(): number {
+  const raw = process.env.FLAIR_TEST_EXPORT_CLOCK_MS;
+  const parsed = raw === undefined ? NaN : Number(raw);
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
+/** Create `outputPath` exclusively at requested `mode` and write `content`.
+ *  An existing path — file, symlink or anything else — is refused and nothing
+ *  is written. */
+function writeDefaultExport(outputPath: string, content: string, mode: number): void {
+  let fd: number;
+  try {
+    fd = openSync(outputPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0), mode);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "EEXIST" || code === "ELOOP") {
+      console.error(`Error: refusing to write to existing path ${outputPath}`);
+      process.exit(1);
+    }
+    throw err;
+  }
+  try {
+    writeFileSync(fd, content);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function hasRequiredStringFields(value: unknown, fields: readonly string[]): value is Record<string, unknown> {
   return !!value
     && typeof value === "object"
@@ -64,6 +113,11 @@ addAdminPassOptions(
   .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--keys-dir <dir>", "Keys directory", defaultKeysDir())
   .action(async (agentId, opts) => {
+    // flair#3136 — the ONE agent-ID rule, before this action reads export data or a key or writes its file.
+    if (!isValidAgentId(agentId)) {
+      console.error(`Error: ${invalidAgentIdMessage(agentId)}`);
+      process.exit(1);
+    }
     const baseUrl: string = opts.url ?? `http://127.0.0.1:${resolveHttpPort(opts)}`;
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
     if (!adminPass) { console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required"); process.exit(1); }
@@ -146,13 +200,33 @@ addAdminPassOptions(
       ...(privateKey ? { privateKey } : {}),
     };
 
-    const rawOutputPath = opts.output ?? join(resolveHome(), ".flair", "exports", `${agentId}-${Date.now()}.json`);
+    let rawOutputPath: string;
+    if (opts.output !== undefined) {
+      rawOutputPath = opts.output;
+    } else {
+      const exportsDir = join(resolveHome(), ".flair", "exports");
+      const defaultPath = defaultExportOutputPath(exportsDir, agentId, defaultExportClockMs());
+      if (defaultPath === null) {
+        console.error(`Error: refusing to write agent '${agentId}' outside the exports directory ${resolve(exportsDir)}`);
+        process.exit(1);
+      }
+      rawOutputPath = defaultPath;
+    }
     // Canonicalize to prevent path traversal (e.g. ../../etc/passwd)
     const outputPath = resolve(rawOutputPath);
     mkdirSync(join(outputPath, ".."), { recursive: true });
-    const fileMode = privateKey ? 0o600 : 0o644;
-    writeFileSync(outputPath, JSON.stringify(exportData, null, 2), { mode: fileMode });
-    if (privateKey) chmodSync(outputPath, 0o600); // enforce even if umask is permissive
+    const fileMode = opts.includeKey ? 0o600 : 0o644;
+    const content = JSON.stringify(exportData, null, 2);
+    if (opts.output !== undefined) {
+      if (opts.includeKey) {
+        // Stage at 0600 to avoid retaining an existing output file's wider mode.
+        writeFilesAtomically([{ path: outputPath, content, mode: 0o600 }]);
+      } else {
+        writeFileSync(outputPath, content, { mode: fileMode });
+      }
+    } else {
+      writeDefaultExport(outputPath, content, fileMode);
+    }
 
     console.log(`\n${render.icons.ok} ${render.wrap(render.c.green, `Agent '${agentId}' exported`)}`);
     console.log(render.kv("Memories", render.wrap(render.c.bold, String(memories.length))));
@@ -162,7 +236,7 @@ addAdminPassOptions(
       ? `${render.wrap(render.c.magenta, "included")} ${render.wrap(render.c.red, "(UNENCRYPTED — protect this file)")}`
       : render.wrap(render.c.dim, "not included");
     console.log(render.kv("Key", keyText));
-    console.log(render.kv("Mode", `${fileMode.toString(8)} ${render.wrap(render.c.dim, `(${privateKey ? "owner-only" : "standard"})`)}`));
+    console.log(render.kv("Mode", exportFileMode(outputPath)));
     console.log(render.kv("Output", render.wrap(render.c.dim, outputPath)));
   });
 

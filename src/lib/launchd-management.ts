@@ -333,12 +333,16 @@ export function classifyServiceNodePin(
       kind: "pinned",
       unitNodeBin,
       currentNodeBin,
-      // `flair init` never rewrites a pin (it reports `pinned-node` and writes
-      // nothing), so the only way to move it is by hand — said as such.
+      // With valid targets and existing other runtime paths, `flair init`
+      // reports `pinned-node`, except for a plist's eligible Cellar-to-opt
+      // replacement (flair#3056). A plist can replace a missing runtime path
+      // and an eligible Cellar node together; systemd refuses missing paths.
+      // Moving the pin to this CLI's runtime is a hand edit.
       message:
         `${unitDescription} pins node ${unitNodeBin} while this CLI runs ${currentNodeBin}, and it serves this ` +
         `CLI's own install tree (${unitTree}). That is treated as a deliberate runtime pin and left as it is; ` +
-        "`flair init` does not change it. To move the service to this CLI's runtime, change that node path to " +
+        "`flair init` does not change it, except that it can replace a Homebrew Cellar node path in a launchd plist " +
+        "with its `opt` alias (the same binary). To move the service to this CLI's runtime, change that node path to " +
         `${currentNodeBin} in the unit by hand, then run: flair restart`,
       remedy: [],
     };

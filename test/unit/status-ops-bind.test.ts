@@ -186,7 +186,7 @@ describe("flair status — ops-API bind agreement with doctor (flair#852)", () =
     mkdirSync(join(tmpHome, ".flair", "data"), { recursive: true });
     mkdirSync(join(tmpHome, ".flair", "keys"), { recursive: true });
     const kp = nacl.sign.keyPair();
-    writeFileSync(join(tmpHome, ".flair", "keys", "dogfood-agent.key"), Buffer.from(kp.secretKey.slice(0, 32)));
+    writeFileSync(join(tmpHome, ".flair", "keys", "dogfood-agent.key"), Buffer.from(kp.secretKey.slice(0, 32)), { mode: 0o600 });
 
     // Pin the version cache to the installed version so `status` does not hit
     // the npm registry during the test (nudges do not affect the verdict, but

@@ -147,7 +147,8 @@ async function embeddedCall(name: string, args: Record<string, unknown>, sub = "
   const res = await fetch(`${harper.httpURL}/AgentFleet/`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`) },
-    body: JSON.stringify({ op: "mcpRpc", sub, rpc: { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } } }),
+    // The scope team_directory requires (flair#3076).
+    body: JSON.stringify({ op: "mcpRpc", sub, scope: "principal:read", rpc: { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } } }),
   });
   expect(res.status).toBe(200);
   const out: any = await res.json();

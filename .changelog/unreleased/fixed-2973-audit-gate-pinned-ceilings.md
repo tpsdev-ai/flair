@@ -1,1 +1,0 @@
-- **The audit gate pins each severity's lifetime ceiling in code.** The policy block may lower a cap but cannot raise one, and the gate fails when a severity is missing, invalid or above its pinned ceiling (#2973). ([#2983](https://github.com/tpsdev-ai/flair/pull/2983))

@@ -5,18 +5,19 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
 import { nodeBin } from "../helpers/node-runtime.js";
+import { exportFileMode } from "../../src/commands/export.js";
 
 const CHILD_DEADLINE_MS = 20_000;
 const CLI_PATH = join(import.meta.dirname ?? __dirname, "..", "..", "dist", "cli.js");
 const PRELOAD = join(import.meta.dirname ?? __dirname, "..", "fixtures", "export-fetch-1970.cjs");
-const AGENT = "agent one/2";
+const AGENT = "agent-one-2";
 const URL = "http://example.test";
 
 interface CliResult { stdout: string; stderr: string; code: number | null; paths: string[] }
@@ -54,6 +55,17 @@ describe("flair export: failed reads never create a complete-looking file (#1970
     scratch = mkdtempSync(join(tmpdir(), "flair-export-1970-home-"));
   }, 120_000);
   afterAll(() => { if (scratch) rmSync(scratch, { recursive: true, force: true }); });
+
+  test("POSIX mode output reads a 0640 file", () => {
+    const output = join(scratch, "mode-640.json");
+    writeFileSync(output, "{}", { mode: 0o640 });
+    chmodSync(output, 0o640);
+    expect(exportFileMode(output, "linux")).toBe("640");
+  });
+
+  test("Windows mode output states that mode bits are not enforced", () => {
+    expect(exportFileMode(join(scratch, "absent.json"), "win32")).toBe("mode bits are not enforced on Windows");
+  });
 
   test("a 5xx Agent read reports the failure and writes no file", async () => {
     const output = join(scratch, "failed-agent-500.json");
@@ -119,6 +131,82 @@ describe("flair export: failed reads never create a complete-looking file (#1970
     expect(data.memories).toEqual([]);
     expect(data.souls).toEqual([]);
     expect(data.grants).toEqual([]);
+  }, 25_000);
+
+  test("--include-key over an existing 0644 file publishes the new contents at 0600", async () => {
+    const keysDir = join(scratch, "keys-3120");
+    mkdirSync(keysDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(keysDir, "agent-a.key"), "test-key-material\n", { mode: 0o600 });
+    const output = join(scratch, "existing-wide.json");
+    writeFileSync(output, '{"old":true}\n', { mode: 0o644 });
+    chmodSync(output, 0o644);
+    const inodeBefore = statSync(output).ino;
+
+    const { code, stdout, stderr } = await runCli(
+      ["export", "agent-a", "--url", URL, "--admin-pass", "test-pass-1970", "--output", output, "--include-key", "--keys-dir", keysDir],
+      { MOCK_AGENT_STATUS: "200", MOCK_AGENT_ID: "agent-a" }, scratch,
+    );
+    expect(stderr).not.toContain("could not read agent");
+    expect(code).toBe(0);
+    const data = JSON.parse(readFileSync(output, "utf8"));
+    const st = statSync(output);
+    expect(data.privateKey).toBe("test-key-material");
+    expect(st.mode & 0o777).toBe(0o600);
+    expect(stdout).toMatch(/Mode\s+600\b/);
+    expect(stdout).not.toContain("owner-only");
+    // The replacement has a new inode.
+    expect(st.ino).not.toBe(inodeBefore);
+  }, 25_000);
+
+  for (const keyState of ["missing", "empty"]) {
+    test(`--include-key with a ${keyState} key publishes output at 0600`, async () => {
+      const keysDir = join(scratch, `keys-${keyState}-3120`);
+      mkdirSync(keysDir, { recursive: true, mode: 0o700 });
+      if (keyState === "empty") writeFileSync(join(keysDir, "agent-a.key"), "", { mode: 0o600 });
+      const output = join(scratch, `${keyState}-key.json`);
+      writeFileSync(output, "old", { mode: 0o644 });
+      chmodSync(output, 0o644);
+      const { code } = await runCli(
+        ["export", "agent-a", "--url", URL, "--admin-pass", "test-pass-1970", "--output", output, "--include-key", "--keys-dir", keysDir],
+        { MOCK_AGENT_STATUS: "200", MOCK_AGENT_ID: "agent-a" }, scratch,
+      );
+      expect(code).toBe(0);
+      expect(JSON.parse(readFileSync(output, "utf8")).privateKey).toBeUndefined();
+      expect(statSync(output).mode & 0o777).toBe(0o600);
+    }, 25_000);
+  }
+
+  test("an export without --include-key leaves an existing 0644 output at 0644", async () => {
+    const output = join(scratch, "existing-control.json");
+    writeFileSync(output, '{"old":true}\n', { mode: 0o644 });
+    chmodSync(output, 0o644);
+    const inodeBefore = statSync(output).ino;
+    const { code, stdout } = await runCli(
+      ["export", "agent-a", "--url", URL, "--admin-pass", "test-pass-1970", "--output", output],
+      { MOCK_AGENT_STATUS: "200", MOCK_AGENT_ID: "agent-a" }, scratch,
+    );
+    expect(code).toBe(0);
+    const data = JSON.parse(readFileSync(output, "utf8"));
+    const st = statSync(output);
+    expect(data.agent.id).toBe("agent-a");
+    expect(st.mode & 0o777).toBe(0o644);
+    expect(st.ino).toBe(inodeBefore);
+    expect(stdout).toMatch(/Mode\s+644\b/);
+  }, 25_000);
+
+  test("an export without --include-key reports and retains an existing 0600 mode", async () => {
+    const output = join(scratch, "existing-private.json");
+    writeFileSync(output, "old", { mode: 0o600 });
+    const inodeBefore = statSync(output).ino;
+    const { code, stdout } = await runCli(
+      ["export", "agent-a", "--url", URL, "--admin-pass", "test-pass-1970", "--output", output],
+      { MOCK_AGENT_STATUS: "200", MOCK_AGENT_ID: "agent-a" }, scratch,
+    );
+    expect(code).toBe(0);
+    expect(statSync(output).mode & 0o777).toBe(0o600);
+    expect(statSync(output).ino).toBe(inodeBefore);
+    expect(stdout).toMatch(/Mode\s+600\b/);
+    expect(stdout).not.toContain("standard");
   }, 25_000);
 
   for (const [name, path] of [["memories", "/Memory/"], ["souls", "/Soul/"], ["grants", "/MemoryGrant/"]] as const) {

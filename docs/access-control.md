@@ -301,7 +301,7 @@ uses the token-endpoint URL as its audience, so the pinned `@harperfast/oauth`
         tokenEndpointAudience:
           clientIds:
             - https://chatgpt.com/oauth/client.json
-          expiresAt: '2026-11-01T00:00:00Z'
+          expiresAt: '<future ISO 8601 expiry>'
 ```
 
 Use the exact client ID and an operator-chosen future ISO 8601 `expiresAt`;
@@ -323,6 +323,11 @@ A connection acts as its principal:
 - **Admin** authority applies to a `/mcp` connection only when the principal's
   Agent record has `role: admin`. The principals that `flair mcp enable` and
   just-in-time provisioning create are not admins.
+- **Scopes** narrow a connection: each tool requires one OAuth scope (listed in
+  [auth.md](auth.md#scopes)), and a call whose access token does not grant it is
+  refused with `insufficient_scope`. A refreshed token keeps the scope of its
+  sign-in, so a connection that signed in without a tool's scope is refused
+  that tool until it signs in again requesting it.
 
 ### Tokens
 
@@ -331,7 +336,8 @@ A connection acts as its principal:
   the headless `client_credentials` grant is enabled, its access tokens last
   300 seconds unless `mcp.clientCredentials.accessTokenTtl` is set. A request
   with an expired or invalid token gets HTTP 401 with
-  error `invalid_token` and a `WWW-Authenticate: Bearer resource_metadata="…"`
+  error `invalid_token` and a
+  `WWW-Authenticate: Bearer resource_metadata="…", scope="memory:read memory:write principal:read"`
   header.
 - With the shipped `config.yaml`, which does not set
   `mcp.refreshTokenRequiresOfflineAccess`, the app also gets a refresh token
@@ -664,20 +670,22 @@ and read `agentId` and `scope`.
 **Revoke:** `flair principal disable bob-the-bot` on the Flair host; its next
 request gets `{"error":"principal_deactivated"}`.
 
-`flair agent remove bob-the-bot`, also run on the Flair host, asks you to type
-`yes` (or takes `--force`), then:
+`flair agent remove bob-the-bot`, also run on the Flair host, scans the agent's
+`Memory` and `Soul` rows, asks you to type `yes` (or takes `--force`), then:
 
-- searches the agent's `Memory` and `Soul` rows and sends a delete for each one
-  it finds, without checking whether each delete succeeded;
+- purges scanned `Memory` rows when present and confirms the purge receipt,
+  deletes scanned `Soul` rows when present and checks each delete response,
+  then re-scans `Soul` to confirm no rows for the agent remain before deleting
+  the Agent record;
 - sends a delete for the `Agent` record, and stops with an error if the
   operations API rejects it;
 - unless you pass `--keep-keys`, attempts to delete the agent's key files
-  (private, public and `.bak`) from the keys directory on the machine it runs
-  on, ignoring any failure;
-- prints `Key files deleted.` (with `--keep-keys`,
+  (private, public, `.bak`, `<key>.bak.<UTC timestamp>` backups and
+  `.<agentId>.key.tmp-<hex>` staging keys) from the keys directory on the machine
+  it runs on, ignoring any failure;
+- prints `Removed N key file(s).` (with `--keep-keys`,
   `Key files preserved (--keep-keys).`) and then
-  `✅ Agent 'bob-the-bot' removed successfully`, without checking the Memory,
-  Soul and key-file deletions.
+  `✅ Agent 'bob-the-bot' removed successfully`.
 
 Rows the agent owns in other tables, such as its workspace state, are left in
 place.
@@ -701,7 +709,8 @@ bytes). With `FLAIR_MCP_ISSUER=https://flair.example.com`, the document for
   "client_name": "bob-the-bot",
   "jwks": { "keys": [ { "kty": "OKP", "crv": "Ed25519", "x": "<public key>", "kid": "bob-the-bot" } ] },
   "token_endpoint_auth_method": "private_key_jwt",
-  "grant_types": ["client_credentials"]
+  "grant_types": ["client_credentials"],
+  "scope": "memory:read memory:write principal:read"
 }
 ```
 

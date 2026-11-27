@@ -1,1 +1,0 @@
-- **Commands that take `--admin-pass` now also accept `--admin-pass-file`.** ([#2894](https://github.com/tpsdev-ai/flair/pull/2894))

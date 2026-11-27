@@ -119,7 +119,12 @@ test("public 503 mirrors wrapper denial CORS headers and configured responses st
       ...corsHeaders,
     });
     await f.configure(providers);
-    expect(await f.request(request)).toEqual(await wrapper(request, () => {}));
+    // The mounted listener adds the scopes to request to the wrapper's 401 challenge (flair#3076).
+    const raw = await wrapper(request, () => {});
+    expect(await f.request(request)).toEqual({
+      ...raw,
+      headers: { ...raw.headers, "WWW-Authenticate": `${raw.headers["WWW-Authenticate"]}, scope="memory:read memory:write principal:read"` },
+    });
     expect(await f.request()).toEqual({ status: 200 });
   }
 });

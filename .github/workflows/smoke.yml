@@ -73,7 +73,8 @@ jobs:
           echo "sfw bun install failed after 3 attempts"; exit 1
 
       - name: Install linux-x64 native binary for embeddings
-        run: bun add --no-save @node-llama-cpp/linux-x64@3
+        run: |
+          node scripts/ci/install-llama-native.mjs
 
       - name: Build Flair resources and CLI
         run: bun run build && bun run build:cli
@@ -102,6 +103,8 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Start Flair (ephemeral Harper + Flair components)
+        env:
+          HARPER_START_BUDGET_S: "300"
         run: |
           # ops-nv9d slice 2: this smoke probe deliberately leaves Harper on a
           # WILDCARD bind (bare HTTP_PORT + NODE_HOSTNAME=0.0.0.0) so the
@@ -122,19 +125,14 @@ jobs:
             harperfast/harper:${{ steps.harper-image.outputs.tag }} \
             -c "harper install && harper dev /flair"
 
-          # Wait for Harper to be healthy
-          for i in $(seq 1 60); do
-            if curl -sf http://localhost:9926/Health 2>/dev/null; then
-              echo "Flair ready (${i}s)"
-              break
-            fi
-            if [ "$i" -eq 60 ]; then
-              echo "Flair failed to start. Docker logs:"
-              docker logs harper-flair-smoke 2>&1 || true
-              exit 1
-            fi
-            sleep 1
-          done
+          # Poll against an elapsed budget, not a fixed poll count. A dead
+          # container detected before the deadline stops polling; the waiter
+          # prints its exit code and attempts `docker logs`, reporting a logs
+          # error if that fails. An inspect that answers after the deadline
+          # ends the wait as a timeout.
+          node "$GITHUB_WORKSPACE/scripts/ci/wait-for-harper.mjs" \
+            --container harper-flair-smoke \
+            --url http://localhost:9926/Health
 
       - name: Run smoke tests
         env:

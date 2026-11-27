@@ -20,8 +20,8 @@
 # `upgrade-smoke` job in test.yml instead of duplicating it here — see that
 # file's comment block on the extension.
 #
-# Sherlock §4 compliance (flair#695): pull_request trigger only
-# (never pull_request_target with PR-code checkout); no secrets exposed to
+# Sherlock §4 compliance (flair#695): no pull_request_target trigger, so PR
+# code is never checked out under it; no secrets exposed to
 # either job (public npm install + public GITHUB_TOKEN-default only — no
 # NPM_TOKEN, no deploy credentials); every third-party action below is
 # pinned to a full commit SHA, not a tag; no `${{ }}` interpolation of
@@ -41,6 +41,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # The merge queue on main: both lanes are required checks, so they run on
+  # the queue's merged commit too. Neither job reads pull_request context.
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 
 # Cancel a pull request's superseded runs. A pull_request run cancels any
@@ -48,7 +52,9 @@ on:
 # therefore cancel the current head (rerun the current head if that happens).
 # A paths-filtered event that starts no run cannot cancel anything. Distinct
 # non-PR runs use their run IDs as groups, so this concurrency block does not
-# cancel or serialize push-to-main runs.
+# cancel or serialize push-to-main runs. A merge-queue (merge_group) run is a
+# non-PR run too, so it gets its own run-ID group: this block neither cancels
+# it nor lets it cancel another run.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -104,7 +110,8 @@ jobs:
       - run: sfw bun install --frozen-lockfile
 
       - name: Install linux-x64 native binary for embeddings (HEAD build)
-        run: bun add --no-save @node-llama-cpp/linux-x64@3
+        run: |
+          node scripts/ci/install-llama-native.mjs
 
       - run: bun run build && bun run build:cli
 
@@ -217,7 +224,7 @@ jobs:
           BASE_DIR=$(mktemp -d)
           ( cd "$BASE_DIR" && npm init -y > /dev/null )
           ( cd "$BASE_DIR" && npm install "@tpsdev-ai/flair@${BASELINE_VERSION}" )
-          ( cd "$BASE_DIR" && npm install --no-save @node-llama-cpp/linux-x64@3 )
+          node "$GITHUB_WORKSPACE/scripts/ci/install-llama-native.mjs" --installed "$BASE_DIR"
           BASE_FLAIR="node $BASE_DIR/node_modules/@tpsdev-ai/flair/dist/cli.js"
           echo "Baseline (previously published): ${BASELINE_VERSION} — HEAD (PR build): ${HEAD_VERSION}"
 
@@ -293,7 +300,7 @@ jobs:
           HEAD_DIR=$(mktemp -d)
           ( cd "$HEAD_DIR" && npm init -y > /dev/null )
           ( cd "$HEAD_DIR" && npm install "$TGZ_PATH" )
-          ( cd "$HEAD_DIR" && npm install --no-save @node-llama-cpp/linux-x64@3 )
+          node "$GITHUB_WORKSPACE/scripts/ci/install-llama-native.mjs" --installed "$HEAD_DIR"
           HEAD_FLAIR="node $HEAD_DIR/node_modules/@tpsdev-ai/flair/dist/cli.js"
           NEW=$(node -p "require('$HEAD_DIR/node_modules/@tpsdev-ai/flair/package.json').version")
           [[ "$NEW" == "$HEAD_VERSION" ]] || { echo "::error::expected ${HEAD_VERSION} in node_modules, got ${NEW}"; exit 1; }
@@ -693,7 +700,8 @@ jobs:
       - run: sfw bun install --frozen-lockfile
 
       - name: Install linux-x64 native binary for embeddings
-        run: bun add --no-save @node-llama-cpp/linux-x64@3
+        run: |
+          node scripts/ci/install-llama-native.mjs
 
       - run: bun run build && bun run build:cli
 
@@ -733,7 +741,7 @@ jobs:
           HEAD_DIR=$(mktemp -d)
           ( cd "$HEAD_DIR" && npm init -y > /dev/null )
           ( cd "$HEAD_DIR" && npm install "$TGZ_PATH" )
-          ( cd "$HEAD_DIR" && npm install --no-save @node-llama-cpp/linux-x64@3 )
+          node "$GITHUB_WORKSPACE/scripts/ci/install-llama-native.mjs" --installed "$HEAD_DIR"
           FLAIR="node $HEAD_DIR/node_modules/@tpsdev-ai/flair/dist/cli.js"
           # cwd = $HEAD_DIR for every CLI call: harperBin() falls back to
           # process.cwd()/node_modules for the npm-hoisted harper,
