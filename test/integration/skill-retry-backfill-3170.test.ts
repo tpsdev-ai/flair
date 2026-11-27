@@ -142,6 +142,8 @@ afterAll(async () => {
     const successor = await h.readRow(successorId);
     expect(successor?.agentId).toBe(writer.id);
     expect(successor?.supersedes).toBe(skillId);
+    // Drain the successor's own backfill so it cannot consume STEP 2's arm.
+    expect((await waitForLongVector(successorId)).embedding.length).toBeGreaterThan(100);
   }, 120_000);
 
   it("STEP 2: the identical retry commits a successor when the body omits tags and the stored row carries the skill tag", async () => {
