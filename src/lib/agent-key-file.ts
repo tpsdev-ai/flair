@@ -3,8 +3,8 @@
  * provisioning paths (flair#3077 slice A): `flair agent add`, local
  * `flair init --agent/--agent-id`, remote `flair init --target ... --agent-id`,
  * `flair principal add`, and `flair import`. `flair agent rotate-key` (slice B)
- * stages and replaces through this helper; `flair mcp grant` still writes key
- * files itself (slice C).
+ * stages and replaces through this helper; `flair mcp grant` creates its key
+ * files through it (slice C).
  *
  * POSIX policy:
  *   - the keys directory is requested with mode 0700 (the umask may make it
@@ -63,6 +63,8 @@ export interface AgentKeyFileTestHooks {
   beforeKeyRead?: (fd: number) => void;
   /** Runs after the temp key is complete and before it is linked into place. */
   beforePublish?: (tempPath: string, finalPath: string) => void;
+  /** Runs with the final path immediately after the hard link is made. */
+  afterPublish?: (finalPath: string) => void;
   syncKeysDir?: (fd: number) => void;
 }
 
@@ -70,6 +72,19 @@ let testHooks: AgentKeyFileTestHooks | undefined;
 
 export function setAgentKeyFileTestHooks(hooks: AgentKeyFileTestHooks | undefined): void {
   testHooks = hooks;
+}
+
+/**
+ * Device + inode of a key file, recorded from the temp file's own descriptor
+ * before it is published. Cleanup removes a path only if, when checked, it
+ * still names the file this grant created; a path swapped between that check
+ * and the unlink can still be removed, which a POSIX unlink by name cannot
+ * prevent. On POSIX the keys directory has no group or world permissions: a new
+ * directory requests 0700, and an existing narrower one keeps its mode.
+ */
+export interface KeyFileIdentity {
+  dev: number;
+  ino: number;
 }
 
 export interface AgentKeyFileContents {
@@ -281,7 +296,11 @@ export function readAgentKeyForRotation(privateKeyPath: string): AgentKeyForRota
  * from creation and fsynced, and return the temp path. The temp file is this
  * call's to hand on: the caller publishes or removes it.
  */
-function writeAgentKeyTemp(privateKeyPath: string, bytes: Buffer): string {
+function writeAgentKeyTemp(
+  privateKeyPath: string,
+  bytes: Buffer,
+  onCreated?: (path: string, identity: KeyFileIdentity) => void,
+): { path: string; identity: KeyFileIdentity } {
   const tempPrefix = `.${basename(privateKeyPath)}.tmp-`;
   const maxTempAttempts = 5;
   let fd: number | undefined;
@@ -301,6 +320,9 @@ function writeAgentKeyTemp(privateKeyPath: string, bytes: Buffer): string {
     }
   }
   try {
+    const created = fstatSync(fd);
+    const identity = { dev: created.dev, ino: created.ino };
+    onCreated?.(tempPath, identity);
     // The open mode is narrowed by the umask; set it exactly, still before the
     // first byte, so the protection is the mode the file is created with.
     fchmodSync(fd, 0o600);
@@ -319,7 +341,7 @@ function writeAgentKeyTemp(privateKeyPath: string, bytes: Buffer): string {
     fsyncSync(fd);
     closeSync(fd);
     fd = undefined;
-    return tempPath;
+    return { path: tempPath, identity };
   } catch (error) {
     if (fd !== undefined) {
       try {
@@ -347,22 +369,31 @@ function writeAgentKeyTemp(privateKeyPath: string, bytes: Buffer): string {
  * occupying entry is left untouched. On failure the temp file this call
  * created is removed, best effort.
  */
-export function createAgentKeyFile(privateKeyPath: string, data: string | Uint8Array): void {
-  const tempPath = writeAgentKeyTemp(privateKeyPath, Buffer.from(data));
+export function createAgentKeyFile(
+  privateKeyPath: string,
+  data: string | Uint8Array,
+  onCreated?: (path: string, identity: KeyFileIdentity) => void,
+): void {
+  const temp = writeAgentKeyTemp(privateKeyPath, Buffer.from(data), onCreated);
   try {
-    testHooks?.beforePublish?.(tempPath, privateKeyPath);
+    testHooks?.beforePublish?.(temp.path, privateKeyPath);
     // linkSync fails with EEXIST when the final path appears before publication.
-    linkSync(tempPath, privateKeyPath);
+    linkSync(temp.path, privateKeyPath);
+    testHooks?.afterPublish?.(privateKeyPath);
+    // The hard link initially publishes the temp file's inode at the final
+    // path; the identity recorded from the temp descriptor stays that inode
+    // even if the path is replaced later. Never re-derive it from the path.
+    onCreated?.(privateKeyPath, temp.identity);
   } catch (error) {
     try {
-      unlinkSync(tempPath);
+      unlinkSync(temp.path);
     } catch {
       /* best effort: remove only the temp file this call created */
     }
     throw error;
   }
   try {
-    unlinkSync(tempPath);
+    unlinkSync(temp.path);
   } catch {
     /* the published key is complete; a leftover temp file is mode 0600 */
   }
@@ -433,7 +464,7 @@ function syncAgentKeysDir(directory: string): void {
  * this call created (best effort).
  */
 export function stageAgentKeyFile(privateKeyPath: string, data: string | Uint8Array): string {
-  const tempPath = writeAgentKeyTemp(privateKeyPath, Buffer.from(data));
+  const tempPath = writeAgentKeyTemp(privateKeyPath, Buffer.from(data)).path;
   let directory = dirname(privateKeyPath);
   let kind = "keys";
   try {

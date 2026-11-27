@@ -22,6 +22,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
   statSync,
   symlinkSync,
   writeFileSync,
@@ -263,6 +264,35 @@ test("a short write resumes until every byte is written", () => {
   }
   expect(readFileSync(keyPath).equals(seed)).toBe(true);
   expect(tempEntries(dir)).toHaveLength(0);
+});
+
+test("the recorded identity is the temp file's when a hook replaces the final path right after publication", () => {
+  const dir = keysDir();
+  ensureAgentKeysDir(dir);
+  const keyPath = join(dir, "swapped.key");
+  const seed = Buffer.alloc(32, 7);
+  let tempIdentity: { dev: number; ino: number } | undefined;
+  let recorded: { dev: number; ino: number } | undefined;
+  setAgentKeyFileTestHooks({
+    beforeFirstWrite: (fd) => {
+      const created = fstatSync(fd);
+      tempIdentity = { dev: created.dev, ino: created.ino };
+    },
+    afterPublish: (finalPath) => {
+      const replacement = join(dir, "swapped-replacement");
+      writeFileSync(replacement, "replacement bytes");
+      renameSync(replacement, finalPath);
+    },
+  });
+  try {
+    createAgentKeyFile(keyPath, seed, (_path, identity) => {
+      recorded = identity;
+    });
+  } finally {
+    setAgentKeyFileTestHooks(undefined);
+  }
+  expect(recorded).toEqual(tempIdentity);
+  expect(readFileSync(keyPath, "utf8")).toBe("replacement bytes");
 });
 
 test("a file that appears at the final path before publish is reused, not overwritten", () => {
