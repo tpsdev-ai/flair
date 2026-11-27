@@ -78,6 +78,14 @@ async function agentStatus(id: string): Promise<number> {
   return res.status;
 }
 
+function foreignSeedRow(): Record<string, unknown> {
+  return {
+    id: SEED_SKILL_ID, agentId: ADMIN_A, content: USING_FLAIR_SKILL_CONTENT, trigger: USING_FLAIR_SKILL_TRIGGER,
+    tags: ["skill"], durability: "persistent", visibility: "shared", archived: false,
+    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+  };
+}
+
 async function memoryRow(): Promise<any> {
   const rows = await ops({
     operation: "search_by_id", database: "flair", table: "Memory", ids: [SEED_SKILL_ID],
@@ -173,6 +181,7 @@ async function runInit(): Promise<{ exitCode?: number; stdout: string; stderr: s
 
 describe("flair#3126 — remote init checks the skill seed before its role, user and Agent writes", () => {
   beforeAll(async () => {
+    if (process.env.HARPER_HTTP_URL) throw new Error("requires an isolated Harper; unset HARPER_HTTP_URL");
     harper = await startHarper();
     assertOwnInstance(harper);
     scratchHome = mkdtempSync(join(tmpdir(), "flair-3126-"));
@@ -207,14 +216,7 @@ describe("flair#3126 — remote init checks the skill seed before its role, user
   }, 120_000);
 
   test("a foreign-owned row refuses the run before the role, shared-user and Agent writes", async () => {
-    const inserted = await ops({
-      operation: "insert", database: "flair", table: "Memory",
-      records: [{
-        id: SEED_SKILL_ID, agentId: ADMIN_A, content: USING_FLAIR_SKILL_CONTENT, trigger: USING_FLAIR_SKILL_TRIGGER,
-        tags: ["skill"], durability: "persistent", visibility: "shared", archived: false,
-        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-      }],
-    });
+    const inserted = await ops({ operation: "insert", database: "flair", table: "Memory", records: [foreignSeedRow()] });
     expect(inserted.status, inserted.text.slice(0, 300)).toBe(200);
     const run = await runInit();
     expect(run.exitCode, run.stdout + run.stderr).toBe(1);
@@ -232,6 +234,9 @@ describe("flair#3126 — remote init checks the skill seed before its role, user
   }, 240_000);
 
   test("after the remedy's DELETE the same run succeeds, and its re-run keeps the seed row's owner and the assignment count", async () => {
+    const upserted = await ops({ operation: "upsert", database: "flair", table: "Memory", records: [foreignSeedRow()] });
+    expect(upserted.status, upserted.text.slice(0, 300)).toBe(200);
+    expect((await memoryRow())?.agentId).toBe(ADMIN_A);
     const deleted = await deleteRowAsOperator();
     expect(deleted.status, deleted.body.slice(0, 300)).toBeLessThan(300);
 

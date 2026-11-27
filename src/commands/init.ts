@@ -1627,6 +1627,7 @@ addAdminPassOptions(
       if (!opts.skipStart) {
         // flair#3126 — check the seed before the agent write, so a refusal
         // leaves no Agent row behind.
+        await attributeBeforeCredential(httpPort, httpBind.host);
         await preflightUsingFlairSkillViaRest(httpUrl, adminUser, adminPass);
         console.log(`Seeding agent '${agentId}' via operations API...`);
         const opsListener = skippedOwnStart ? operationsPortAttribution(opsPort) : undefined;
