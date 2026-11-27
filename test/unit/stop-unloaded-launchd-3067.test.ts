@@ -12,7 +12,7 @@
 // synthetic fresh-init one serves Flair's real /Health body and exits on
 // SIGTERM; the foreign one records a signal instead.
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
@@ -20,6 +20,16 @@ import { launchdLabel, launchdPlistPath } from "../../src/cli.ts";
 import { buildPublicHealthBody } from "../../resources/search-readiness.ts";
 
 const repoRoot = resolve(import.meta.dirname, "..", "..");
+
+/** Stub prelude: publish a state file atomically, so a reader that sees the
+ *  path never sees a created-but-empty file. */
+const PUBLISH = `
+function publish(file, content) {
+  const tmp = file + '.tmp-' + process.pid;
+  fs.writeFileSync(tmp, content);
+  fs.renameSync(tmp, file);
+}
+`;
 
 type Fixture = {
   home: string;
@@ -118,13 +128,14 @@ async function startFlairStub(f: Fixture, opts: { successor?: "serving" | "servi
   writeFileSync(script, `
 const fs = require('node:fs');
 const http = require('node:http');
+${PUBLISH}
 const body = fs.readFileSync(process.env.HEALTH_BODY_FILE, 'utf8');
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'content-type': 'application/json' });
   res.end(body);
 });
 server.listen(Number(process.env.HTTP_PORT), '127.0.0.1', () => {
-  fs.writeFileSync(process.env.FLAIR_PIDFILE, String(process.pid));
+  publish(process.env.FLAIR_PIDFILE, String(process.pid));
 });
 if (process.env.SUCCESSOR_SCRIPT) {
   process.on('SIGTERM', () => {
@@ -158,12 +169,13 @@ setInterval(() => {}, 1000);
     writeFileSync(successorScript, opts.successor === "silent" ? `
 const fs = require('node:fs');
 const net = require('node:net');
-fs.writeFileSync(process.env.SUCCESSOR_PID_FILE, String(process.pid));
+${PUBLISH}
+publish(process.env.SUCCESSOR_PID_FILE, String(process.pid));
 function start() {
   const server = net.createServer(() => {});
   server.on('error', () => setTimeout(start, 25));
   server.listen(Number(process.env.HTTP_PORT), '127.0.0.1', () => {
-    fs.writeFileSync(process.env.SUCCESSOR_READY_FILE, '1');
+    publish(process.env.SUCCESSOR_READY_FILE, '1');
   });
 }
 start();
@@ -172,20 +184,21 @@ setInterval(() => {}, 1000);
 const fs = require('node:fs');
 const http = require('node:http');
 const body = fs.readFileSync(process.env.HEALTH_BODY_FILE, 'utf8');
-fs.writeFileSync(process.env.SUCCESSOR_PID_FILE, String(process.pid));
+${PUBLISH}
+publish(process.env.SUCCESSOR_PID_FILE, String(process.pid));
 // Simulated startup writes: Harper records its pid in hdb.pid, while Flair
 // records the identity sidecar. A later flair stop acts on that pair. In the
 // "serving" mode the test triggers both writes; in "serving-recorded" they
 // land here, before the listener starts, so they precede the ready file.
 const record = () => {
-  fs.writeFileSync(process.env.FLAIR_PIDFILE, String(process.pid));
-  fs.writeFileSync(process.env.SIDECAR_FILE, JSON.stringify({
+  publish(process.env.FLAIR_PIDFILE, String(process.pid));
+  publish(process.env.SIDECAR_FILE, JSON.stringify({
     pid: process.pid,
     startTimeMs: Math.round(Date.now() - process.uptime() * 1000),
     port: Number(process.env.HTTP_PORT),
     flairVersion: 'test',
   }));
-  fs.writeFileSync(process.env.SUCCESSOR_RECORDED_FILE, '1');
+  publish(process.env.SUCCESSOR_RECORDED_FILE, '1');
 };
 ${opts.successor === "serving-recorded" ? "record();" : `const recorder = setInterval(() => {
   if (!fs.existsSync(process.env.SUCCESSOR_RECORD_TRIGGER)) return;
@@ -199,7 +212,7 @@ function start() {
   });
   server.on('error', () => setTimeout(start, 25));
   server.listen(Number(process.env.HTTP_PORT), '127.0.0.1', () => {
-    fs.writeFileSync(process.env.SUCCESSOR_READY_FILE, '1');
+    publish(process.env.SUCCESSOR_READY_FILE, '1');
   });
 }
 start();
@@ -224,10 +237,8 @@ setInterval(() => {}, 1000);
     stdout: "ignore", stderr: "ignore",
   });
   f.children.push(child);
-  const deadline = Date.now() + 5000;
-  while (!existsSync(join(f.dataDir, "hdb.pid")) && Date.now() < deadline) await Bun.sleep(10);
-  const pid = Number(readFileSync(join(f.dataDir, "hdb.pid"), "utf8"));
-  writeFileSync(join(f.dataDir, "flair-daemon.json"), JSON.stringify({
+  const pid = await waitForPidFile(join(f.dataDir, "hdb.pid"));
+  publishFile(join(f.dataDir, "flair-daemon.json"), JSON.stringify({
     pid, startTimeMs: Date.now(), port: f.port, flairVersion: "test",
   }));
   return pid;
@@ -238,8 +249,9 @@ async function startForeignStub(f: Fixture): Promise<number> {
   const script = join(f.home, "foreign-stub.cjs");
   writeFileSync(script, `
 const fs = require('node:fs');
-process.on('SIGTERM', () => fs.writeFileSync(process.env.SIGNAL_FILE, 'SIGTERM'));
-fs.writeFileSync(process.env.FOREIGN_PIDFILE, String(process.pid));
+${PUBLISH}
+process.on('SIGTERM', () => publish(process.env.SIGNAL_FILE, 'SIGTERM'));
+publish(process.env.FOREIGN_PIDFILE, String(process.pid));
 setInterval(() => {}, 1000);
 `);
   const child = Bun.spawn(["node", script], {
@@ -247,9 +259,7 @@ setInterval(() => {}, 1000);
     stdout: "ignore", stderr: "ignore",
   });
   f.children.push(child);
-  const deadline = Date.now() + 5000;
-  while (!existsSync(join(f.dataDir, "hdb.pid")) && Date.now() < deadline) await Bun.sleep(10);
-  return Number(readFileSync(join(f.dataDir, "hdb.pid"), "utf8"));
+  return await waitForPidFile(join(f.dataDir, "hdb.pid"));
 }
 
 /** A live process that is not recorded as Flair's and records SIGTERM if received. */
@@ -257,8 +267,9 @@ async function startSentinel(f: Fixture): Promise<number> {
   const script = join(f.home, "sentinel.cjs");
   writeFileSync(script, `
 const fs = require('node:fs');
-process.on('SIGTERM', () => fs.writeFileSync(process.env.SENTINEL_SIGNAL, 'SIGTERM'));
-fs.writeFileSync(process.env.SENTINEL_READY, '1');
+${PUBLISH}
+process.on('SIGTERM', () => publish(process.env.SENTINEL_SIGNAL, 'SIGTERM'));
+publish(process.env.SENTINEL_READY, '1');
 setInterval(() => {}, 1000);
 `);
   const child = Bun.spawn(["node", script], {
@@ -270,8 +281,7 @@ setInterval(() => {}, 1000);
     stdout: "ignore", stderr: "ignore",
   });
   f.children.push(child);
-  const deadline = Date.now() + 5000;
-  while (!existsSync(join(f.home, "sentinel-ready")) && Date.now() < deadline) await Bun.sleep(10);
+  await waitForFileContent(join(f.home, "sentinel-ready"), "1");
   return child.pid;
 }
 
@@ -280,8 +290,9 @@ async function startWedgedStub(f: Fixture): Promise<number> {
   const script = join(f.home, "wedged-stub.cjs");
   writeFileSync(script, `
 const fs = require('node:fs');
-fs.writeFileSync(process.env.WEDGED_PIDFILE, String(process.pid));
-fs.writeFileSync(process.env.WEDGED_READY, '1');
+${PUBLISH}
+publish(process.env.WEDGED_PIDFILE, String(process.pid));
+publish(process.env.WEDGED_READY, '1');
 setInterval(() => {}, 1000);
 `);
   const child = Bun.spawn(["node", script], {
@@ -293,10 +304,9 @@ setInterval(() => {}, 1000);
     stdout: "ignore", stderr: "ignore",
   });
   f.children.push(child);
-  const deadline = Date.now() + 5000;
-  while (!existsSync(join(f.home, "wedged-ready")) && Date.now() < deadline) await Bun.sleep(10);
-  const pid = Number(readFileSync(join(f.dataDir, "hdb.pid"), "utf8"));
-  writeFileSync(join(f.dataDir, "flair-daemon.json"), JSON.stringify({
+  await waitForFileContent(join(f.home, "wedged-ready"), "1");
+  const pid = await waitForPidFile(join(f.dataDir, "hdb.pid"));
+  publishFile(join(f.dataDir, "flair-daemon.json"), JSON.stringify({
     pid, startTimeMs: Date.now(), port: f.port, flairVersion: "test",
   }));
   return pid;
@@ -348,10 +358,94 @@ function unloadCalls(f: Fixture): string[] {
   return readFileSync(f.log, "utf8").split("\n").filter((line) => line.startsWith("unload "));
 }
 
-async function waitForFile(path: string, timeoutMs = 5000): Promise<void> {
+function publishFile(path: string, content: string): void {
+  const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  writeFileSync(tmp, content);
+  renameSync(tmp, path);
+}
+
+function isMissingFile(error: unknown): boolean {
+  return typeof error === "object" && error !== null && (error as { code?: unknown }).code === "ENOENT";
+}
+
+/** Wait for `path` to hold a complete positive pid. A create-before-write
+ *  window reads as "", which is why a bare existsSync-then-read can see 0. */
+async function waitForPidFile(
+  path: string,
+  timeoutMs = 5000,
+  onRead?: (text: string | undefined) => void,
+): Promise<number> {
   const deadline = Date.now() + timeoutMs;
-  while (!existsSync(path) && Date.now() < deadline) await Bun.sleep(10);
-  if (!existsSync(path)) throw new Error(`timed out waiting for ${path}`);
+  let last = "missing";
+  for (;;) {
+    let text: string | undefined;
+    try {
+      text = readFileSync(path, "utf8");
+    } catch (error) {
+      if (!isMissingFile(error)) {
+        throw new Error(`pid-file-unreadable: ${path}: ${String(error)}`);
+      }
+    }
+    onRead?.(text);
+    if (text !== undefined) {
+      last = JSON.stringify(text);
+      const pid = Number(text);
+      if (Number.isInteger(pid) && pid > 0) return pid;
+    }
+    if (Date.now() >= deadline) {
+      const error = new Error(`pid-file-not-ready: ${path} held no pid within ${timeoutMs}ms (last read ${last})`);
+      error.name = "PidFileNotReadyError";
+      throw error;
+    }
+    await Bun.sleep(10);
+  }
+}
+
+async function waitForFileContent(
+  path: string,
+  expected: string,
+  timeoutMs = 5000,
+  onRead?: (text: string | undefined) => void,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let last = "missing";
+  for (;;) {
+    let text: string | undefined;
+    try {
+      text = readFileSync(path, "utf8");
+    } catch (error) {
+      if (!isMissingFile(error)) throw new Error(`file-unreadable: ${path}: ${String(error)}`);
+    }
+    onRead?.(text);
+    if (text === expected) return;
+    if (text !== undefined) last = JSON.stringify(text);
+    if (Date.now() >= deadline) {
+      const error = new Error(`file-content-not-ready: ${path} did not read ${JSON.stringify(expected)} within ${timeoutMs}ms (last read ${last})`);
+      error.name = "FileContentNotReadyError";
+      throw error;
+    }
+    await Bun.sleep(10);
+  }
+}
+
+/** A live process that creates its pid file empty and fills it 200 ms later:
+ *  the create-then-write window a plain writeFileSync exposes. */
+async function startDelayedPidStub(f: Fixture): Promise<{ pid: number; childPid: number }> {
+  const script = join(f.home, "delayed-pid-stub.cjs");
+  writeFileSync(script, `
+const fs = require('node:fs');
+const fd = fs.openSync(process.env.DELAYED_PID_FILE, 'w');
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+fs.writeSync(fd, String(process.pid));
+fs.closeSync(fd);
+setInterval(() => {}, 1000);
+`);
+  const child = Bun.spawn(["node", script], {
+    env: { ...process.env, DELAYED_PID_FILE: join(f.home, "delayed.pid") },
+    stdout: "ignore", stderr: "ignore",
+  });
+  f.children.push(child);
+  return { pid: await waitForPidFile(join(f.home, "delayed.pid")), childPid: child.pid };
 }
 
 afterEach(() => {
@@ -361,13 +455,23 @@ afterEach(() => {
   // A successor stub is spawned detached by the instance stub, so it is not in
   // `children`; kill the pid it recorded, if it got that far.
   const successorPidFile = fixture ? join(fixture.home, "successor.pid") : null;
-  if (successorPidFile && existsSync(successorPidFile)) {
-    try { process.kill(Number(readFileSync(successorPidFile, "utf8")), "SIGKILL"); } catch { /* already gone */ }
+  if (successorPidFile) {
+    let successorPid = 0;
+    try { successorPid = Number(readFileSync(successorPidFile, "utf8")); } catch { /* not recorded */ }
+    if (Number.isInteger(successorPid) && successorPid > 0) {
+      try { process.kill(successorPid, "SIGKILL"); } catch { /* already gone */ }
+    }
   }
   fixture = undefined;
 });
 
 describe("flair#3067 — stop when the launchd job was never loaded", () => {
+  test("a pid file created empty and filled 200 ms later yields the real pid, not 0", async () => {
+    const f = await makeFixture();
+    const { pid, childPid } = await startDelayedPidStub(f);
+    expect(pid).toBe(childPid);
+  }, 30_000);
+
   test("a synthetic fresh-init state whose process serves /Health stops as RUNNING without the 60s wait", async () => {
     const f = await makeFixture();
     const pid = await startFlairStub(f);
@@ -436,8 +540,7 @@ describe("flair#3067 — stop when the launchd job was never loaded", () => {
     expect(result.out).not.toContain("Run 'flair stop' again to stop the verified recorded pid");
 
     const successorPidFile = join(f.home, "successor.pid");
-    await waitForFile(successorPidFile);
-    const successorPid = Number(readFileSync(successorPidFile, "utf8"));
+    const successorPid = await waitForPidFile(successorPidFile);
 
     // Before its identity is recorded, a repeat refuses and signals nothing.
     const beforeRecording = await runStop(f);
@@ -449,7 +552,7 @@ describe("flair#3067 — stop when the launchd job was never loaded", () => {
     // Once the simulated startup writes have recorded the successor (Harper's
     // pid, Flair's identity sidecar), a re-run verifies and signals it.
     writeFileSync(join(f.home, "successor-record-trigger"), "1");
-    await waitForFile(join(f.home, "successor-recorded"));
+    await waitForFileContent(join(f.home, "successor-recorded"), "1");
     const again = await runStop(f);
     expect(again.code).toBe(0);
     expect(again.out).toContain(`stopped the directly started Flair (pid ${successorPid})`);
@@ -467,7 +570,7 @@ describe("flair#3067 — stop when the launchd job was never loaded", () => {
     expect(result.out).toContain("Run 'flair stop' again to stop the verified recorded pid (the instance has recorded its identity).");
     expect(result.out).not.toContain("stopped the directly started Flair");
 
-    const successorPid = Number(readFileSync(join(f.home, "successor.pid"), "utf8"));
+    const successorPid = await waitForPidFile(join(f.home, "successor.pid"));
     const again = await runStop(f);
     expect(again.code).toBe(0);
     expect(again.out).toContain(`stopped the directly started Flair (pid ${successorPid})`);
@@ -577,4 +680,54 @@ describe("flair#3067 — stop when the launchd job was never loaded", () => {
     expect(result.out).not.toContain("the process serving the port");
     expect(unloadCalls(f)).toEqual([]);
   }, 30_000);
+});
+
+describe("flair#3067 — the pid and content helpers wait for a real file to hold a valid value", () => {
+  test("waitForPidFile returns the pid written only after it read the empty file", async () => {
+    const pidFile = join(tempDir("stop-3067-pidfile-"), "hdb.pid");
+    writeFileSync(pidFile, "");
+    const reads: string[] = [];
+    const pid = await waitForPidFile(pidFile, 5000, (text) => {
+      reads.push(String(text));
+      if (text === "") writeFileSync(pidFile, String(process.pid));
+    });
+    expect(reads[0]).toBe("");
+    expect(pid).toBe(process.pid);
+  }, 10_000);
+
+  test("waitForPidFile throws its named timeout error when the file never holds a pid", async () => {
+    const pidFile = join(tempDir("stop-3067-pidfile-"), "hdb.pid");
+    writeFileSync(pidFile, "0");
+    const reads: string[] = [];
+    const error = await waitForPidFile(pidFile, 150, (text) => {
+      reads.push(String(text));
+    }).then(() => undefined, (caught: Error) => caught);
+    expect(error?.name).toBe("PidFileNotReadyError");
+    expect(error?.message).toContain("pid-file-not-ready");
+    expect(reads.at(-1)).toBe("0");
+  }, 5_000);
+
+  test("waitForFileContent resolves on the expected value written only after it read the wrong one", async () => {
+    const readyFile = join(tempDir("stop-3067-content-"), "ready");
+    writeFileSync(readyFile, "warming");
+    const reads: string[] = [];
+    await waitForFileContent(readyFile, "1", 5000, (text) => {
+      reads.push(String(text));
+      if (text === "warming") writeFileSync(readyFile, "1");
+    });
+    expect(reads[0]).toBe("warming");
+    expect(reads.at(-1)).toBe("1");
+  }, 10_000);
+
+  test("waitForFileContent throws its named timeout error when the value never matches", async () => {
+    const readyFile = join(tempDir("stop-3067-content-"), "ready");
+    writeFileSync(readyFile, "warming");
+    const reads: string[] = [];
+    const error = await waitForFileContent(readyFile, "1", 150, (text) => {
+      reads.push(String(text));
+    }).then(() => undefined, (caught: Error) => caught);
+    expect(error?.name).toBe("FileContentNotReadyError");
+    expect(error?.message).toContain("file-content-not-ready");
+    expect(reads.at(-1)).toBe("warming");
+  }, 5_000);
 });
