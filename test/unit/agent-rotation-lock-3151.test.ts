@@ -60,6 +60,45 @@ describe("flair#3151 — agent rotation lock", () => {
     expect(readFileSync(res.lock.path, "utf-8")).toBe("replacement\n");
   });
 
+  it("release keeps a replacement lock whose inode differs only above 2^53", () => {
+    const dir = tempDir();
+    const lockPath = join(dir, "agent-a.rotate-key.lock");
+    // Adjacent values above 2^53 that a JavaScript number cannot distinguish:
+    // 2^54 and 2^54 + 1 both convert to 2^54, but differ as bigint.
+    const created = { dev: 2n ** 54n, ino: 2n ** 54n };
+    const replacement = { dev: 2n ** 54n, ino: 2n ** 54n + 1n };
+    expect(Number(created.ino)).toBe(Number(replacement.ino));
+    expect(created.ino).not.toBe(replacement.ino);
+
+    const statFor = (identity: { dev: bigint; ino: bigint }, bigint: boolean) =>
+      bigint
+        ? { dev: identity.dev, ino: identity.ino, isFile: () => true }
+        : { dev: Number(identity.dev), ino: Number(identity.ino), isFile: () => true };
+
+    // Inject the create-time identity and the release-time identity: the
+    // module asks for whichever representation it compares in.
+    const fstat = spyOn(fs, "fstatSync").mockImplementation(((_fd: number, opts?: { bigint?: boolean }) =>
+      statFor(created, opts?.bigint === true)) as unknown as typeof fs.fstatSync);
+    const lstat = spyOn(fs, "lstatSync").mockImplementation(((_p: string, opts?: { bigint?: boolean }) =>
+      statFor(replacement, opts?.bigint === true)) as unknown as typeof fs.lstatSync);
+
+    try {
+      const res = acquireAgentRotationLock({ id: "agent-a", keysDir: dir });
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+
+      const next = join(dir, "replacement");
+      writeFileSync(next, "replacement\n");
+      renameSync(next, res.lock.path);
+
+      res.lock.release();
+      expect(readFileSync(res.lock.path, "utf-8")).toBe("replacement\n");
+    } finally {
+      fstat.mockRestore();
+      lstat.mockRestore();
+    }
+  });
+
   it("refuses a lock path that is a directory", () => {
     const dir = tempDir();
     const lockPath = join(dir, "agent-a.rotate-key.lock");

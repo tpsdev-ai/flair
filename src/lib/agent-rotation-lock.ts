@@ -160,15 +160,15 @@ function refusalLine(lockPath: string, id: string, holder: string | null): strin
   );
 }
 
-function makeHandle(lockPath: string, identity: { dev: number; ino: number }): AgentRotationLock {
+function makeHandle(lockPath: string, identity: { dev: bigint; ino: bigint }): AgentRotationLock {
   let released = false;
   const release = (): void => {
     if (released) return;
     released = true;
     process.removeListener("exit", release);
     try {
-      const st = lstatSync(lockPath);
-      if (Number(st.dev) !== identity.dev || Number(st.ino) !== identity.ino) return;
+      const st = lstatSync(lockPath, { bigint: true });
+      if (st.dev !== identity.dev || st.ino !== identity.ino) return;
       unlinkSync(lockPath);
     } catch {
       // ENOENT: the lock is already gone. Any other failure leaves a lock that
@@ -206,8 +206,8 @@ export function acquireAgentRotationLock(opts: AgentRotationLockOptions): AgentR
       continue;
     }
     try {
-      const st = fstatSync(fd);
-      const identity = { dev: Number(st.dev), ino: Number(st.ino) };
+      const st = fstatSync(fd, { bigint: true });
+      const identity = { dev: st.dev, ino: st.ino };
       try {
         // Diagnostic only: never an authorization input.
         writeSync(fd, `${process.pid} ${new Date().toISOString()} ${hostname()}\n`);
