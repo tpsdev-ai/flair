@@ -1614,8 +1614,9 @@ async function writeSkillCreateOrUpdate(
     // transaction (flair#3170): the joined request transaction's reads can
     // predate a commit the verb's target read already saw (a previous write's
     // embedding backfill), and the stale-target check would refuse the retry.
-    // An in-place reserved seed POST supersedes nothing and keeps the caller's
-    // transaction, so a caller abort still undoes it.
+    // An in-place reserved seed POST supersedes nothing and joins the caller's
+    // transaction when one is open and joinable, so a caller abort still
+    // undoes it.
     joinCallerTransaction: method === "post" && (!storedRow || inPlaceId != null),
     subjectId,
     agentId: String(content.agentId),
@@ -2492,9 +2493,9 @@ export class Memory extends (databases as any).flair.Memory {
    *  commits after the lock is released; a superseding skill write owns its
    *  commit. A POST that names neither takes no lock. */
   async post(content: any, context?: any) {
-    // Test-only: holds a POST after its request transaction opened and before
-    // it takes the target's lock and reads it, so a concurrent commit can land
-    // in between (flair#3170).
+    // Test-only: on the HTTP request path, holds a POST after its request
+    // transaction opened and before it takes the target's lock and reads it, so
+    // a concurrent commit can land in between (flair#3170).
     const targetReadPause = txnPausePoint("memory-post-target-read");
     if (targetReadPause) await targetReadPause;
     // flair#2307: resolve the `supersedes` reference to its canonical id once,

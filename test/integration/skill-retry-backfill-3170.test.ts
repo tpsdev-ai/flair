@@ -206,14 +206,18 @@ describe("flair#3170 — an in-place reserved seed POST in a caller-owned transa
       tags: ["skill"], durability: "persistent", visibility: "shared", trigger: "when seeding",
     };
     const created = await callProbe({ record: seed, abort: false });
-    expect(created, JSON.stringify(created)).toEqual({ aborted: false, written: true });
+    expect(created, JSON.stringify(created)).toEqual({ aborted: false, written: true, staged: { content: "seed skill v1", version: 1 } });
+
     const before = await h.readRow(SEED_SKILL_ROW_ID);
     expect(before?.content).toBe("seed skill v1");
     const versionsBefore = await versionsOf(SEED_SKILL_ROW_ID);
     expect(versionsBefore.length, "the seed create appended no version").toBeGreaterThan(0);
+    const nextVersion = Math.max(...versionsBefore.map((row) => Number(row.version))) + 1;
 
     const aborted = await callProbe({ record: { ...seed, content: "seed skill v2" }, abort: true });
-    expect(aborted, JSON.stringify(aborted)).toEqual({ aborted: true, written: true });
+    expect(aborted, JSON.stringify(aborted)).toEqual({
+      aborted: true, written: true, staged: { content: "seed skill v2", version: nextVersion },
+    });
 
     const after = await h.readRow(SEED_SKILL_ROW_ID);
     expect(after?.content, "the caller abort did not undo the in-place write").toBe("seed skill v1");

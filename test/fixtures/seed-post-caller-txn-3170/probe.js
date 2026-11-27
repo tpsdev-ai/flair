@@ -9,7 +9,7 @@
 // asked, aborts that transaction after the write returns: the shape of an
 // in-process caller that composes a Memory write with its own and then fails.
 // The internal context is the operator source a reserved seed write requires.
-import { Resource, server, transaction } from "harper";
+import { Resource, databases, server, transaction } from "harper";
 import { collectionResource, internalContext } from "./in-process.js";
 
 class CallerAbort extends Error {}
@@ -23,21 +23,43 @@ export class SeedPostCallerTxnProbe extends Resource {
     const record = body?.record;
     const ctx = internalContext();
     let written = null;
+    let staged = null;
+    // The staged values a caller can see INSIDE its own transaction, before it
+    // commits or aborts: the row content the write put there and the newest
+    // version it appended. A version row is staged in the transaction's write
+    // set (its deterministic id is subjectType:subjectId:sequence) and is not
+    // visible to a table read until commit, so read the staged write's id.
+    const readStaged = async () => {
+      const row = await databases.flair.Memory.get(record.id, ctx);
+      const store = databases.flair.InstructionVersion.primaryStore;
+      const prefix = `skill:${record.id}:`;
+      let version = null;
+      for (const write of ctx.transaction?.writes ?? []) {
+        if (write?.store !== store) continue;
+        const key = String(write.key);
+        if (!key.startsWith(prefix)) continue;
+        const sequence = Number(key.slice(prefix.length));
+        if (Number.isInteger(sequence) && (version === null || sequence > version)) version = sequence;
+      }
+      return { content: row?.content ?? null, version };
+    };
     try {
       await transaction(ctx, async () => {
         const h = await collectionResource(server.resources.get("Memory").Resource, ctx);
         written = await h.post(record);
-        if (body?.abort === true && !(written instanceof Response)) {
+        if (written instanceof Response) return;
+        staged = await readStaged();
+        if (body?.abort === true) {
           throw new CallerAbort("the caller aborts its transaction after the write");
         }
       });
     } catch (err) {
       if (!(err instanceof CallerAbort)) throw err;
-      return { aborted: true, written: true };
+      return { aborted: true, written: written?.written === true, staged };
     }
     if (written instanceof Response) {
       return { aborted: false, written: false, status: written.status, body: await written.text() };
     }
-    return { aborted: false, written: written != null };
+    return { aborted: false, written: written?.written === true, staged };
   }
 }
