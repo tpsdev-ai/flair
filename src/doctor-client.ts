@@ -53,6 +53,9 @@ import {
   wiringPinString,
   type WiringSpec,
 } from "./lib/wiring-spec.js";
+import { isNodeKeyId, partitionKeyIds } from "./lib/key-dir.js";
+
+export { isNodeKeyId, partitionKeyIds };
 
 // The exact substring `flair init` writes into CLAUDE.md (src/cli.ts, the
 // `init` action) and that the doctor check + fix both key off of.
@@ -2777,34 +2780,6 @@ export function orphanInstanceSeedAdvisory(input: {
   const candidates = nodeKeyIds.filter((id) => classifyNodeKeySeed(id, instanceIds, baseUrl, agentIds).class === "orphan-candidate").length;
   if (candidates === 0) return null;
   return `${candidates} orphan candidate(s) in ${keysDir}, absent from the Instance and Agent tables on ${baseUrl} (HTTP/ops Instance id matched); ownership cannot be proven; not removed (see #2200)`;
-}
-
-/** Node-shaped file ids. */
-const NODE_KEY_ID_RE = /^flair_[0-9a-f]{8}$/;
-
-/** Match node-shaped ids without a sibling .pub; file type is unproven. */
-export function isNodeKeyId(id: string, keysDir: string): boolean {
-  if (!NODE_KEY_ID_RE.test(id)) return false;
-  return !existsSync(join(keysDir, `${id}.pub`));
-}
-
-/**
- * Partition `.key`-derived ids into agent signing keys and node-scoped
- * federation keys (see isNodeKeyId). Node keys must never feed agent handling —
- * Ed25519 parsing, registration checks, or connector-identity inference
- * (flair#1193) — so callers keep only `agentKeyIds` for those paths and report
- * `nodeKeyIds` informatively.
- */
-export function partitionKeyIds(
-  ids: string[],
-  keysDir: string,
-): { agentKeyIds: string[]; nodeKeyIds: string[] } {
-  const agentKeyIds: string[] = [];
-  const nodeKeyIds: string[] = [];
-  for (const id of ids) {
-    (isNodeKeyId(id, keysDir) ? nodeKeyIds : agentKeyIds).push(id);
-  }
-  return { agentKeyIds, nodeKeyIds };
 }
 
 /**

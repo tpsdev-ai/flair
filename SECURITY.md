@@ -152,8 +152,16 @@ POSIX the keys directory is requested with mode `0700` (the umask may make it
 narrower), and an owned directory with group or world bits is tightened to
 `0700`; on the create and reuse paths an existing key with group or world
 bits is refused with `chmod 600 <path>`, while rotation reports it. A successful
-rotation replaces the file; a failed update leaves it. On Windows mode bits
-do not establish owner-only. Legacy path `~/.tps/secrets/flair/<agentId>-priv.key` is also supported.
+rotation replaces the file; a failed update leaves it. `flair doctor` warns
+about an existing agent key file with group or world bits, and `flair status`
+warns about it for a local target; both name the path, its mode and
+`chmod 600 <path>`, and neither changes the file. The check covers the standard
+`resolveKeyPath` locations: `$FLAIR_KEY_DIR/<agentId>.key` when that variable is
+set, `~/.flair/keys/<agentId>.key`, and the legacy
+`~/.tps/secrets/flair/<agentId>-priv.key`; explicit key paths (such as `--key`)
+are outside this scan. A symlinked agent key is
+reported as not checked. On Windows mode bits
+do not establish owner-only.
 
 `flair export --include-key` publishes its output through a `0600` temp file
 renamed over the target, so an existing output file's wider mode does not apply
