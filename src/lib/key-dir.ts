@@ -47,7 +47,7 @@ export type KeyModeFinding =
 /** A directory the CLI signs from, and the filename it looks for there. */
 export interface KeyLocation {
   dir: string;
-  /** Between the agent id and `.key` (e.g. `-priv` for the legacy path). */
+  /** Complete filename suffix after the agent id, including ".key" (e.g. "-priv.key"). */
   suffix: string;
 }
 
