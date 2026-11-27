@@ -322,6 +322,42 @@ test("a file that appears at the final path before publish is reused, not overwr
   expect(tempEntries(dir)).toHaveLength(0);
 });
 
+test.skipIf(process.platform === "win32")("a raced key's directory sync failure refuses with nothing returned, and the raced key is returned once the sync works", () => {
+  const dir = keysDir();
+  ensureAgentKeysDir(dir);
+  const keyPath = join(dir, "raced-unsynced.key");
+  const raced = Buffer.alloc(32, 9);
+  let syncFails = true;
+  setAgentKeyFileTestHooks({
+    beforePublish: (_tempPath, finalPath) => {
+      writeFileSync(finalPath, raced, { mode: 0o600 });
+    },
+    syncKeysDir: (fd) => {
+      if (syncFails) throw new Error("fixture sync failure");
+      fsyncSync(fd);
+    },
+  });
+  let returned: ReturnType<typeof readOrCreateAgentKey> | undefined;
+  let caught: unknown;
+  try {
+    try {
+      returned = readOrCreateAgentKey(keyPath, () => Buffer.alloc(32, 1));
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(AgentKeyFileRefusal);
+    expect((caught as Error).message).toContain("not confirmed durable");
+    expect(returned).toBeUndefined();
+    syncFails = false;
+    returned = readOrCreateAgentKey(keyPath, () => Buffer.alloc(32, 1));
+  } finally {
+    setAgentKeyFileTestHooks(undefined);
+  }
+  expect(returned?.created).toBe(false);
+  expect(Buffer.from(returned!.bytes).equals(raced)).toBe(true);
+  expect(tempEntries(dir)).toHaveLength(0);
+});
+
 test.skipIf(process.platform === "win32")("a wide key appearing before publication is refused before reading and left untouched", () => {
   const dir = keysDir();
   ensureAgentKeysDir(dir);

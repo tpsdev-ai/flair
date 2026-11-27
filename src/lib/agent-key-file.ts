@@ -188,8 +188,8 @@ export function ensureAgentKeysDir(keysDir: string): void {
   }
 
   checkAgentKeysDir(keysDir);
-  // A retry sees the directory this run (or an earlier failed run) created; the
-  // parent sync is repeated, so a later success confirms the entry durable.
+  // A retry repeats the sync of the keys directory's own entry in its parent.
+  // Upper levels a recursive first run created are synced only by that first run.
   syncKeysParent(keysDir, `keys directory ${keysDir}`);
 }
 
