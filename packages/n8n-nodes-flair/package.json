@@ -57,9 +57,9 @@
     "@langchain/classic": ">=1.0.0 <2"
   },
   "devDependencies": {
-    "n8n-workflow": "1.119.0",
-    "@langchain/core": "1.1.44",
-    "@langchain/classic": "1.0.32",
+    "n8n-workflow": "1.120.37",
+    "@langchain/core": "1.5.0",
+    "@langchain/classic": "1.0.62",
     "typescript": "5.9.3"
   }
 }
