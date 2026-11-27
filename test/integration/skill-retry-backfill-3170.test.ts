@@ -1,0 +1,137 @@
+/**
+ * skill-retry-backfill-3170.test.ts — flair#3170: an identical skill POST
+ * retry is not refused by the previous write's embedding backfill.
+ *
+ * A POST to an existing skill target reads its target outside any transaction,
+ * then plans. This file makes the ordering deterministic with two test-only
+ * pause points: `memory-post-target-read` holds the retry after its request
+ * transaction opened and before it reads its target, and
+ * `memory-post-skill-plan` holds it before its plan runs under the lock.
+ *
+ * The instance is home-isolated and ephemeral; every URL is asserted to be
+ * this test's own. The backfill cases need the embedding model.
+ */
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper } from "../helpers/harper-lifecycle";
+import { componentWithReplayProbe, type ProbeComponent } from "../helpers/component-with-replay-probe";
+import { RaceHarness, newAgent } from "../helpers/embedding-writer-race";
+
+// An administrator agent: its supplied short vector is stored as sent, which
+// leaves the middleware's backfill a vector to compute.
+const writer = newAgent("srb3170-writer");
+const TARGET_READ = "memory-post-target-read";
+const PLAN = "memory-post-skill-plan";
+const BACKFILL_COMMIT = "backfill-embedding-commit";
+const SHORT_EMBEDDING = [0.01, 0.02, 0.03];
+const MODEL_FILE = "nomic-embed-text-v1.5.Q4_K_M.gguf";
+const HAS_MODEL = existsSync(join(process.env.FLAIR_MODELS_DIR ?? join(process.cwd(), "models"), MODEL_FILE));
+
+let component: ProbeComponent;
+let home: string;
+let pauseDir: string;
+let h: RaceHarness;
+
+const memPath = (id: string) => `/Memory/${encodeURIComponent(id)}`;
+function skillBody(content: string) {
+  return {
+    agentId: writer.id, content, trigger: "when the same skill POST is retried",
+    tags: ["skill"], durability: "persistent", embedding: SHORT_EMBEDDING,
+  };
+}
+/** Poll until the row holds a vector the backfill wrote. */
+async function waitForLongVector(id: string, timeoutMs = 30_000): Promise<any> {
+  const deadline = Date.now() + timeoutMs;
+  let row = await h.readRow(id);
+  while (Date.now() < deadline && !(row?.embedding?.length > 100)) {
+    await Bun.sleep(50);
+    row = await h.readRow(id);
+  }
+  return row;
+}
+
+beforeAll(async () => {
+  if (process.env.HARPER_HTTP_URL) throw new Error("requires an isolated Harper; unset HARPER_HTTP_URL");
+  home = mkdtempSync(join(tmpdir(), "flair-3170-home-"));
+  pauseDir = mkdtempSync(join(tmpdir(), "flair-3170-pause-"));
+  component = componentWithReplayProbe();
+  h = new RaceHarness(pauseDir);
+  h.harper = await startHarper({
+    homeDir: home, cwd: component.dir, harperBinDir: component.sourceRoot,
+    serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir },
+  });
+  h.assertOwnInstance();
+  await h.seedAgent(writer, "admin");
+}, 240_000);
+
+afterAll(async () => {
+  if (h?.harper) {
+    const installDir = h.harper.installDir;
+    await stopHarper(h.harper).catch(() => {});
+    rmSync(installDir, { recursive: true, force: true, maxRetries: 4 });
+  }
+  if (home) rmSync(home, { recursive: true, force: true });
+  if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
+  component?.cleanup();
+}, HARPER_STOP_BUDGET_MS);
+
+(HAS_MODEL ? describe : describe.skip)("flair#3170 — a skill POST retry and the previous write's backfill (real Harper)", () => {
+  it("STEP 1: the identical retry commits a successor when the backfill commits inside its window", async () => {
+    const skillId = `srb-skill-${randomUUID()}`;
+    const body = skillBody("a skill whose identical retry must not be refused");
+    h.arm(BACKFILL_COMMIT);
+    const first = await h.signed(writer, "POST", memPath(skillId), body);
+    const firstText = await first.text();
+    expect(first.status, `first ${first.status}: ${firstText.slice(0, 200)}`).toBeLessThan(300);
+    expect(JSON.parse(firstText).id).toBe(skillId);
+    // The first write's backfill is about to commit the vector.
+    await h.assertPaused(BACKFILL_COMMIT);
+    h.arm(TARGET_READ);
+    const retry = h.signed(writer, "POST", memPath(skillId), body);
+    try {
+      await h.assertPaused(TARGET_READ);
+      await h.release(BACKFILL_COMMIT);
+      const backfilled = await waitForLongVector(skillId);
+      expect(backfilled.embedding.length, "the backfill wrote no vector").toBeGreaterThan(100);
+      await h.release(TARGET_READ);
+    } finally {
+      h.letGo(TARGET_READ);
+      h.letGo(BACKFILL_COMMIT);
+    }
+    const res = await retry;
+    const text = await res.text();
+    expect(res.status, `retry ${res.status}: ${text.slice(0, 200)}`).toBeLessThan(300);
+    const successorId = JSON.parse(text).id as string;
+    expect(successorId).not.toBe(skillId);
+    const successor = await h.readRow(successorId);
+    expect(successor?.agentId).toBe(writer.id);
+    expect(successor?.supersedes).toBe(skillId);
+  }, 120_000);
+
+  it("CONTROL: a content change another writer commits in the same window still answers 409 skill_target_changed", async () => {
+    const skillId = `srb-skill-${randomUUID()}`;
+    const body = skillBody("a skill another writer changes under the retry");
+    const first = await h.signed(writer, "POST", memPath(skillId), body);
+    expect(first.status, await first.clone().text()).toBeLessThan(300);
+    // The first write's own backfill must not be the change this case tests.
+    expect((await waitForLongVector(skillId)).embedding.length).toBeGreaterThan(100);
+    h.arm(PLAN);
+    const retry = h.signed(writer, "POST", memPath(skillId), body);
+    let changed = false;
+    try {
+      await h.assertPaused(PLAN);
+      await h.rawUpdate(skillId, { content: "another writer replaced this skill's content" });
+      changed = true;
+    } finally {
+      h.letGo(PLAN);
+    }
+    expect(changed, "the competing change did not commit").toBe(true);
+    const res = await retry;
+    const text = await res.text();
+    expect(res.status, `retry ${res.status}: ${text.slice(0, 200)}`).toBe(409);
+    expect(JSON.parse(text).error).toBe("skill_target_changed");
+  }, 120_000);
+});

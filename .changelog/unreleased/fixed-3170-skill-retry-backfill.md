@@ -1,0 +1,2 @@
+- **An identical skill POST retry is no longer refused when the previous write's embedding backfill commits under it.**
+  A skill POST to an existing target plans in an owned transaction and reads the target as committed, so the stale-target check compares the version the write decided on with the version at plan time. A change to the target that another writer commits in between still answers 409 `skill_target_changed`.
