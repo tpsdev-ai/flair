@@ -2,6 +2,7 @@ import { Command } from "commander";
 import { existsSync, lstatSync, mkdirSync, renameSync, readdirSync, type Stats } from "node:fs";
 import { join } from "node:path";
 import * as render from "../render.js";
+import { scanKeyDir } from "../lib/key-dir.js";
 import { loadEd25519PrivateKeyFromFile } from "../mcp-client-assertion.js";
 import { defaultAdminPassPath, defaultKeysDir, isLocalBase, resolveAdminUser, resolveLocalAdminPass } from "../lib/auth-resolve.js";
 import { probeInstanceIds, type OpsEndpoint } from "../lib/instance-identity-row.js";
@@ -117,24 +118,26 @@ export async function classifyKeysDir(
 ): Promise<KeysPruneResult> {
   if (!existsSync(keysDir)) return { aborted: false, entries: [], orphanRead: null };
 
-  const dirents = readdirSync(keysDir, { withFileTypes: true });
+  // One walk, shared with doctor and status (flair#3077).
+  const scan = scanKeyDir(keysDir);
+  if (scan.state === "unreadable") throw scan.error;
   const entries: KeysPruneEntry[] = [];
   const candidates: Array<{ name: string; agentId: string }> = [];
 
-  for (const d of dirents) {
-    if (d.isDirectory()) {
+  for (const e of scan.entries) {
+    if (e.kind === "dir") {
       entries.push({
-        name: d.name,
+        name: e.name,
         class: "ignored",
-        reason: d.name === PRUNED_DIR_NAME ? "prune archive directory" : "directory (not a key file)",
+        reason: e.name === PRUNED_DIR_NAME ? "prune archive directory" : "directory (not a key file)",
       });
       continue;
     }
-    if (!d.name.endsWith(".key")) {
-      entries.push({ name: d.name, class: "ignored", reason: "not a .key file" });
+    if (e.kind === "other") {
+      entries.push({ name: e.name, class: "ignored", reason: "not a .key file" });
       continue;
     }
-    candidates.push({ name: d.name, agentId: d.name.slice(0, -".key".length) });
+    candidates.push({ name: e.name, agentId: e.name.slice(0, -".key".length) });
   }
 
   const { nodeKeyIds } = partitionKeyIds(candidates.map((c) => c.agentId), keysDir);
