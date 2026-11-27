@@ -1,0 +1,1 @@
+- **A newly created agent key is synced to its directory before registration, and a newly created keys directory is checked before use.** A failed directory sync refuses with the published key path and leaves the key in place; a keys path that is a symlink, a non-directory or another owner's directory is refused, and nothing is written into it.

@@ -146,7 +146,9 @@ describe("flair#3077 — sync before publication", () => {
 
     createAgentKeyFile(keyPath, seed);
 
-    expect(publicationEvents).toEqual(["fsync", "link"]);
+    // The temp file is fsynced, then linked; the new key's directory is
+    // fsynced after publication (flair#3152).
+    expect(publicationEvents).toEqual(["fsync", "link", "fsync"]);
     expect(realFs.readFileSync(keyPath).equals(seed)).toBe(true);
     expect(tempEntries(dir)).toHaveLength(0);
   });

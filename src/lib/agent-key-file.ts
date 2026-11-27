@@ -119,44 +119,12 @@ function modeText(mode: number): string {
 }
 
 /**
- * Request mode 0700 for missing `keysDir` (the umask may make it narrower);
- * tighten an existing directory the current user owns; refuse a symlink,
- * a non-directory, or another owner.
+ * Refuse a symlink, a non-directory or another owner; tighten an owned
+ * directory with group or world bits. Shared by an existing directory and one
+ * this call just created, so neither is trusted on the strength of its path.
  */
-export function ensureAgentKeysDir(keysDir: string): void {
-  if (WIN32) {
-    mkdirSync(keysDir, { recursive: true });
-    return;
-  }
-
-  let st: ReturnType<typeof lstatSync>;
-  try {
-    st = lstatSync(keysDir);
-  } catch (error) {
-    if (errnoCode(error) !== "ENOENT") throw error;
-    // The directory is owner-only from creation: the umask can only narrow the
-    // mode, never widen it past 0700. No later chmod is involved.
-    const firstCreated = mkdirSync(keysDir, { recursive: true, mode: 0o700 });
-    testHooks?.afterKeysDirCreate?.(keysDir);
-    if (firstCreated !== undefined) {
-      for (let created = keysDir; ; created = dirname(created)) {
-        if ([".", ".."].includes(basename(created))) continue;
-        let parent = dirname(created);
-        try {
-          parent = realpathSync(parent);
-          syncAgentKeysDir(parent);
-        } catch (error) {
-          throw new AgentKeyFileRefusal(
-            `flair could not sync parent directory ${parent} (${error instanceof Error ? error.message : String(error)}); ` +
-              `new keys directory ${keysDir} is not confirmed durable; check the directory and filesystem, then retry`,
-          );
-        }
-        if (resolve(created) === resolve(firstCreated)) break;
-      }
-    }
-    return;
-  }
-
+function checkAgentKeysDir(keysDir: string): void {
+  const st = lstatSync(keysDir);
   if (st.isSymbolicLink()) {
     throw new AgentKeyFileRefusal(
       `keys directory ${keysDir} is a symlink; replace it with a real directory you own (mode 700)`,
@@ -177,6 +145,55 @@ export function ensureAgentKeysDir(keysDir: string): void {
     chmodSync(keysDir, 0o700);
     console.log(`Keys directory ${keysDir} was accessible to other users; permissions tightened to 0700.`);
   }
+}
+
+/**
+ * Request mode 0700 for missing `keysDir` (the umask may make it narrower);
+ * check the path afterwards like an existing directory; tighten an owned
+ * directory; refuse a symlink, a non-directory, or another owner.
+ */
+export function ensureAgentKeysDir(keysDir: string): void {
+  if (WIN32) {
+    mkdirSync(keysDir, { recursive: true });
+    return;
+  }
+
+  let missing = false;
+  try {
+    lstatSync(keysDir);
+  } catch (error) {
+    if (errnoCode(error) !== "ENOENT") throw error;
+    missing = true;
+  }
+
+  if (missing) {
+    // The directory is owner-only from creation: the umask can only narrow the
+    // mode, never widen it past 0700. No later chmod is involved.
+    const firstCreated = mkdirSync(keysDir, { recursive: true, mode: 0o700 });
+    testHooks?.afterKeysDirCreate?.(keysDir);
+    // A recursive mkdir also succeeds when another process created the path
+    // first, so the path is checked like any existing directory before use.
+    checkAgentKeysDir(keysDir);
+    if (firstCreated !== undefined) {
+      for (let created = keysDir; ; created = dirname(created)) {
+        if ([".", ".."].includes(basename(created))) continue;
+        let parent = dirname(created);
+        try {
+          parent = realpathSync(parent);
+          syncAgentKeysDir(parent);
+        } catch (error) {
+          throw new AgentKeyFileRefusal(
+            `flair could not sync parent directory ${parent} (${error instanceof Error ? error.message : String(error)}); ` +
+              `new keys directory ${keysDir} is not confirmed durable; check the directory and filesystem, then retry`,
+          );
+        }
+        if (resolve(created) === resolve(firstCreated)) break;
+      }
+    }
+    return;
+  }
+
+  checkAgentKeysDir(keysDir);
 }
 
 /**
@@ -396,6 +413,16 @@ export function createAgentKeyFile(
     unlinkSync(temp.path);
   } catch {
     /* the published key is complete; a leftover temp file is mode 0600 */
+  }
+  // Publish the key's directory before returning: every caller registers the
+  // key only after this returns, so the registration never outlives the entry.
+  try {
+    syncAgentKeysDir(dirname(privateKeyPath));
+  } catch (error) {
+    throw new AgentKeyFileRefusal(
+      `flair could not sync keys directory ${dirname(privateKeyPath)} (${error instanceof Error ? error.message : String(error)}); ` +
+        `published key ${privateKeyPath} is not confirmed durable; check the directory and filesystem, then retry`,
+    );
   }
 }
 

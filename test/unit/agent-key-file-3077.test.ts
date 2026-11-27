@@ -19,10 +19,12 @@ import {
   chmodSync,
   existsSync,
   fstatSync,
+  fsyncSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   statSync,
   symlinkSync,
   writeFileSync,
@@ -370,6 +372,129 @@ test("a fresh key is 0600 at its first write under a zero umask and its bytes ar
   expect(statSync(keyPath).mode & 0o777).toBe(0o600);
   expect(tempEntries(dir)).toHaveLength(0);
 });
+
+test.skipIf(process.platform === "win32")("createAgentKeyFile syncs the key's directory after publication", () => {
+  const dir = keysDir();
+  ensureAgentKeysDir(dir);
+  const keyPath = join(dir, "durable.key");
+  const events: string[] = [];
+  let syncs = 0;
+  setAgentKeyFileTestHooks({
+    afterPublish: () => {
+      events.push("published");
+    },
+    syncKeysDir: (fd) => {
+      expect(fstatSync(fd).isDirectory()).toBe(true);
+      syncs += 1;
+      events.push("sync");
+      fsyncSync(fd);
+    },
+  });
+  try {
+    createAgentKeyFile(keyPath, Buffer.alloc(32));
+  } finally {
+    setAgentKeyFileTestHooks(undefined);
+  }
+  expect(syncs).toBe(1);
+  expect(events).toEqual(["published", "sync"]);
+  expect(existsSync(keyPath)).toBe(true);
+});
+
+test.skipIf(process.platform === "win32")("a failed directory sync refuses with the published key path and leaves the key", () => {
+  const dir = keysDir();
+  ensureAgentKeysDir(dir);
+  const keyPath = join(dir, "unsynced.key");
+  setAgentKeyFileTestHooks({
+    syncKeysDir: () => {
+      throw new Error("fixture sync failure");
+    },
+  });
+  let caught: unknown;
+  try {
+    createAgentKeyFile(keyPath, Buffer.alloc(32));
+  } catch (error) {
+    caught = error;
+  } finally {
+    setAgentKeyFileTestHooks(undefined);
+  }
+  expect(caught).toBeInstanceOf(AgentKeyFileRefusal);
+  expect((caught as Error).message).toContain(keyPath);
+  expect((caught as Error).message).toContain("not confirmed durable");
+  expect(existsSync(keyPath)).toBe(true);
+  expect(statSync(keyPath).mode & 0o777).toBe(0o600);
+});
+
+test.skipIf(process.platform === "win32")("a keys directory replaced by a symlink after creation is refused and nothing is written", () => {
+  const dir = keysDir();
+  const real = join(tempDir("flair-keyfile-3077-"), "real");
+  mkdirSync(real, { recursive: true });
+  setAgentKeyFileTestHooks({
+    afterKeysDirCreate: (created) => {
+      rmSync(created, { recursive: true });
+      symlinkSync(real, created);
+    },
+  });
+  try {
+    expect(() => ensureAgentKeysDir(dir)).toThrow(AgentKeyFileRefusal);
+    expect(() => ensureAgentKeysDir(dir)).toThrow(/symlink/);
+  } finally {
+    setAgentKeyFileTestHooks(undefined);
+  }
+  expect(readdirSync(real)).toHaveLength(0);
+});
+
+const MOCK_OPS_SOURCE = `
+const { writeFileSync } = require("node:fs");
+let stored = "";
+const server = Bun.serve({
+  port: 0,
+  fetch: async (req) => {
+    const body = await req.json();
+    if (body.operation === "sql") return Response.json([]);
+    if (body.operation === "search_by_value" && body.table === "Agent") {
+      return Response.json(stored ? [{ id: "agent-a", name: "agent-a", publicKey: stored }] : []);
+    }
+    if (body.operation === "insert") {
+      stored = body.records && body.records[0] ? body.records[0].publicKey : "";
+      return Response.json({ inserted_hashes: 1 });
+    }
+    return Response.json({});
+  },
+});
+writeFileSync(process.argv[2], String(server.port));
+`;
+
+test.skipIf(process.platform === "win32")("flair agent add creates a 0600 key in a fresh keys directory", async () => {
+  const home = tempDir("flair-keyfile-3077-home-");
+  const keysDir = join(home, "keys");
+  const passFile = join(home, "admin-pass");
+  const serverScript = join(home, "mock-ops.js");
+  const portFile = join(home, "mock-ops.port");
+  writeFileSync(passFile, "fixture-pass", { mode: 0o600 });
+  writeFileSync(serverScript, MOCK_OPS_SOURCE);
+  const server = Bun.spawn(["bun", serverScript, portFile], { stdout: "ignore", stderr: "ignore" });
+  try {
+    const deadline = Date.now() + 10_000;
+    while (!existsSync(portFile)) {
+      if (Date.now() > deadline) throw new Error("mock ops server did not start");
+      await Bun.sleep(25);
+    }
+    const port = readFileSync(portFile, "utf8").trim();
+    const r = spawnSync(
+      "bun",
+      [join(__dirname, "..", "..", "src", "cli.ts"), "agent", "add", "agent-a", "--keys-dir", keysDir,
+        "--ops-target", `http://127.0.0.1:${port}`, "--admin-pass-file", passFile],
+      { env: { ...process.env, HOME: home }, timeout: 20_000, encoding: "utf8" },
+    );
+    expect(r.status).toBe(0);
+    const privPath = join(keysDir, "agent-a.key");
+    expect(readFileSync(privPath).length).toBe(32);
+    expect(statSync(privPath).mode & 0o777).toBe(0o600);
+  } finally {
+    server.kill();
+    await server.exited.catch(() => {});
+  }
+}, 30_000);
 
 test.skipIf(process.platform !== "win32")("win32 reuses an existing key without a permission refusal", () => {
   const dir = keysDir();
