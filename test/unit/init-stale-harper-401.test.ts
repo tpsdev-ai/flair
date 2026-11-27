@@ -47,6 +47,21 @@ function ok(_req, res) {
   res.writeHead(200, { "content-type": "application/json" });
   res.end(JSON.stringify({ status: "ok" }));
 }
+function absent(_req, res) {
+  // A real server answers an absent record with 404.
+  res.writeHead(404, { "content-type": "application/json" });
+  res.end(JSON.stringify({}));
+}
+function httpRecords(req, res) {
+  if (req.method === "GET" && /^\\/(Memory|Agent|OrgSkillAssignment)\\//.test(req.url)) return absent(req, res);
+  ok(req, res);
+}
+function staleCredential(req, res) {
+  // Health is public and the credential probe passes here; a record read still
+  // refuses the credential.
+  if (req.url === "/Health" || req.url === "/FederationPeers") return ok(req, res);
+  denied(req, res);
+}
 function denied(_req, res) {
   res.writeHead(401, { "content-type": "application/json" });
   res.end(JSON.stringify({ error: "Login failed" }));
@@ -54,10 +69,14 @@ function denied(_req, res) {
 (async () => {
   const out = { pid: process.pid, httpPort: null, opsPort: null };
   if (role === "both" || role === "http") {
-    const health = await listen(ok);
+    const health = await listen(httpRecords);
     out.httpPort = health.address().port;
   }
-  if (role === "both" || role === "ops") {
+  if (role === "stale-both") {
+    const health = await listen(staleCredential);
+    out.httpPort = health.address().port;
+  }
+  if (role === "both" || role === "ops" || role === "stale-both") {
     const ops = await listen(denied);
     out.opsPort = ops.address().port;
   }
@@ -123,7 +142,7 @@ interface StubReady {
   pid: number;
 }
 
-function startStub(rootPath: string, role: "both" | "http" | "ops", logPath: string, harperEntry = false): Promise<StubReady> {
+function startStub(rootPath: string, role: "both" | "http" | "ops" | "stale-both", logPath: string, harperEntry = false): Promise<StubReady> {
   const scriptPath = harperEntry
     ? join(scratch!, "node_modules", "harper", "dist", "bin", "harper.js")
     : join(scratch!, `stub-${role}.js`);
@@ -496,6 +515,34 @@ describe("flair#1749 — init and a Harper this init did not start", () => {
     const requests = readStubLog(logPath);
     expect(requests.some(req => req.url === "/Health" && req.authorization !== null)).toBe(true);
     expect(requests.some(req => req.method === "POST" && req.authorization !== null)).toBe(true);
+  }, 40_000);
+
+  test.skipIf(!operationsFixtureSupported)("a preflight record read refused with 401 names the status, not an agent-id clash", async () => {
+    scratch = mkdtempSync(join(tmpdir(), "flair-1749-"));
+    const home = join(scratch, "home");
+    const dataDir = join(scratch, "data");
+    const keysDir = join(scratch, "keys");
+    const logPath = join(scratch, "requests.log");
+    mkdirSync(home);
+    mkdirSync(dataDir);
+    chmodSync(dataDir, 0o700);
+    mkdirSync(keysDir);
+    writeFileSync(join(dataDir, "harper-config.yaml"), `rootPath: ${dataDir}\n`);
+    const listener = await startStub(dataDir, "stale-both", logPath, true);
+    writeFileSync(join(dataDir, "hdb.pid"), String(listener.pid), { mode: 0o600 });
+    const { code, stdout, stderr } = await runInit([
+      "--agent", "canary",
+      "--port", String(listener.httpPort), "--ops-port", String(listener.opsPort),
+      "--data-dir", dataDir, "--keys-dir", keysDir, "--admin-pass", "this-init-password",
+      "--no-mcp", "--skip-soul", "--skip-hook", "--skip-claude-md", "--skip-smoke",
+    ], isolatedEnv(home));
+    const output = stdout + stderr;
+    expect(code).not.toBe(0);
+    expect(output).toContain("using-flair skill seed was refused");
+    expect(output).toContain("HTTP 401");
+    expect(output).not.toContain("Harper health check failed");
+    expect(output).not.toContain("has the operator's id");
+    expect(readStubLog(logPath).some(req => req.method === "POST")).toBe(false);
   }, 40_000);
 
   test("self-started seed keeps today's credential 401 hint", async () => {

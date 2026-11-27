@@ -114,6 +114,12 @@ const UNSCANNABLE_ALLOWED: ReadonlyArray<{ file: string; text: string; sites: nu
     sites: 2,
     reason: "sets FLAIR_FEDERATION_PRESENCE_SEND, which the in-process runFederationSyncOnce() call reads, and deletes it in afterAll; the receiver declares it removed through serverEnv",
   },
+  {
+    file: "test/integration/init-seed-preflight-3126.test.ts",
+    text: "process.env[key]",
+    sites: 3,
+    reason: "runInit deletes the listed FLAIR_* and ROOTPATH variables before the in-process init action and restores the saved values afterwards, so an ambient value cannot leak in",
+  },
 ];
 
 // FLAIR_* keys in the object literal passed as startHarper's `env`, per
