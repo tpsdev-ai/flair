@@ -56,23 +56,34 @@ afterEach(() => {
 
 /** Mock ops-API fetch: search_by_value → configurable existing-agent set;
  *  insert → 200 unless failInsert; delete → 200 unless failDelete. Captures
- *  every request body for assertions. */
+ *  every request body for assertions. `committed` is the set of Agent ids the
+ *  mock's insert stored, including the failInsertAfterCommit case where the
+ *  row is stored but the response is an error. */
 function mockOpsFetch(opts: {
   existingAgentIds?: Set<string>;
   failInsert?: boolean;
+  failInsertAfterCommit?: boolean;
   failDelete?: boolean;
   networkErrorOnDelete?: boolean;
-} = {}): { fetchImpl: typeof fetch; calls: any[] } {
+} = {}): { fetchImpl: typeof fetch; calls: any[]; committed: Set<string> } {
   const calls: any[] = [];
+  const committed = new Set<string>();
   const fetchImpl = (async (_url: any, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body ?? "{}"));
     calls.push(body);
     if (body.operation === "search_by_value") {
-      const found = opts.existingAgentIds?.has(body.search_value) ? [{ id: body.search_value }] : [];
+      const found = opts.existingAgentIds?.has(body.search_value) || committed.has(body.search_value)
+        ? [{ id: body.search_value }]
+        : [];
       return new Response(JSON.stringify(found), { status: 200, headers: { "Content-Type": "application/json" } });
     }
     if (body.operation === "insert") {
+      if (opts.failInsertAfterCommit) {
+        for (const record of body.records ?? []) committed.add(record.id);
+        return new Response("insert failed", { status: 500 });
+      }
       if (opts.failInsert) return new Response("insert failed", { status: 500 });
+      for (const record of body.records ?? []) committed.add(record.id);
       return new Response(JSON.stringify({ message: "inserted" }), { status: 200 });
     }
     if (body.operation === "sql") {
@@ -87,7 +98,7 @@ function mockOpsFetch(opts: {
     }
     return new Response("{}", { status: 200 });
   }) as typeof fetch;
-  return { fetchImpl, calls };
+  return { fetchImpl, calls, committed };
 }
 
 // ─── grant: happy path ───────────────────────────────────────────────────────
@@ -221,29 +232,30 @@ describe("grantMcpClient — duplicate-name rejection", () => {
     expect(readMcpClientManifest(manifestPath)).toHaveLength(0);
   });
 
-  test("removes both key files when the Agent insert fails, and a retry succeeds", async () => {
+  test("keeps both key files when the insert response is an error and the cleanup delete is not acknowledged", async () => {
+    const { fetchImpl, calls, committed } = mockOpsFetch({ failInsertAfterCommit: true, failDelete: true });
     let thrown: Error | undefined;
     try {
       await grantMcpClient(
-        { name: "will-fail", keysDir, manifestPath, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "s3cret" },
-        { fetchImpl: mockOpsFetch({ failInsert: true }).fetchImpl },
+        { name: "insert-uncertain", keysDir, manifestPath, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "s3cret" },
+        { fetchImpl },
       );
     } catch (error) {
       thrown = error as Error;
     }
+    const privPath = join(keysDir, "insert-uncertain.key");
+    const pubPath = join(keysDir, "insert-uncertain.pub");
     expect(thrown?.message).toMatch(/Failed to create Agent/);
-    expect(thrown?.message).toMatch(/removed the key paths that still named this call's files when checked/);
-    expect(existsSync(join(keysDir, "will-fail.key"))).toBe(false);
-    expect(existsSync(join(keysDir, "will-fail.pub"))).toBe(false);
+    expect(thrown?.message).toContain("may exist");
+    expect(thrown?.message).toContain(privPath);
+    expect(thrown?.message).toContain(pubPath);
+    expect(committed.has("insert-uncertain")).toBe(true);
+    expect(existsSync(privPath)).toBe(true);
+    expect(existsSync(pubPath)).toBe(true);
+    expect(statSync(privPath).mode & 0o777).toBe(0o600);
+    expect(calls.some((c) => c.operation === "insert" && c.records?.[0]?.id === "insert-uncertain")).toBe(true);
+    expect(calls.some((c) => c.operation === "delete" && c.ids?.[0] === "insert-uncertain")).toBe(true);
     expect(readMcpClientManifest(manifestPath)).toHaveLength(0);
-
-    const { entry } = await grantMcpClient(
-      { name: "will-fail", keysDir, manifestPath, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "s3cret" },
-      { fetchImpl: mockOpsFetch().fetchImpl },
-    );
-    expect(readFileSync(entry.keyFile).length).toBe(32);
-    expect(statSync(entry.keyFile).mode & 0o777).toBe(0o600);
-    expect(readMcpClientManifest(manifestPath)).toHaveLength(1);
   });
 });
 
@@ -506,7 +518,7 @@ describe("grantMcpClient — key files", () => {
 // ─── grant: key custody after the Agent insert (flair#3077 slice C) ───────
 
 describe("grantMcpClient — key custody after the Agent insert (flair#3077 slice C)", () => {
-  test("a failure after a successful insert keeps the key files and the Agent, and names both", async () => {
+  test("a failure after a successful insert with an unacknowledged delete keeps the key files and says the Agent may exist", async () => {
     // Make the manifest write fail after the insert: its parent path is a
     // regular file, so mkdirSync throws once the Agent row exists.
     const parentAsFile = join(dir, "manifest-parent");
@@ -530,6 +542,7 @@ describe("grantMcpClient — key custody after the Agent insert (flair#3077 slic
     expect(statSync(privPath).mode & 0o777).toBe(0o600);
     expect(statSync(pubPath).mode & 0o777).toBe(0o600);
     expect(thrown!.message).toContain("client-kept");
+    expect(thrown!.message).toContain("may exist");
     expect(thrown!.message).toContain(privPath);
     expect(thrown!.message).toContain(pubPath);
     expect(calls.some((c) => c.operation === "insert" && c.records?.[0]?.id === "client-kept")).toBe(true);

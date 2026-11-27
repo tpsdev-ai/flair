@@ -247,35 +247,69 @@ function modeText(stats: Stats): string {
   return (stats.mode & 0o777).toString(8).padStart(4, "0");
 }
 
-/** Create `dir` if absent, then require it owner-only. An existing wider
- *  directory is tightened; the mode is read back, and a directory that still
- *  has group or world bits is refused with the exact remedy. */
-function ensureOwnerOnlyDir(dir: string): void {
-  mkdirSync(dir, { recursive: true, mode: OWNER_ONLY_DIR_MODE });
-  let stats = lstatSync(dir);
+function currentUid(): number | undefined {
+  return typeof process.getuid === "function" ? process.getuid() : undefined;
+}
+
+/** Render a path as one shell word, so a remedy can be pasted for a path with
+ *  spaces or shell characters. */
+function shellWord(path: string): string {
+  return `'${path.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Create `dir` if absent, then require it to be a directory this user owns
+ *  with no group or world bits. A symlink, a non-directory or another owner's
+ *  directory is refused before anything moves; an existing wider directory is
+ *  tightened, and the mode is read back. */
+function ensureArchiveComponent(
+  dir: string,
+  chmod: (path: string, mode: number) => void,
+): void {
+  let stats: Stats;
+  try {
+    stats = lstatSync(dir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    try {
+      mkdirSync(dir, { mode: OWNER_ONLY_DIR_MODE });
+    } catch (mkdirError) {
+      if ((mkdirError as NodeJS.ErrnoException).code !== "EEXIST") throw mkdirError;
+    }
+    stats = lstatSync(dir);
+  }
+  if (stats.isSymbolicLink()) {
+    throw new Error(`${dir} is a symlink; the archive path must be a directory this user owns, so nothing was moved`);
+  }
+  if (!stats.isDirectory()) {
+    throw new Error(`${dir} is not a directory; the archive path must be a directory this user owns, so nothing was moved`);
+  }
+  const uid = currentUid();
+  if (uid !== undefined && stats.uid !== uid) {
+    throw new Error(`${dir} is not owned by the current user; the archive path must be a directory this user owns, so nothing was moved`);
+  }
   if ((stats.mode & 0o077) !== 0) {
     try {
-      chmodSync(dir, OWNER_ONLY_DIR_MODE);
+      chmod(dir, OWNER_ONLY_DIR_MODE);
     } catch (error) {
-      throw new Error(`${dir} is mode ${modeText(stats)}; run \`chmod 700 ${dir}\` to make it owner-only`, { cause: error });
+      throw new Error(`${dir} is mode ${modeText(stats)}; run \`chmod 700 ${shellWord(dir)}\` to make it owner-only`, { cause: error });
     }
     stats = lstatSync(dir);
     if ((stats.mode & 0o077) !== 0) {
-      throw new Error(`${dir} is mode ${modeText(stats)} after tightening; run \`chmod 700 ${dir}\` to make it owner-only`);
+      throw new Error(`${dir} is mode ${modeText(stats)} after tightening; run \`chmod 700 ${shellWord(dir)}\` to make it owner-only`);
     }
   }
 }
 
 /** Tighten an archived private key to 0600 after the move, read back. */
-function tightenArchivedKey(path: string): void {
+function tightenArchivedKey(path: string, chmod: (path: string, mode: number) => void): void {
   try {
-    chmodSync(path, OWNER_ONLY_KEY_MODE);
+    chmod(path, OWNER_ONLY_KEY_MODE);
   } catch (error) {
-    throw new Error(`${path} could not be made owner-only after the move; run \`chmod 600 ${path}\``, { cause: error });
+    throw new Error(`${path} could not be made owner-only after the move; run \`chmod 600 ${shellWord(path)}\``, { cause: error });
   }
   const stats = lstatSync(path);
   if ((stats.mode & 0o777) !== OWNER_ONLY_KEY_MODE) {
-    throw new Error(`${path} is mode ${modeText(stats)} after the move; run \`chmod 600 ${path}\``);
+    throw new Error(`${path} is mode ${modeText(stats)} after the move; run \`chmod 600 ${shellWord(path)}\``);
   }
 }
 
@@ -288,6 +322,7 @@ export function applyKeyPrune(
   entries: KeysPruneEntry[],
   dateStamp: string,
   move: typeof renameSync = renameSync,
+  chmod: (path: string, mode: number) => void = chmodSync,
 ): KeysPruneOutcome {
   const prunable = entries.filter((e) => {
     const nodeShaped = isNodeKeyId(e.name.replace(/\.key$/, ""), keysDir);
@@ -298,11 +333,12 @@ export function applyKeyPrune(
   if (prunable.length === 0) return { moved, skipped };
 
   const destDir = join(keysDir, PRUNED_DIR_NAME, dateStamp);
-  // Created before the first attempted move, owner-only.
+  // Checked and created before the first attempted move, owner-only.
   let existing: Set<string> | undefined;
   const archiveNames = (): Set<string> => {
     if (!existing) {
-      ensureOwnerOnlyDir(destDir);
+      ensureArchiveComponent(join(keysDir, PRUNED_DIR_NAME), chmod);
+      ensureArchiveComponent(destDir, chmod);
       existing = new Set(readdirSync(destDir));
     }
     return existing;
@@ -370,7 +406,7 @@ export function applyKeyPrune(
       if (ownerMoved) move(toOwner, fromOwner);
       throw err;
     }
-    tightenArchivedKey(to);
+    tightenArchivedKey(to, chmod);
     moved.push({ name: e.name, movedTo: to });
   }
   return { moved, skipped };

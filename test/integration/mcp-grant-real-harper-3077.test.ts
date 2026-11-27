@@ -7,7 +7,7 @@
 //
 // Build prerequisite: dist/resources/*.js (`bun run build`).
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
@@ -121,5 +121,55 @@ describe("flair#3077 slice C — mcp grant against a real Harper", () => {
     expect(doc.client_name).toBe(CLIENT);
     expect(doc.jwks.keys).toHaveLength(1);
     expect(doc.jwks.keys[0]).toMatchObject({ kty: "OKP", crv: "Ed25519", x: publicKey });
+  }, 60_000);
+
+  test("(i) a manifest write failure after the insert deletes the Agent and removes its key files", async () => {
+    const client = "client-b";
+    const occupied = join(rootDir, "manifest-parent");
+    writeFileSync(occupied, "occupied");
+    const failingManifest = join(occupied, "mcp-clients.json");
+
+    const seen: Array<{ operation: string; status: number }> = [];
+    const recordingFetch = (async (url: any, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      const res = await fetch(url, init);
+      seen.push({ operation: body.operation, status: res.status });
+      return res;
+    }) as typeof fetch;
+
+    let thrown: Error | undefined;
+    try {
+      await grantMcpClient(
+        {
+          name: client,
+          keysDir,
+          manifestPath: failingManifest,
+          issuer: ISSUER,
+          opsPortOrUrl: harper.opsURL,
+          adminUser: harper.admin.username,
+          adminPass: harper.admin.password,
+        },
+        { fetchImpl: recordingFetch },
+      );
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    expect(thrown).toBeDefined();
+    expect(seen.find((s) => s.operation === "insert")).toEqual({ operation: "insert", status: 200 });
+    expect(seen.find((s) => s.operation === "delete")).toEqual({ operation: "delete", status: 200 });
+    expect(thrown!.message).toContain("was deleted");
+    expect(thrown!.message).toContain("its key files were removed");
+    expect(existsSync(join(keysDir, `${client}.key`))).toBe(false);
+    expect(existsSync(join(keysDir, `${client}.pub`))).toBe(false);
+
+    const rows = await ops({
+      operation: "search_by_value",
+      table: "Agent",
+      search_attribute: "id",
+      search_value: client,
+      get_attributes: ["id"],
+    });
+    expect(rows).toHaveLength(0);
   }, 60_000);
 });

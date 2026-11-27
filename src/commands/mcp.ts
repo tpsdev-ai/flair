@@ -382,7 +382,6 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
       }),
     });
     if (!insertRes.ok) {
-      agentMayExist = false;
       const text = await insertRes.text().catch(() => "");
       throw new Error(`Failed to create Agent '${name}' via operations API (${insertRes.status}): ${text}`);
     }
