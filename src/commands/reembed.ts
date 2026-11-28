@@ -23,6 +23,7 @@ import {
   reembedUnverifiedMessage,
 } from "../lib/reembed-server-support.js";
 import { existsSync } from "node:fs";
+import { agentKeyPath } from "../lib/key-dir.js";
 
 export type ReembedCli = {
   privKeyPath: (...args: any[]) => any;
@@ -593,6 +594,15 @@ program
     const dryRun = opts.dryRun ?? false;
     const batchSize = Number(opts.batchSize);
     const delayMs = Number(opts.delayMs);
+
+    if (agentId !== undefined) {
+      try {
+        agentKeyPath(defaultKeysDir(), agentId);
+      } catch (err) {
+        console.error(`❌ ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+    }
 
     // A call with neither --agent nor an admin password is a usage error; report
     // it before the server check below so the existing message is not masked.

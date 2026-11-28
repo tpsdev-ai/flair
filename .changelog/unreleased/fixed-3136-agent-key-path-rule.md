@@ -1,0 +1,1 @@
+- With `--key`, `flair bootstrap`, `flair attention`, `flair search`, `flair bridge import` and `flair bridge export` refuse a non-empty id outside the rule with the shared agent-ID message before a key read or request for that record.

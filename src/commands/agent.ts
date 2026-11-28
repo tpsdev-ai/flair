@@ -21,7 +21,7 @@
 import { Command } from "commander";
 import nacl from "tweetnacl";
 import { existsSync, writeFileSync, unlinkSync, realpathSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, basename } from "node:path";
 import * as render from "../render.js";
 import {
   addAdminPassOptions,
@@ -50,6 +50,7 @@ import {
   type AgentKeyFileContents,
 } from "../lib/agent-key-file.js";
 import { acquireAgentRotationLock, agentRotationTestPause } from "../lib/agent-rotation-lock.js";
+import { agentKeyPath, agentPubKeyPath } from "../lib/key-dir.js";
 import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
 import {
   agentHomeEndpoint,
@@ -117,7 +118,8 @@ export function removeAgentKeyFiles(agentId: string, keysDir: string): { removed
     return { removed: [], manual: false }; // directory resolution failed
   }
   const removed: string[] = [];
-  for (const name of [`${agentId}.key`, `${agentId}.pub`, `${agentId}.key.bak`]) {
+  const keyName = basename(agentKeyPath(keysDir, agentId));
+  for (const name of [keyName, basename(agentPubKeyPath(keysDir, agentId)), `${keyName}.bak`]) {
     let real: string;
     try {
       real = realpathSync(join(keysDir, name));
@@ -131,8 +133,8 @@ export function removeAgentKeyFiles(agentId: string, keysDir: string): { removed
   let backups: string[] = [];
   try {
     backups = readdirSync(keysDir).filter((name) =>
-      isAgentKeyRotationBackup(name, `${agentId}.key`) ||
-      (name.startsWith(`.${agentId}.key.tmp-`) && /^[0-9a-f]{16}$/.test(name.slice(`.${agentId}.key.tmp-`.length))),
+      isAgentKeyRotationBackup(name, keyName) ||
+      (name.startsWith(`.${keyName}.tmp-`) && /^[0-9a-f]{16}$/.test(name.slice(`.${keyName}.tmp-`.length))),
     );
   } catch { /* keys directory resolution failed */ }
   for (const name of backups) {
@@ -601,11 +603,15 @@ export function register(program: Command): void {
         // the principal table for discovery, so sign the request with its key.
         const baseUrl = `http://127.0.0.1:${port}`;
         const agentId = opts.agent ?? process.env.FLAIR_AGENT_ID;
+        if (agentId && !isValidAgentId(agentId)) {
+          console.error(`Error: ${invalidAgentIdMessage(agentId)}`);
+          process.exit(1);
+        }
         const keysDir: string = opts.keysDir ?? process.env.FLAIR_KEY_DIR ?? defaultKeysDir();
         let res: Response;
         let sent: SentCredentials = { values: [], withhold: false };
         if (agentId) {
-          const keyPath = resolveKeyPath(agentId) ?? join(keysDir, `${agentId}.key`);
+          const keyPath = resolveKeyPath(agentId) ?? agentKeyPath(keysDir, agentId);
           if (!existsSync(keyPath)) {
             console.error(`${render.icons.error} no key for agent '${agentId}' (looked in ${keysDir}). Pass --admin-pass, --keys-dir, or a registered --agent.`);
             process.exit(1);

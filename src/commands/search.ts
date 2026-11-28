@@ -8,6 +8,7 @@
  */
 import { Command } from "commander";
 import { buildEd25519Auth, requestTarget, requestUrl, resolveKeyPath } from "../lib/auth-resolve.js";
+import { requireAgentId } from "../lib/key-dir.js";
 import * as render from "../render.js";
 import { join } from "node:path";
 import { DURABILITY_CAVEAT } from "../lib/durability-copy.js";
@@ -175,6 +176,7 @@ program
         console.error("error: --agent <id> required (or set FLAIR_AGENT_ID)");
         process.exit(2);
       }
+      requireAgentId(agentId);
       const baseUrl = resolveBaseUrl(opts);
       const url = requestUrl(baseUrl, "/SemanticSearch");
       const headers: Record<string, string> = { "content-type": "application/json" };

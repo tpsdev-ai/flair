@@ -20,6 +20,7 @@ import { BridgeRuntimeError } from "../types.js";
 import { importFromYaml } from "./execute.js";
 import type { BridgeContext } from "../types.js";
 import { endsWithContentSelectorSuffix } from "../../lib/memory-id-policy.js";
+import { requireAgentId } from "../../lib/key-dir.js";
 
 export interface ImportRunOptions {
   /**
@@ -116,6 +117,10 @@ export async function runImport(opts: ImportRunOptions): Promise<ImportRunResult
         hint: `record ${total} has no agentId and no --agent default was provided. Pass --agent <id> on the import command, or have the descriptor map an agentId column.`,
       });
     }
+
+    // Refuse an invalid agent id before the caller resolves a key path or reads
+    // a key for this record.
+    requireAgentId(resolvedAgent);
 
     const durability = (m.durability && VALID_DURABILITY.has(m.durability))
       ? m.durability
