@@ -607,6 +607,34 @@ test.skipIf(process.platform === "win32")("a keys directory under an ancestor an
   expect(existsSync(dir)).toBe(false);
 });
 
+test.skipIf(process.platform === "win32")("an existing key under an ancestor another user can change is refused on reuse, with the ancestor refusal itself", () => {
+  const home = tempDir("flair-keyfile-3077-");
+  const shared = join(home, "shared");
+  mkdirSync(shared, { mode: 0o700 });
+  chmodSync(shared, 0o777);
+  const dir = join(shared, "keys");
+  mkdirSync(dir, { mode: 0o700 });
+  const keyPath = join(dir, "agent-a.key");
+  const prior = Buffer.alloc(32, 6);
+  writeFileSync(keyPath, prior, { mode: 0o600 });
+  let caught: unknown;
+  try {
+    withHome(home, () => {
+      readOrCreateAgentKey(keyPath, () => {
+        throw new Error("create must not run");
+      });
+    });
+  } catch (error) {
+    caught = error;
+  }
+  expect(caught).toBeInstanceOf(AgentKeyFileRefusal);
+  const message = (caught as Error).message;
+  expect(message.startsWith(`keys directory ${dir} has ancestor ${realpathSync(shared)} owned by uid`)).toBe(true);
+  expect(message).not.toContain("could not sync");
+  expect(readFileSync(keyPath).equals(prior)).toBe(true);
+  expect(statSync(dir).mode & 0o777).toBe(0o700);
+});
+
 test.skipIf(process.platform === "win32")("an ancestor inside the flair home owned by another uid is refused (stat seam: process.getuid)", () => {
   if (typeof process.getuid !== "function") return;
   const realUid = process.getuid();

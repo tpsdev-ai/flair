@@ -16,7 +16,8 @@
  *     it is a directory and not a symlink) an ancestor the current user owns
  *     has its group and world write bits removed instead, with one notice
  *     naming it and its old and new modes, and the walk continues; an ancestor
- *     there owned by anyone else is refused as above.
+ *     there that the current user does not own is never tightened; it is
+ *     checked by the rule above.
  *   - the keys directory is requested with mode 0700 (the umask may make it
  *     narrower); an existing directory owned by the current user is tightened
  *     to 0700 when it has group or world bits, with one notice line; a symlink,
@@ -835,9 +836,8 @@ export function readOrCreateAgentKey(
 function syncReusedAgentKeyDir(privateKeyPath: string): void {
   if (WIN32) return;
   const keysDir = dirname(privateKeyPath);
-  let handle: AgentKeysDirHandle | undefined;
+  const handle = openCheckedAgentKeysDir(keysDir);
   try {
-    handle = openCheckedAgentKeysDir(keysDir);
     (testHooks?.syncKeysDir ?? fsyncSync)(handle.fd);
   } catch (error) {
     throw new AgentKeyFileRefusal(
@@ -845,6 +845,6 @@ function syncReusedAgentKeyDir(privateKeyPath: string): void {
         `existing key ${privateKeyPath} is not confirmed durable; check the directory and filesystem, then retry`,
     );
   } finally {
-    if (handle) closeSync(handle.fd);
+    closeSync(handle.fd);
   }
 }
