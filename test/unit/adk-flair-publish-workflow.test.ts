@@ -296,10 +296,10 @@ exit "$LOOKUP_EXIT"
       if (scenario === "complete" || scenario === "listed on retry") {
         for (const file of files) expect(text).toContain(`Verified ${file.filename}: ${file.digests.sha256}`);
       }
-      if (scenario.startsWith("missing")) expect(text).toContain(`Missing PyPI file: ${affected}`);
+      if (scenario.startsWith("missing")) expect(text).toContain(`::error::Missing PyPI file: ${affected} after 2 lookups.`);
       if (scenario.includes("mismatch")) expect(text).toContain(`SHA256 mismatch for PyPI file: ${affected}`);
       if (scenario === "two local wheels") expect(text).toContain("::error::Expected one locally built wheel and one sdist.");
-      if (scenario.endsWith("error")) expect(text).toContain("::error::PyPI lookup failed");
+      if (scenario.endsWith("error")) expect(text).toContain("::error::PyPI lookup failed for adk-flair 0.59.0 after 2 lookups.");
       if (scenario === "invalid JSON") expect(text).toContain("::error::Invalid PyPI file list");
     });
   }
