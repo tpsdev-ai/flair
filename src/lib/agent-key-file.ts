@@ -800,12 +800,14 @@ export function replaceAgentKeyFile(privateKeyPath: string, stagedPath: string):
  * carries another key does not replace one already on disk). On POSIX a
  * reused key's directory is synced before the key is returned, so a retry
  * after a failed sync confirms the entry durable; a failure refuses and
- * leaves the key in place. Windows cannot sync a directory.
+ * leaves the key in place. Windows cannot sync a directory. On POSIX the
+ * ancestor rule runs before an existing key is read.
  */
 export function readOrCreateAgentKey(
   privateKeyPath: string,
   create: () => string | Uint8Array,
 ): AgentKeyFileContents {
+  if (!WIN32) assertAgentKeysDirAncestors(dirname(privateKeyPath));
   const existing = readExistingAgentKey(privateKeyPath);
   if (existing) {
     syncReusedAgentKeyDir(privateKeyPath);

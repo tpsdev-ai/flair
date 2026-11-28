@@ -607,7 +607,7 @@ test.skipIf(process.platform === "win32")("a keys directory under an ancestor an
   expect(existsSync(dir)).toBe(false);
 });
 
-test.skipIf(process.platform === "win32")("an existing key under an ancestor another user can change is refused on reuse, with the ancestor refusal itself", () => {
+test.skipIf(process.platform === "win32")("an existing key under an ancestor another user can change is refused before its bytes are read, with the ancestor refusal itself", () => {
   const home = tempDir("flair-keyfile-3077-");
   const shared = join(home, "shared");
   mkdirSync(shared, { mode: 0o700 });
@@ -617,6 +617,56 @@ test.skipIf(process.platform === "win32")("an existing key under an ancestor ano
   const keyPath = join(dir, "agent-a.key");
   const prior = Buffer.alloc(32, 6);
   writeFileSync(keyPath, prior, { mode: 0o600 });
+  let keyRead = false;
+  let created = false;
+  setAgentKeyFileTestHooks({
+    beforeKeyRead: () => {
+      keyRead = true;
+    },
+  });
+  let caught: unknown;
+  try {
+    withHome(home, () => {
+      readOrCreateAgentKey(keyPath, () => {
+        created = true;
+        throw new Error("create must not run");
+      });
+    });
+  } catch (error) {
+    caught = error;
+  } finally {
+    setAgentKeyFileTestHooks(undefined);
+  }
+  expect(caught).toBeInstanceOf(AgentKeyFileRefusal);
+  const message = (caught as Error).message;
+  expect(message.startsWith(`keys directory ${dir} has ancestor ${realpathSync(shared)} owned by uid`)).toBe(true);
+  expect(message).not.toContain("could not sync");
+  expect(keyRead).toBe(false);
+  expect(created).toBe(false);
+  expect(readFileSync(keyPath).equals(prior)).toBe(true);
+  expect(statSync(dir).mode & 0o777).toBe(0o700);
+});
+
+test.skipIf(process.platform === "win32")("an ancestor that turns writable after the key is read is refused at the reuse sync, with the ancestor refusal itself", () => {
+  const home = tempDir("flair-keyfile-3077-");
+  const shared = join(home, "shared");
+  mkdirSync(shared, { mode: 0o700 });
+  const dir = join(shared, "keys");
+  mkdirSync(dir, { mode: 0o700 });
+  const keyPath = join(dir, "agent-a.key");
+  const prior = Buffer.alloc(32, 8);
+  writeFileSync(keyPath, prior, { mode: 0o600 });
+  let syncs = 0;
+  setAgentKeyFileTestHooks({
+    // The walk before the read has passed; the reuse sync checks again.
+    beforeKeyRead: () => {
+      chmodSync(shared, 0o777);
+    },
+    syncKeysDir: (fd) => {
+      syncs += 1;
+      fsyncSync(fd);
+    },
+  });
   let caught: unknown;
   try {
     withHome(home, () => {
@@ -626,11 +676,15 @@ test.skipIf(process.platform === "win32")("an existing key under an ancestor ano
     });
   } catch (error) {
     caught = error;
+  } finally {
+    setAgentKeyFileTestHooks(undefined);
   }
   expect(caught).toBeInstanceOf(AgentKeyFileRefusal);
   const message = (caught as Error).message;
   expect(message.startsWith(`keys directory ${dir} has ancestor ${realpathSync(shared)} owned by uid`)).toBe(true);
+  expect(message).toContain("mode 0777");
   expect(message).not.toContain("could not sync");
+  expect(syncs).toBe(0);
   expect(readFileSync(keyPath).equals(prior)).toBe(true);
   expect(statSync(dir).mode & 0o777).toBe(0o700);
 });
