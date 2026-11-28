@@ -67,8 +67,9 @@ describe("Dogfood fixes", () => {
       // Should NOT error with missing_or_invalid_authorization
       // (it will fail to connect, but that's a transport error, not an auth error)
       expect(output).not.toContain("missing_or_invalid_authorization");
-      // Should attempt the request (connection refused is expected without Harper)
-      expect(output).toContain("ConnectionRefused");
+      // Should attempt the request (connection refused is expected without Harper).
+      // Bun 1.3 names it ConnectionRefused and Bun 1.4 ECONNREFUSED; either shows the attempt.
+      expect(output).toMatch(/ConnectionRefused|ECONNREFUSED/);
     });
   });
 
