@@ -1,0 +1,1 @@
+- **The audit gate validates the full GHSA id shape in allowlist entries.** It requires an uppercase `GHSA-` prefix followed by three hyphen-separated groups of four lowercase letters or digits (#2993).
