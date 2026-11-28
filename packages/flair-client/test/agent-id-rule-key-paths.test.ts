@@ -76,7 +76,7 @@ describe("flair#3188 — an id outside the agent-ID rule has no key paths", () =
     expect((error as Error).message).toContain("^[a-zA-Z0-9_-]{1,64}$");
   });
 
-  test("an id outside the rule reads no file outside the key directories", async () => {
+  test("does not read the file an unchecked id would reach", async () => {
     // FLAIR_KEY_DIR is the first candidate source, so an unchecked id would
     // reach `<keyDir>/../escape.key`. A valid seed sits there: loading it
     // would succeed, so a refusal proves the file was never read.

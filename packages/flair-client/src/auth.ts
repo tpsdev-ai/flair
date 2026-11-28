@@ -167,8 +167,8 @@ function toAbsoluteKeyPath(p: string): string | null {
 
 /** Candidate key files for `agentId`, in probe order. Deduplicated.
  *
- * An id outside the agent-ID rule has no candidates: no path is built, so
- * nothing outside the key directories can be probed or read. */
+ * An id outside the agent-ID rule has no candidates, so the lookup probes and
+ * reads nothing. */
 export function keyPathCandidates(agentId: string, keyPath?: string, homes: string[] = callTimeHomes()): string[] {
   if (!isValidAgentId(agentId)) return [];
   const primaryHome = homes[0] ?? "";
