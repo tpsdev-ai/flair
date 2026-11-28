@@ -8,6 +8,7 @@
  */
 import { Command } from "commander";
 import { buildEd25519Auth, requestTarget, requestUrl, resolveKeyPath } from "../lib/auth-resolve.js";
+import { requireAgentId } from "../lib/key-dir.js";
 import * as render from "../render.js";
 
 export type AttentionCli = {
@@ -80,6 +81,7 @@ program
         console.error("error: --agent <id> required (or set FLAIR_AGENT_ID)");
         process.exit(2);
       }
+      requireAgentId(agentId);
 
       const payload: Record<string, unknown> = { entity };
       if (opts.days !== undefined) {
