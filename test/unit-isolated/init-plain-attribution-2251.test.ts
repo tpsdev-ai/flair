@@ -181,3 +181,15 @@ test("a rejected injected credential preserves admin-pass bytes", () => {
   expect(actions).toEqual([]);
   expect(events.some(e => e.kind === "auth")).toBe(false);
 }, 30_000);
+
+test("a simulated HTTP listener whose injected PID changes after the health check refuses before the seed preflight sends credentials", () => {
+  const { result, events } = runPlain("own-relisten");
+  expect(result.error).toBeUndefined();
+  expect(result.status, result.stdout + result.stderr).toBe(1);
+  const relisten = events.findIndex(e => e.kind === "relisten");
+  expect(relisten).toBeGreaterThan(-1);
+  expect(events.slice(relisten + 1).filter(e => e.kind === "auth" && e.url?.includes(`:${HTTP_PORT}/`))).toEqual([]);
+  const refusal = result.stderr.split("\n").find(line => line.startsWith("Refusing init"));
+  expect(refusal).toContain(`port ${HTTP_PORT}, pid 4243`);
+  expect(refusal).toContain("attribution to this data directory was not confirmed");
+}, 30_000);

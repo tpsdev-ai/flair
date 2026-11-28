@@ -1,0 +1,1 @@
+- **Remote init checks the using-flair skill seed before its role, user and Agent writes.** A refusal detected by the preflight prevents the role, shared-user and Agent writes in `finishRemoteInit`. Fabric deployment and administrator provisioning may already have occurred; a later seed refusal can follow those writes.

@@ -24,7 +24,7 @@ import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { mcpServerSpec, unpinnedSpecWarning } from "../lib/mcp-spec.js";
 import { planRedirectMigration, renderRedirectMigration } from "../lib/mcp-oauth-env.js";
-import { seedUsingFlairSkill } from "../lib/skill-seed.js";
+import { checkUsingFlairSkill, seedUsingFlairSkill } from "../lib/skill-seed.js";
 import { clearSkillSeedPending, markSkillSeedPending } from "../lib/skill-seed-pending.js";
 import { opsSocketPathRefusal } from "../lib/socket-path-limit.js";
 import * as render from "../render.js";
@@ -285,6 +285,20 @@ async function seedUsingFlairSkillViaRest(baseUrl: string, adminUser: string, ad
 }
 
 /**
+ * flair#3126 — run the seed's reads and refusals with no write. A refusal
+ * detected by the preflight prevents the role, shared-user and Agent writes in
+ * `finishRemoteInit`. Fabric deployment and administrator provisioning may
+ * already have occurred; a later seed refusal can follow those writes.
+ */
+async function preflightUsingFlairSkillViaRest(baseUrl: string, adminUser: string, adminPass: string): Promise<void> {
+  const outcome = await checkUsingFlairSkill({ baseUrl, user: adminUser, pass: adminPass });
+  if (outcome.kind === "refused") {
+    console.error(`Error: the using-flair skill seed was refused — ${outcome.message}`);
+    process.exit(1);
+  }
+}
+
+/**
  * Refuse the reserved shared agent account as an administrator input on either
  * remote-init leg, before any filesystem or cluster write. `role` and `flag`
  * name the leg's input, so the remedy points at the operator's own flag.
@@ -429,6 +443,10 @@ export async function finishRemoteInit(
   const adminPass = principal.password;
   const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
   const role = remote ? "hub" : undefined;
+
+  // flair#3126 — run the seed's checks before this function's role, user and
+  // Agent writes.
+  await preflightUsingFlairSkillViaRest(baseUrl, adminUser, adminPass);
 
   if (provisioningLeg) {
     // Hub instances (--remote) receive federation pair requests and need
@@ -1607,6 +1625,10 @@ addAdminPassOptions(
 
       const httpUrl = `http://127.0.0.1:${httpPort}`;
       if (!opts.skipStart) {
+        // flair#3126 — check the seed before the agent write, so a refusal
+        // leaves no Agent row behind.
+        await attributeBeforeCredential(httpPort, httpBind.host);
+        await preflightUsingFlairSkillViaRest(httpUrl, adminUser, adminPass);
         console.log(`Seeding agent '${agentId}' via operations API...`);
         const opsListener = skippedOwnStart ? operationsPortAttribution(opsPort) : undefined;
         await attributeBeforeCredential(opsPort, opsBindHost);
