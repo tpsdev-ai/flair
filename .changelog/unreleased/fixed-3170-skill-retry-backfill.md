@@ -1,2 +1,1 @@
-- **An identical skill POST retry is no longer refused when the previous write's embedding backfill commits before its target read.**
-  For a target present in the request snapshot, the POST reads the target as committed when it still exists and plans in an owned transaction, so the plan's read sees the backfill the request snapshot missed. The only change that window accepts is the embedding backfill's fields; any other change to the target in that window answers 409 `skill_target_changed`. A target deleted between the snapshot read and the committed read answers 409 `skill_target_changed` and recreates no row.
+- **Superseding skill POST retries tolerate embedding backfill changes to an existing target.** ([#3171](https://github.com/tpsdev-ai/flair/pull/3171))
