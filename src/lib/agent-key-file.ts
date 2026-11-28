@@ -7,6 +7,17 @@
  * files through it (slice C).
  *
  * POSIX policy:
+ *   - every ancestor of the keys directory's resolved path, up to `/`, must be
+ *     owned by root or the current user and must not be group- or
+ *     world-writable unless it carries the sticky bit; a failing ancestor is
+ *     refused with its owner and mode, the first failing one named. This runs
+ *     before the keys directory is created or its mode is changed. Inside
+ *     flair's home (`~/.flair`, the parent of the default keys directory, when
+ *     it is a directory and not a symlink) an ancestor the current user owns
+ *     has its group and world write bits removed instead, with one notice
+ *     naming it and its old and new modes, and the walk continues; an ancestor
+ *     there that the current user does not own is never tightened; it is
+ *     checked by the rule above.
  *   - the keys directory is requested with mode 0700 (the umask may make it
  *     narrower); an existing directory owned by the current user is tightened
  *     to 0700 when it has group or world bits, with one notice line; a symlink,
@@ -14,6 +25,9 @@
  *   - provisioning writes a new key to a unique temp file in the keys directory
  *     (O_CREAT|O_EXCL|O_NOFOLLOW, mode 0600), fsynced, then published with a
  *     hard link at the final path, so an occupied path is never overwritten.
+ *     The checked keys directory is opened once and its device and inode are
+ *     held: the key path's parent is compared with that descriptor after the
+ *     link, and the sync uses the held descriptor.
  *   - an existing key is checked on the OPENED DESCRIPTOR: a regular file,
  *     owned by the current user, with no group/world bits. It is read and left
  *     untouched; a file with group or world bits is refused before its bytes
@@ -41,7 +55,9 @@ import {
   unlinkSync,
   writeSync,
 } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import type { Stats } from "node:fs";
+import { basename, dirname, join, resolve, sep } from "node:path";
+import { defaultKeysDir } from "./key-dir.js";
 
 /** A refusal is operator-facing: the caller prints the message and exits 1. */
 export class AgentKeyFileRefusal extends Error {
@@ -61,6 +77,10 @@ export interface AgentKeyFileTestHooks {
   beforeKeysDirCreate?: (dir: string) => void;
   /** Runs after the keys directory is created, before anything else touches it. */
   afterKeysDirCreate?: (dir: string) => void;
+  /** Runs after the keys directory is checked and before it is opened and held. */
+  beforeKeysDirOpen?: (dir: string) => void;
+  /** Runs after the keys directory is checked and held, before the key is written. */
+  afterKeysDirCheck?: (dir: string) => void;
   /** Runs with the opened key descriptor immediately before its bytes are read. */
   beforeKeyRead?: (fd: number) => void;
   /** Runs after the temp key is complete and before it is linked into place. */
@@ -85,6 +105,14 @@ export function setAgentKeyFileTestHooks(hooks: AgentKeyFileTestHooks | undefine
  * directory requests 0700, and an existing narrower one keeps its mode.
  */
 export interface KeyFileIdentity {
+  dev: number;
+  ino: number;
+}
+
+export interface AgentKeysDirHandle {
+  path: string;
+  /** Descriptor held on the checked keys directory. */
+  fd: number;
   dev: number;
   ino: number;
 }
@@ -125,7 +153,7 @@ function modeText(mode: number): string {
  * directory with group or world bits. Shared by an existing directory and one
  * this call just created, so neither is trusted on the strength of its path.
  */
-function checkAgentKeysDir(keysDir: string): void {
+function checkAgentKeysDir(keysDir: string): Stats {
   const st = lstatSync(keysDir);
   if (st.isSymbolicLink()) {
     throw new AgentKeyFileRefusal(
@@ -147,15 +175,198 @@ function checkAgentKeysDir(keysDir: string): void {
     chmodSync(keysDir, 0o700);
     console.log(`Keys directory ${keysDir} was accessible to other users; permissions tightened to 0700.`);
   }
+  return st;
+}
+
+function modeWithSpecial(mode: number): string {
+  return (mode & 0o7777).toString(8).padStart(4, "0");
+}
+
+/**
+ * Real path of flair's home (`~/.flair`), read once per ancestor walk; none
+ * when it is absent, a symlink or not a directory, so nothing is tightened.
+ */
+function flairHomeDir(): string | undefined {
+  const home = dirname(defaultKeysDir());
+  let st: Stats;
+  try {
+    st = lstatSync(home);
+  } catch (error) {
+    if (errnoCode(error) === "ENOENT") return undefined;
+    throw error;
+  }
+  if (st.isSymbolicLink() || !st.isDirectory()) return undefined;
+  return realpathSync(home);
+}
+
+/**
+ * Real path of the first directory the ancestor walk checks: the parent of the
+ * keys directory's resolved path, or, when the keys directory does not exist
+ * yet, its nearest existing ancestor.
+ */
+function firstKeysDirAncestor(keysDir: string): string {
+  let path = resolve(keysDir);
+  try {
+    return dirname(realpathSync(path));
+  } catch (error) {
+    if (errnoCode(error) !== "ENOENT") throw error;
+  }
+  for (;;) {
+    const parent = dirname(path);
+    if (parent === path) return path;
+    path = parent;
+    try {
+      return realpathSync(path);
+    } catch (error) {
+      if (errnoCode(error) !== "ENOENT") throw error;
+    }
+  }
+}
+
+/** True when `path` is `dir` or below it. Both are real paths. */
+function isInside(path: string, dir: string): boolean {
+  return path === dir || path.startsWith(dir + sep);
+}
+
+/**
+ * On POSIX, refuse a keys directory with an ancestor that another user can
+ * change: every ancestor of the keys directory's resolved path up to `/` must
+ * be owned by root or the current user and must not be group- or
+ * world-writable unless it carries the sticky bit.
+ * Inside flair's home (when `~/.flair` is a directory, not a symlink), an
+ * ancestor owned by the current user has its group and world write bits
+ * removed instead, with one notice, because an existing install can carry them
+ * from a umask 002 host.
+ * A refusal names the first failing ancestor (nearest the keys directory) with
+ * its owner and mode.
+ */
+function assertAgentKeysDirAncestors(keysDir: string): void {
+  if (WIN32) return;
+  const uid = currentUid();
+  const home = flairHomeDir();
+  let ancestor = firstKeysDirAncestor(keysDir);
+  for (;;) {
+    const st = lstatSync(ancestor);
+    const otherWritable = (st.mode & 0o022) !== 0;
+    const sticky = (st.mode & 0o1000) !== 0;
+    const foreignOwner = uid !== undefined && st.uid !== 0 && st.uid !== uid;
+    if (foreignOwner) {
+      throw new AgentKeyFileRefusal(
+        `keys directory ${keysDir} has ancestor ${ancestor} owned by uid ${st.uid} with mode ${modeWithSpecial(st.mode)}; ` +
+          `another user can change that ancestor, so the keys directory cannot be trusted. ` +
+          `Move the keys directory, or make ${ancestor} owned by root or the current user and not group- or world-writable ` +
+          `(or set its sticky bit), then retry`,
+      );
+    }
+    if (otherWritable) {
+      if (uid !== undefined && st.uid === uid && home !== undefined && isInside(ancestor, home)) {
+        const oldMode = st.mode & 0o7777;
+        const newMode = oldMode & ~0o022;
+        chmodSync(ancestor, newMode);
+        console.log(
+          `Directory ${ancestor} in the flair home was accessible to other users; permissions tightened from ${modeWithSpecial(oldMode)} to ${modeWithSpecial(newMode)}.`,
+        );
+      } else if (!sticky) {
+        throw new AgentKeyFileRefusal(
+          `keys directory ${keysDir} has ancestor ${ancestor} owned by uid ${st.uid} with mode ${modeWithSpecial(st.mode)}; ` +
+            `another user can change that ancestor, so the keys directory cannot be trusted. ` +
+            `Move the keys directory, or make ${ancestor} owned by root or the current user and not group- or world-writable ` +
+            `(or set its sticky bit), then retry`,
+        );
+      }
+    }
+    const parent = dirname(ancestor);
+    if (parent === ancestor) return;
+    ancestor = parent;
+  }
+}
+
+/**
+ * On POSIX, check the keys directory and then open it once, holding the
+ * descriptor for the write. The held descriptor's device and inode must match
+ * the directory that was checked; a directory swapped in between is refused.
+ */
+function openCheckedAgentKeysDir(keysDir: string): AgentKeysDirHandle {
+  assertAgentKeysDirAncestors(keysDir);
+  const checked = checkAgentKeysDir(keysDir);
+  testHooks?.beforeKeysDirOpen?.(keysDir);
+  let fd: number;
+  try {
+    fd = openSync(keysDir, constants.O_RDONLY | constants.O_DIRECTORY | NOFOLLOW);
+  } catch (error) {
+    if (errnoCode(error) === "ELOOP") {
+      throw new AgentKeyFileRefusal(
+        `keys directory ${keysDir} is a symlink; replace it with a real directory you own (mode 700)`,
+      );
+    }
+    throw error;
+  }
+  try {
+    const held = fstatSync(fd);
+    if (!held.isDirectory() || held.dev !== checked.dev || held.ino !== checked.ino) {
+      throw new AgentKeyFileRefusal(
+        `keys directory ${keysDir} changed while it was being checked; retry the command once the directory is stable`,
+      );
+    }
+    return { path: keysDir, fd, dev: held.dev, ino: held.ino };
+  } catch (error) {
+    closeSync(fd);
+    throw error;
+  }
+}
+
+/**
+ * On POSIX, refuse when the key path's parent is no longer the keys directory
+ * whose descriptor was held. Called after the key is linked into place.
+ */
+function assertKeyPathStillBound(
+  handle: AgentKeysDirHandle,
+  privateKeyPath: string,
+  identity: KeyFileIdentity,
+): void {
+  const parent = dirname(privateKeyPath);
+  let matches = false;
+  try {
+    const st = lstatSync(parent);
+    matches = st.isDirectory() && st.dev === handle.dev && st.ino === handle.ino;
+  } catch {
+    matches = false;
+  }
+  if (!matches) {
+    const removed = removePublishedKey(privateKeyPath, identity);
+    const keyState = removed
+      ? `the key it wrote at ${privateKeyPath} was removed`
+      : `the key path no longer names the file this command wrote, so a key linked into the checked directory before it moved was not removed`;
+    throw new AgentKeyFileRefusal(
+      `keys directory ${handle.path} changed after the key was written; ${keyState}. ` +
+        `Retry once the directory is stable`,
+    );
+  }
+}
+
+/** Remove a published key path only when it still names the file this call wrote. */
+function removePublishedKey(privateKeyPath: string, identity: KeyFileIdentity): boolean {
+  try {
+    const st = lstatSync(privateKeyPath);
+    if (st.isFile() && st.dev === identity.dev && st.ino === identity.ino) {
+      unlinkSync(privateKeyPath);
+      return true;
+    }
+    return false;
+  } catch {
+    /* best effort: the path may already be gone or replaced */
+    return false;
+  }
 }
 
 /**
  * On POSIX, request mode 0700 for a missing `keysDir` (the umask may make it
  * narrower), check the path after creation like an existing directory, sync
  * the created directory's parent, and tighten an owned directory; a symlink, a
- * non-directory or another owner is refused. A retry with `keysDir` already
- * present repeats the parent sync. On Windows the directory is created and
- * returned unchecked.
+ * non-directory or another owner is refused. The ancestor rule runs first,
+ * before the directory is created or its mode is changed. A retry with
+ * `keysDir` already present repeats the parent sync. On Windows the directory
+ * is created and returned unchecked.
  */
 export function ensureAgentKeysDir(keysDir: string): void {
   if (WIN32) {
@@ -163,6 +374,7 @@ export function ensureAgentKeysDir(keysDir: string): void {
     return;
   }
 
+  assertAgentKeysDirAncestors(keysDir);
   let missing = false;
   try {
     lstatSync(keysDir);
@@ -339,6 +551,7 @@ function writeAgentKeyTemp(
   bytes: Buffer,
   onCreated?: (path: string, identity: KeyFileIdentity) => void,
 ): { path: string; identity: KeyFileIdentity } {
+  if (!WIN32) assertAgentKeysDirAncestors(dirname(privateKeyPath));
   const tempPrefix = `.${basename(privateKeyPath)}.tmp-`;
   const maxTempAttempts = 5;
   let fd: number | undefined;
@@ -412,22 +625,36 @@ export function createAgentKeyFile(
   data: string | Uint8Array,
   onCreated?: (path: string, identity: KeyFileIdentity) => void,
 ): void {
-  const temp = writeAgentKeyTemp(privateKeyPath, Buffer.from(data), onCreated);
+  const keysDir = dirname(privateKeyPath);
+  const handle = WIN32 ? undefined : openCheckedAgentKeysDir(keysDir);
+  let temp: { path: string; identity: KeyFileIdentity };
+  try {
+    testHooks?.afterKeysDirCheck?.(keysDir);
+    temp = writeAgentKeyTemp(privateKeyPath, Buffer.from(data), onCreated);
+  } catch (error) {
+    if (handle) closeSync(handle.fd);
+    throw error;
+  }
+  let linked = false;
   try {
     testHooks?.beforePublish?.(temp.path, privateKeyPath);
     // linkSync fails with EEXIST when the final path appears before publication.
     linkSync(temp.path, privateKeyPath);
+    linked = true;
     testHooks?.afterPublish?.(privateKeyPath);
+    if (handle) assertKeyPathStillBound(handle, privateKeyPath, temp.identity);
     // The hard link initially publishes the temp file's inode at the final
     // path; the identity recorded from the temp descriptor stays that inode
     // even if the path is replaced later. Never re-derive it from the path.
     onCreated?.(privateKeyPath, temp.identity);
   } catch (error) {
+    if (linked) removePublishedKey(privateKeyPath, temp.identity);
     try {
       unlinkSync(temp.path);
     } catch {
       /* best effort: remove only the temp file this call created */
     }
+    if (handle) closeSync(handle.fd);
     throw error;
   }
   try {
@@ -435,15 +662,34 @@ export function createAgentKeyFile(
   } catch {
     /* the published key is complete; a leftover temp file is mode 0600 */
   }
-  // On POSIX, sync the key's directory before returning so the entry is durable
-  // before the caller registers the key; a failure refuses.
-  try {
-    syncAgentKeysDir(dirname(privateKeyPath));
-  } catch (error) {
-    throw new AgentKeyFileRefusal(
-      `flair could not sync keys directory ${dirname(privateKeyPath)} (${error instanceof Error ? error.message : String(error)}); ` +
-        `published key ${privateKeyPath} is not confirmed durable; check the directory and filesystem, then retry`,
-    );
+  if (handle) {
+    try {
+      // The held descriptor is the directory that passed the check: sync it,
+      // never a fresh open of the path.
+      (testHooks?.syncKeysDir ?? fsyncSync)(handle.fd);
+    } catch (error) {
+      closeSync(handle.fd);
+      const removed = removePublishedKey(privateKeyPath, temp.identity);
+      const keyState = removed
+        ? `the published key ${privateKeyPath} was removed because it is not confirmed durable`
+        : `the published key ${privateKeyPath} is not confirmed durable, and the key path no longer names the file this command wrote`;
+      throw new AgentKeyFileRefusal(
+        `flair could not sync keys directory ${keysDir} (${error instanceof Error ? error.message : String(error)}); ` +
+          `${keyState}; check the directory and filesystem, then retry`,
+      );
+    }
+    closeSync(handle.fd);
+  } else {
+    // Windows: no directory is held, and syncAgentKeysDir returns without syncing
+    // (Windows cannot open a directory for fsync).
+    try {
+      syncAgentKeysDir(keysDir);
+    } catch (error) {
+      throw new AgentKeyFileRefusal(
+        `flair could not sync keys directory ${keysDir} (${error instanceof Error ? error.message : String(error)}); ` +
+          `published key ${privateKeyPath} is not confirmed durable; check the directory and filesystem, then retry`,
+      );
+    }
   }
 }
 
@@ -554,12 +800,14 @@ export function replaceAgentKeyFile(privateKeyPath: string, stagedPath: string):
  * carries another key does not replace one already on disk). On POSIX a
  * reused key's directory is synced before the key is returned, so a retry
  * after a failed sync confirms the entry durable; a failure refuses and
- * leaves the key in place. Windows cannot sync a directory.
+ * leaves the key in place. Windows cannot sync a directory. On POSIX the
+ * ancestor rule runs before an existing key is read.
  */
 export function readOrCreateAgentKey(
   privateKeyPath: string,
   create: () => string | Uint8Array,
 ): AgentKeyFileContents {
+  if (!WIN32) assertAgentKeysDirAncestors(dirname(privateKeyPath));
   const existing = readExistingAgentKey(privateKeyPath);
   if (existing) {
     syncReusedAgentKeyDir(privateKeyPath);
@@ -588,12 +836,17 @@ export function readOrCreateAgentKey(
  * in place. Windows cannot sync a directory.
  */
 function syncReusedAgentKeyDir(privateKeyPath: string): void {
+  if (WIN32) return;
+  const keysDir = dirname(privateKeyPath);
+  const handle = openCheckedAgentKeysDir(keysDir);
   try {
-    syncAgentKeysDir(dirname(privateKeyPath));
+    (testHooks?.syncKeysDir ?? fsyncSync)(handle.fd);
   } catch (error) {
     throw new AgentKeyFileRefusal(
-      `flair could not sync keys directory ${dirname(privateKeyPath)} (${error instanceof Error ? error.message : String(error)}); ` +
+      `flair could not sync keys directory ${keysDir} (${error instanceof Error ? error.message : String(error)}); ` +
         `existing key ${privateKeyPath} is not confirmed durable; check the directory and filesystem, then retry`,
     );
+  } finally {
+    closeSync(handle.fd);
   }
 }

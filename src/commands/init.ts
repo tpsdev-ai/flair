@@ -1250,7 +1250,7 @@ addAdminPassOptions(
     // (the dir gate is the race-free primary control). This also validates
     // FLAIR_SOCKET_GROUP early — a bad group fails fast, before a full boot.
     // The socket doesn't exist yet, so only the parent-dir mode is applied here.
-    mkdirSync(dataDir, { recursive: true });
+    mkdirSync(dataDir, { recursive: true, mode: 0o700 });
     readyOpsSocketPosture(dataDir);
 
     let skippedOwnStart = false;
@@ -1285,7 +1285,7 @@ addAdminPassOptions(
           );
         }
 
-        mkdirSync(dataDir, { recursive: true });
+        mkdirSync(dataDir, { recursive: true, mode: 0o700 });
 
         const opsSocket = join(dataDir, "operations-server");
         // authorizeLocal: false (flair#654) — a credential-less loopback ops-API

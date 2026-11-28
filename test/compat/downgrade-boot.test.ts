@@ -346,7 +346,7 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
     // store is its `.flair/data`.
     homeRoot = await mkdtemp(join(tmpdir(), "flair-downgrade-home-"));
     dataDir = join(homeRoot, ".flair", "data");
-    mkdirSync(dataDir, { recursive: true });
+    mkdirSync(dataDir, { recursive: true, mode: 0o700 });
     current = await startHarper({ installDir: dataDir, homeDir: homeRoot });
     const currentEnv = instanceEnv(current, homeRoot);
     const currentPort = String(new URL(current.httpURL).port);

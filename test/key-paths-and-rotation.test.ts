@@ -9,7 +9,7 @@
 import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import {
   mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, chmodSync,
-  fstatSync, readdirSync, statSync, symlinkSync,
+  fstatSync, readdirSync, realpathSync, statSync, symlinkSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -23,7 +23,7 @@ import { setAgentKeyFileTestHooks } from "../src/lib/agent-key-file.js";
 
 function makeTmpDir(): string {
   const dir = join(tmpdir(), `flair-keyrot-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
   return dir;
 }
 
@@ -435,7 +435,7 @@ describe("agent rotate-key (real command, POSIX)", () => {
     rmSync(keysDir, { recursive: true });
     const target = join(tmpDir, "real-parent");
     const ancestor = join(tmpDir, "linked-parent");
-    mkdirSync(target);
+    mkdirSync(target, { mode: 0o700 });
     symlinkSync(target, ancestor);
     keysDir = join(ancestor, "nested", "keys");
     privPath = join(keysDir, `${id}.key`);
@@ -472,7 +472,7 @@ describe("agent rotate-key (real command, POSIX)", () => {
   it.skipIf(process.platform === "win32")("syncs a pre-existing keys directory's resolved parent before the update", async () => {
     const target = join(tmpDir, "real-parent");
     const ancestor = join(tmpDir, "linked-parent");
-    mkdirSync(target);
+    mkdirSync(target, { mode: 0o700 });
     symlinkSync(target, ancestor);
     keysDir = join(ancestor, "keys");
     mkdirSync(keysDir);
@@ -878,6 +878,26 @@ describe("agent rotate-key (real command, POSIX)", () => {
     expect(result.stderr).toContain("is a symlink");
     expect(readFileSync(privPath).equals(oldSeed)).toBe(true);
     expect(readdirSync(realKeysDir)).toEqual([`${id}.key`]);
+    expect(requestCount).toBe(0);
+  });
+
+  it.skipIf(process.platform === "win32")("refuses a keys directory under an ancestor another user can change before the lock and the backup", async () => {
+    const shared = join(tmpDir, "shared");
+    mkdirSync(shared, { mode: 0o700 });
+    chmodSync(shared, 0o777);
+    keysDir = join(shared, "keys");
+    mkdirSync(keysDir, { mode: 0o700 });
+    const sharedPriv = join(keysDir, `${id}.key`);
+    const pair = newPair();
+    writeFileSync(sharedPriv, pair.seed, { mode: 0o600 });
+    const result = await runRotate({ id, keysDir, opsPort: opsServer.port, httpPort: httpServer.port });
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(`has ancestor ${realpathSync(shared)} owned by uid`);
+    expect(result.stderr).toContain("mode 0777");
+    expect(readFileSync(sharedPriv).equals(pair.seed)).toBe(true);
+    expect(backupsOf(keysDir, id)).toEqual([]);
+    expect(existsSync(join(keysDir, `${id}.rotate-key.lock`))).toBe(false);
+    expect(readdirSync(keysDir)).toEqual([`${id}.key`]);
     expect(requestCount).toBe(0);
   });
 
