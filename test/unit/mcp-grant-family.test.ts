@@ -232,7 +232,7 @@ describe("grantMcpClient — duplicate-name rejection", () => {
     expect(readMcpClientManifest(manifestPath)).toHaveLength(0);
   });
 
-  test("keeps both key files when the insert response is an error and the cleanup delete is not acknowledged", async () => {
+  test("keeps both key files and sends no delete when the insert response is an error (unacknowledged)", async () => {
     const { fetchImpl, calls, committed } = mockOpsFetch({ failInsertAfterCommit: true, failDelete: true });
     let thrown: Error | undefined;
     try {
@@ -246,15 +246,16 @@ describe("grantMcpClient — duplicate-name rejection", () => {
     const privPath = join(keysDir, "insert-uncertain.key");
     const pubPath = join(keysDir, "insert-uncertain.pub");
     expect(thrown?.message).toMatch(/Failed to create Agent/);
-    expect(thrown?.message).toContain("may exist");
+    expect(thrown?.message).toContain("outcome is unknown");
     expect(thrown?.message).toContain(privPath);
     expect(thrown?.message).toContain(pubPath);
+    expect(thrown?.message).toContain("flair agent show insert-uncertain");
     expect(committed.has("insert-uncertain")).toBe(true);
     expect(existsSync(privPath)).toBe(true);
     expect(existsSync(pubPath)).toBe(true);
     expect(statSync(privPath).mode & 0o777).toBe(0o600);
     expect(calls.some((c) => c.operation === "insert" && c.records?.[0]?.id === "insert-uncertain")).toBe(true);
-    expect(calls.some((c) => c.operation === "delete" && c.ids?.[0] === "insert-uncertain")).toBe(true);
+    expect(calls.some((c) => c.operation === "delete")).toBe(false);
     expect(readMcpClientManifest(manifestPath)).toHaveLength(0);
   });
 });
@@ -483,12 +484,14 @@ describe("grantMcpClient — key files", () => {
   test("a cleanup check that fails with an error other than ENOENT names the path and leaves it", async () => {
     const privPath = join(keysDir, "check-fail.key");
     const pubPath = join(keysDir, "check-fail.pub");
+    // Make the manifest write fail after the acknowledged insert so cleanup runs.
+    mkdirSync(manifestPath);
     let message = "";
     try {
       await grantMcpClient(
         { name: "check-fail", keysDir, manifestPath, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "fixture" },
         {
-          fetchImpl: mockOpsFetch({ failInsert: true }).fetchImpl,
+          fetchImpl: mockOpsFetch().fetchImpl,
           lstatKeyFile: (path) => {
             if (path === privPath) throw Object.assign(new Error("denied"), { code: "EACCES" });
             return lstatSync(path);

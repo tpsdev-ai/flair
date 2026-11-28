@@ -50,6 +50,52 @@ async function ops(op: Record<string, unknown>): Promise<any> {
   return text.length ? JSON.parse(text) : null;
 }
 
+const AGENT_ATTRS = [
+  "id",
+  "name",
+  "kind",
+  "type",
+  "status",
+  "displayName",
+  "publicKey",
+  "admin",
+  "defaultTrustTier",
+  "runtime",
+  "createdAt",
+];
+
+async function readAgent(id: string): Promise<any[]> {
+  return ops({
+    operation: "search_by_value",
+    table: "Agent",
+    search_attribute: "id",
+    search_value: id,
+    get_attributes: AGENT_ATTRS,
+  });
+}
+
+/** Seed an Agent row this test owns, so a grant must neither reuse nor delete it. */
+async function seedAgent(id: string): Promise<void> {
+  await ops({
+    operation: "insert",
+    table: "Agent",
+    records: [{
+      id,
+      name: id,
+      kind: "agent",
+      type: "agent",
+      status: "active",
+      displayName: id,
+      publicKey: "existing-public-key",
+      admin: false,
+      defaultTrustTier: "unverified",
+      runtime: "headless",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    }],
+  });
+}
+
 beforeAll(async () => {
   harper = await startHarper({ serverEnv: { FLAIR_MCP_ISSUER: ISSUER } });
   assertOwnInstance(harper);
@@ -171,5 +217,96 @@ describe("flair#3077 slice C — mcp grant against a real Harper", () => {
       get_attributes: ["id"],
     });
     expect(rows).toHaveLength(0);
+  }, 60_000);
+
+  test("(j) a failed existence lookup refuses the grant and leaves the existing Agent row untouched", async () => {
+    const client = "client-lookup-fail";
+    await seedAgent(client);
+    const before = await readAgent(client);
+    expect(before).toHaveLength(1);
+
+    const seen: string[] = [];
+    const lookupFails = (async (_url: any, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      seen.push(body.operation);
+      if (body.operation === "search_by_value") return new Response("lookup unavailable", { status: 503 });
+      throw new Error(`unexpected ${body.operation} request after a failed lookup`);
+    }) as typeof fetch;
+
+    let thrown: Error | undefined;
+    try {
+      await grantMcpClient(
+        {
+          name: client,
+          keysDir,
+          manifestPath,
+          issuer: ISSUER,
+          opsPortOrUrl: harper.opsURL,
+          adminUser: harper.admin.username,
+          adminPass: harper.admin.password,
+        },
+        { fetchImpl: lookupFails },
+      );
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    expect(thrown).toBeDefined();
+    expect(thrown!.message).toContain("status 503");
+    expect(thrown!.message).toContain(client);
+    expect(thrown!.message).toContain("refusing the grant before any key or Agent record write");
+    expect(seen).toEqual(["search_by_value"]);
+    expect(existsSync(join(keysDir, `${client}.key`))).toBe(false);
+    expect(existsSync(join(keysDir, `${client}.pub`))).toBe(false);
+    expect(await readAgent(client)).toEqual(before);
+  }, 60_000);
+
+  test("(k) an unacknowledged insert sends no delete and keeps the existing Agent row and the keys", async () => {
+    const client = "client-unack-insert";
+    await seedAgent(client);
+    const before = await readAgent(client);
+    expect(before).toHaveLength(1);
+
+    const deletes: any[] = [];
+    const insertFails = (async (url: any, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      if (body.operation === "search_by_value") {
+        // A successful answer that misses the seeded row: the grant proceeds
+        // to the insert, which then fails without committing.
+        return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (body.operation === "insert") return new Response("insert failed", { status: 500 });
+      if (body.operation === "delete") {
+        deletes.push(body);
+        return fetch(url, init);
+      }
+      return fetch(url, init);
+    }) as typeof fetch;
+
+    let thrown: Error | undefined;
+    try {
+      await grantMcpClient(
+        {
+          name: client,
+          keysDir,
+          manifestPath,
+          issuer: ISSUER,
+          opsPortOrUrl: harper.opsURL,
+          adminUser: harper.admin.username,
+          adminPass: harper.admin.password,
+        },
+        { fetchImpl: insertFails },
+      );
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    expect(thrown).toBeDefined();
+    expect(thrown!.message).toContain("outcome is unknown");
+    expect(thrown!.message).toContain(`flair agent show ${client}`);
+    expect(deletes).toHaveLength(0);
+    expect(existsSync(join(keysDir, `${client}.key`))).toBe(true);
+    expect(existsSync(join(keysDir, `${client}.pub`))).toBe(true);
+    expect(await readAgent(client)).toEqual(before);
   }, 60_000);
 });

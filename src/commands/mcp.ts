@@ -317,23 +317,54 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
   // pre-existing Agent id (e.g. a human-run principal sharing this name).
   const opsUrl = typeof opsPortOrUrl === "number" ? `http://127.0.0.1:${opsPortOrUrl}/` : `${opsPortOrUrl.replace(/\/$/, "")}/`;
   const authHeader = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
-  const existingRes = await fetchImpl(opsUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: authHeader },
-    body: JSON.stringify({
-      operation: "search_by_value",
-      database: "flair",
-      table: "Agent",
-      search_attribute: "id",
-      search_value: name,
-      get_attributes: ["id"],
-    }),
-  });
-  if (existingRes.ok) {
-    const existing = await existingRes.json().catch(() => []);
-    if (Array.isArray(existing) && existing.length > 0) {
-      throw new McpClientAgentIdCollisionError(name);
-    }
+  // The lookup must answer with a 2xx and a list: an error, a transport
+  // failure or an unreadable body cannot prove the id is free, so the grant
+  // refuses here, before any key or Agent record write.
+  let existingRes: Response;
+  try {
+    existingRes = await fetchImpl(opsUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: authHeader },
+      body: JSON.stringify({
+        operation: "search_by_value",
+        database: "flair",
+        table: "Agent",
+        search_attribute: "id",
+        search_value: name,
+        get_attributes: ["id"],
+      }),
+    });
+  } catch (lookupError) {
+    const reason = lookupError instanceof Error ? lookupError.message : String(lookupError);
+    throw new Error(
+      `Could not check whether Agent '${name}' already exists: ${reason}; refusing the grant before any key or Agent record write.`,
+      { cause: lookupError },
+    );
+  }
+  if (!existingRes.ok) {
+    const text = await existingRes.text().catch(() => "");
+    throw new Error(
+      `Could not check whether Agent '${name}' already exists (status ${existingRes.status}${text ? `: ${text}` : ""}); ` +
+        `refusing the grant before any key or Agent record write.`,
+    );
+  }
+  let existing: unknown;
+  try {
+    existing = await existingRes.json();
+  } catch {
+    throw new Error(
+      `Could not check whether Agent '${name}' already exists (unreadable lookup response); ` +
+        `refusing the grant before any key or Agent record write.`,
+    );
+  }
+  if (!Array.isArray(existing)) {
+    throw new Error(
+      `Could not check whether Agent '${name}' already exists (lookup response was not a list); ` +
+        `refusing the grant before any key or Agent record write.`,
+    );
+  }
+  if (existing.length > 0) {
+    throw new McpClientAgentIdCollisionError(name);
   }
 
   ensureAgentKeysDir(keysDir);
@@ -345,9 +376,10 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
   const trackKeyFile = (path: string, identity: KeyFileIdentity) => {
     createdKeyFiles.push({ path, dev: identity.dev, ino: identity.ino });
   };
-  // Set once the insert request may have reached the server: from then on the
-  // Agent row may exist, so the key files stay unless its deletion is acked.
-  let agentMayExist = false;
+  // The row belongs to this grant only once the server returns 2xx for THIS
+  // insert. Until then, no delete is safe: an error, a timeout or a transport
+  // failure leaves the row's existence unknown, so nothing is deleted.
+  let insertState: "not-sent" | "sent" | "acknowledged" = "not-sent";
   try {
     createAgentKeyFile(privPath, Buffer.from(seed), trackKeyFile);
     createAgentKeyFile(pubPath, Buffer.from(kp.publicKey), trackKeyFile);
@@ -356,7 +388,7 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
     // flair#2433 — the new Agent row's home is THIS instance's federation id,
     // resolved through the one shared rule; a create stamps it.
     const home = await resolveTargetInstanceId(agentHomeEndpoint(opsUrl, adminUser, adminPass, fetchImpl));
-    agentMayExist = true;
+    insertState = "sent";
     const insertRes = await fetchImpl(opsUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: authHeader },
@@ -385,6 +417,7 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
       const text = await insertRes.text().catch(() => "");
       throw new Error(`Failed to create Agent '${name}' via operations API (${insertRes.status}): ${text}`);
     }
+    insertState = "acknowledged";
 
     const clientId = `${issuer.replace(/\/+$/, "")}/MCPClientMetadata/${name}`;
     const entry: McpClientManifestEntry = {
@@ -437,7 +470,7 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
       return leftBehind;
     };
     const message = error instanceof Error ? error.message : String(error);
-    if (agentMayExist) {
+    if (insertState === "acknowledged") {
       let deleted = false;
       try {
         const delRes = await fetchImpl(opsUrl, {
@@ -452,7 +485,8 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
       if (!deleted) {
         throw new Error(
           `${message}; Agent '${name}' may exist on the server and its deletion was not acknowledged, ` +
-          `so the key files were kept at ${privPath} and ${pubPath} — run \`flair agent remove ${name}\` and then remove them.`,
+          `so the key files were kept at ${privPath} and ${pubPath} — check the Agent row with \`flair agent show ${name}\`, ` +
+          `and if it exists run \`flair agent remove ${name}\`, then remove the key files.`,
           { cause: error },
         );
       }
@@ -461,6 +495,14 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
         ? `the Agent '${name}' was deleted and its key files were removed`
         : `the Agent '${name}' was deleted but key file(s) were kept: ${leftBehind.join("; ")}`;
       throw new Error(`${message}; ${outcome}`, { cause: error });
+    }
+    if (insertState === "sent") {
+      throw new Error(
+        `${message}; the insert of Agent '${name}' was sent but not acknowledged, so the outcome is unknown: ` +
+        `the Agent row may or may not exist. No delete was sent and the key files were kept at ${privPath} and ${pubPath} — ` +
+        `check the Agent row with \`flair agent show ${name}\`, and if it exists run \`flair agent remove ${name}\`, then remove the key files.`,
+        { cause: error },
+      );
     }
     if (createdKeyFiles.length > 0) {
       const leftBehind = cleanupCreatedKeyFiles();
