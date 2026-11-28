@@ -56,6 +56,7 @@ import { resolveHome } from "../lib/home.js";
 import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
 import { agentHomeEndpoint, resolveTargetInstanceId } from "../lib/agent-home.js";
 import { createAgentKeyFile, ensureAgentKeysDir, type KeyFileIdentity } from "../lib/agent-key-file.js";
+import { writeConfirmed } from "../lib/instance-identity-row.js";
 
 export type McpCli = {
   resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
@@ -376,9 +377,12 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
   const trackKeyFile = (path: string, identity: KeyFileIdentity) => {
     createdKeyFiles.push({ path, dev: identity.dev, ino: identity.ino });
   };
-  // The row belongs to this grant only once the server returns 2xx for THIS
-  // insert. Until then, no delete is safe: an error, a timeout or a transport
-  // failure leaves the row's existence unknown, so nothing is deleted.
+  // The row belongs to this grant only when the insert's result body names THIS
+  // id in `inserted_hashes` and not in `skipped_hashes`. A 2xx alone does not:
+  // Harper answers 2xx with the id skipped when the row already exists, so a
+  // status read as a create could later delete an Agent this grant did not
+  // create. Until the body confirms it, no delete is safe: an error, a timeout,
+  // a transport failure or an unconfirmed result leaves existence unknown.
   let insertState: "not-sent" | "sent" | "acknowledged" = "not-sent";
   try {
     createAgentKeyFile(privPath, Buffer.from(seed), trackKeyFile);
@@ -416,6 +420,16 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
     if (!insertRes.ok) {
       const text = await insertRes.text().catch(() => "");
       throw new Error(`Failed to create Agent '${name}' via operations API (${insertRes.status}): ${text}`);
+    }
+    const insertBody = (await insertRes.json().catch(() => null)) as
+      | { inserted_hashes?: unknown[]; skipped_hashes?: unknown[] }
+      | null;
+    const inserted = Array.isArray(insertBody?.inserted_hashes) && insertBody.inserted_hashes.map(String).includes(name);
+    const insertSkipped = Array.isArray(insertBody?.skipped_hashes) && insertBody.skipped_hashes.map(String).includes(name);
+    if (!inserted || insertSkipped) {
+      throw new Error(
+        `Failed to create Agent '${name}' via operations API (${insertRes.status}): the result body did not confirm that this insert created the row`,
+      );
     }
     insertState = "acknowledged";
 
@@ -478,7 +492,10 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
           headers: { "Content-Type": "application/json", Authorization: authHeader },
           body: JSON.stringify({ operation: "delete", database: "flair", table: "Agent", ids: [name] }),
         });
-        deleted = delRes.ok;
+        if (delRes.ok) {
+          const delBody = await delRes.json().catch(() => null);
+          deleted = writeConfirmed(delBody, "deleted_hashes", name);
+        }
       } catch {
         /* deletion not acknowledged */
       }

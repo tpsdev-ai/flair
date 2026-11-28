@@ -424,6 +424,18 @@ describe("applyKeyPrune — archived material is owner-only (flair#3077 slice D)
     expect(statSync(archiveDir).mode & 0o777).toBe(0o700);
   });
 
+  it("tightens an existing world-readable .pruned directory to owner-only", async () => {
+    const entries = await staleEntries("agent-archive-pruned-wide");
+    const prunedDir = join(keysDir, PRUNED_DIR_NAME);
+    const archiveDir = join(prunedDir, "2026-07-19");
+    mkdirSync(archiveDir, { recursive: true });
+    chmodSync(prunedDir, 0o755);
+    chmodSync(archiveDir, 0o700);
+    const { moved } = applyKeyPrune(keysDir, entries, "2026-07-19");
+    expect(moved).toHaveLength(1);
+    expect(statSync(prunedDir).mode & 0o777).toBe(0o700);
+  });
+
   it("leaves an archived private key owner-only when the key was 0644", async () => {
     const entries = await staleEntries("agent-archive-key-wide");
     const keyPath = join(keysDir, "agent-archive-key-wide.key");

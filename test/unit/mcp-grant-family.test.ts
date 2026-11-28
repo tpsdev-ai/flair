@@ -55,15 +55,18 @@ afterEach(() => {
 });
 
 /** Mock ops-API fetch: search_by_value → configurable existing-agent set;
- *  insert → 200 unless failInsert; delete → 200 unless failDelete. Captures
- *  every request body for assertions. `committed` is the set of Agent ids the
- *  mock's insert stored, including the failInsertAfterCommit case where the
- *  row is stored but the response is an error. */
+ *  insert → 200 with Harper's `inserted_hashes`/`skipped_hashes` shape unless
+ *  failInsert; delete → 200 with `deleted_hashes`/`skipped_hashes` unless
+ *  failDelete. Captures every request body for assertions. `committed` is the
+ *  set of Agent ids the mock's insert stored, including the failInsertAfterCommit
+ *  case where the row is stored but the response is an error. */
 function mockOpsFetch(opts: {
   existingAgentIds?: Set<string>;
   failInsert?: boolean;
   failInsertAfterCommit?: boolean;
+  skipInsert?: boolean;
   failDelete?: boolean;
+  skipDelete?: boolean;
   networkErrorOnDelete?: boolean;
 } = {}): { fetchImpl: typeof fetch; calls: any[]; committed: Set<string> } {
   const calls: any[] = [];
@@ -83,8 +86,12 @@ function mockOpsFetch(opts: {
         return new Response("insert failed", { status: 500 });
       }
       if (opts.failInsert) return new Response("insert failed", { status: 500 });
+      const ids = (body.records ?? []).map((record: { id: string }) => record.id);
+      if (opts.skipInsert) {
+        return new Response(JSON.stringify({ inserted_hashes: [], skipped_hashes: ids }), { status: 200 });
+      }
       for (const record of body.records ?? []) committed.add(record.id);
-      return new Response(JSON.stringify({ message: "inserted" }), { status: 200 });
+      return new Response(JSON.stringify({ inserted_hashes: ids, skipped_hashes: [] }), { status: 200 });
     }
     if (body.operation === "sql") {
       // flair#2433 — the create path resolves the instance's own id from the
@@ -94,7 +101,10 @@ function mockOpsFetch(opts: {
     if (body.operation === "delete") {
       if (opts.networkErrorOnDelete) throw new TypeError("fetch failed: connection refused");
       if (opts.failDelete) return new Response("delete failed", { status: 500 });
-      return new Response(JSON.stringify({ message: "deleted" }), { status: 200 });
+      if (opts.skipDelete) {
+        return new Response(JSON.stringify({ deleted_hashes: [], skipped_hashes: body.ids ?? [] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ deleted_hashes: body.ids ?? [], skipped_hashes: [] }), { status: 200 });
     }
     return new Response("{}", { status: 200 });
   }) as typeof fetch;
@@ -456,7 +466,7 @@ describe("grantMcpClient — key files", () => {
     expect(existsSync(pubPath)).toBe(false);
   });
 
-  test.each([false, true])("manifest write failure after insert: an acknowledged Agent delete removes the key files, but a failed unlink keeps them (failUnlink=%s)", async (failUnlink) => {
+  test.each([false, true])("manifest write failure after insert: a body-confirmed Agent delete removes the key files, but a failed unlink keeps them (failUnlink=%s)", async (failUnlink) => {
     mkdirSync(manifestPath);
     const { fetchImpl, calls } = mockOpsFetch();
     let message = "";
@@ -705,6 +715,60 @@ describe("grantMcpClient — insert and delete uncertainty (flair#3077)", () => 
     expect(existsSync(privPath)).toBe(true);
     expect(existsSync(pubPath)).toBe(true);
     expect(calls.some((c) => c.operation === "insert" && c.records?.[0]?.id === name)).toBe(true);
+    expect(calls.some((c) => c.operation === "delete" && c.ids?.[0] === name)).toBe(true);
+    expect(readMcpClientManifest(failingManifest)).toHaveLength(0);
+  });
+
+  test("a 2xx insert that Harper reports as skipped keeps both key files, sends no delete and reports the outcome as unknown", async () => {
+    const parentAsFile = join(dir, "manifest-parent-insert-skip");
+    writeFileSync(parentAsFile, "occupied");
+    const failingManifest = join(parentAsFile, "mcp-clients.json");
+
+    const { fetchImpl, calls } = mockOpsFetch({ skipInsert: true });
+    const name = "insert-skipped";
+    let thrown: Error | undefined;
+    try {
+      await grantMcpClient(
+        { name, keysDir, manifestPath: failingManifest, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "s3cret" },
+        { fetchImpl },
+      );
+    } catch (error) { thrown = error as Error; }
+
+    const privPath = join(keysDir, `${name}.key`);
+    const pubPath = join(keysDir, `${name}.pub`);
+    expect(thrown).toBeDefined();
+    expect(thrown!.message).toContain("outcome is unknown");
+    expect(thrown!.message).toContain(`flair agent show ${name}`);
+    expect(thrown!.message).toContain(`flair agent remove ${name}`);
+    expect(existsSync(privPath)).toBe(true);
+    expect(existsSync(pubPath)).toBe(true);
+    expect(calls.some((c) => c.operation === "insert" && c.records?.[0]?.id === name)).toBe(true);
+    expect(calls.some((c) => c.operation === "delete")).toBe(false);
+    expect(readMcpClientManifest(failingManifest)).toHaveLength(0);
+  });
+
+  test("a 2xx delete that Harper reports as skipped keeps the keys and reports the deletion as unconfirmed", async () => {
+    const parentAsFile = join(dir, "manifest-parent-delete-skip");
+    writeFileSync(parentAsFile, "occupied");
+    const failingManifest = join(parentAsFile, "mcp-clients.json");
+
+    const { fetchImpl, calls } = mockOpsFetch({ skipDelete: true });
+    const name = "delete-skipped";
+    let thrown: Error | undefined;
+    try {
+      await grantMcpClient(
+        { name, keysDir, manifestPath: failingManifest, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "s3cret" },
+        { fetchImpl },
+      );
+    } catch (error) { thrown = error as Error; }
+
+    const privPath = join(keysDir, `${name}.key`);
+    const pubPath = join(keysDir, `${name}.pub`);
+    expect(thrown).toBeDefined();
+    expect(thrown!.message).toContain("deletion was not acknowledged");
+    expect(thrown!.message).not.toContain("was deleted");
+    expect(existsSync(privPath)).toBe(true);
+    expect(existsSync(pubPath)).toBe(true);
     expect(calls.some((c) => c.operation === "delete" && c.ids?.[0] === name)).toBe(true);
     expect(readMcpClientManifest(failingManifest)).toHaveLength(0);
   });

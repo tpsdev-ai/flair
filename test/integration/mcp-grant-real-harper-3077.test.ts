@@ -309,4 +309,56 @@ describe("flair#3077 slice C — mcp grant against a real Harper", () => {
     expect(existsSync(join(keysDir, `${client}.pub`))).toBe(true);
     expect(await readAgent(client)).toEqual(before);
   }, 60_000);
+
+  test("(l) a 2xx insert the real Harper reports as skipped sends no delete, keeps the keys and leaves the seeded Agent", async () => {
+    const client = "client-real-skip";
+    await seedAgent(client);
+    const before = await readAgent(client);
+    expect(before).toHaveLength(1);
+
+    const occupied = join(rootDir, "manifest-parent-skip");
+    writeFileSync(occupied, "occupied");
+    const failingManifest = join(occupied, "mcp-clients.json");
+
+    let insertBody: any = null;
+    const deletes: any[] = [];
+    const lookupMissesThenReal = (async (url: any, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      if (body.operation === "search_by_value") {
+        // Empty list through the injected seam: the grant proceeds to the real
+        // insert, which Harper answers 2xx with the id skipped (row exists).
+        return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (body.operation === "delete") deletes.push(body);
+      const res = await fetch(url, init);
+      if (body.operation === "insert") insertBody = await res.clone().json().catch(() => null);
+      return res;
+    }) as typeof fetch;
+
+    let thrown: Error | undefined;
+    try {
+      await grantMcpClient(
+        {
+          name: client,
+          keysDir,
+          manifestPath: failingManifest,
+          issuer: ISSUER,
+          opsPortOrUrl: harper.opsURL,
+          adminUser: harper.admin.username,
+          adminPass: harper.admin.password,
+        },
+        { fetchImpl: lookupMissesThenReal },
+      );
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    expect(thrown).toBeDefined();
+    expect(insertBody?.skipped_hashes).toContain(client);
+    expect(thrown!.message).toContain("outcome is unknown");
+    expect(deletes).toHaveLength(0);
+    expect(existsSync(join(keysDir, `${client}.key`))).toBe(true);
+    expect(existsSync(join(keysDir, `${client}.pub`))).toBe(true);
+    expect(await readAgent(client)).toEqual(before);
+  }, 60_000);
 });
