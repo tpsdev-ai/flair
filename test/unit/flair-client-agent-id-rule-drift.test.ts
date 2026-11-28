@@ -79,6 +79,18 @@ const CORPUS: unknown[] = [
   ["agent"],
 ];
 
+/** One id on each side of every boundary the rule names. */
+const BOUNDARIES: { what: string; accepted: string[]; refused: string[] }[] = [
+  { what: "length floor", accepted: ["a"], refused: [""] },
+  { what: "length cap", accepted: ["x".repeat(64)], refused: ["x".repeat(65)] },
+  { what: "A-Z", accepted: ["A", "Z"], refused: ["@", "["] },
+  { what: "a-z", accepted: ["a", "z"], refused: ["`", "{"] },
+  { what: "0-9", accepted: ["0", "9"], refused: ["/", ":"] },
+  { what: "_ and -", accepted: ["_", "-", "_a", "a_", "-a", "a-"], refused: ["^", ",", ".a", "a."] },
+  { what: "leading/trailing whitespace", accepted: [], refused: [" a", "a ", "\ta", "a\t"] },
+  { what: "leading/trailing NUL", accepted: [], refused: ["\0a", "a\0"] },
+];
+
 describe("flair#3188 — the client rule does not drift from src/lib/agent-id-rule.ts", () => {
   test("the rule and its constants are identical", () => {
     expect(client.AGENT_ID_RULE).toBe(src.AGENT_ID_RULE);
@@ -96,6 +108,21 @@ describe("flair#3188 — the client rule does not drift from src/lib/agent-id-ru
       expect(client.invalidAgentIdMessage(id), `invalidAgentIdMessage ${label}`).toBe(
         src.invalidAgentIdMessage(id),
       );
+    }
+  });
+
+  test("every boundary the rule names answers identically on both sides, message included", () => {
+    for (const { what, accepted, refused } of BOUNDARIES) {
+      for (const [ids, valid] of [[accepted, true], [refused, false]] as const) {
+        for (const id of ids) {
+          const label = `${what}: ${JSON.stringify(id)} ${valid ? "accepted" : "refused"}`;
+          expect(src.isValidAgentId(id), label).toBe(valid);
+          expect(client.isValidAgentId(id), label).toBe(valid);
+          expect(client.invalidAgentIdMessage(id), `${what}: ${JSON.stringify(id)} message`).toBe(
+            src.invalidAgentIdMessage(id),
+          );
+        }
+      }
     }
   });
 

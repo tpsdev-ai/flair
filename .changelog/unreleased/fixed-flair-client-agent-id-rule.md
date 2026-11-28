@@ -1,1 +1,1 @@
-- **The published `@tpsdev-ai/flair-client` refuses an agent id outside the agent-ID rule before it derives a key path.** The refusal names the rule.
+- **The published `@tpsdev-ai/flair-client` applies the agent-ID rule before it derives or reads a key file path** (auto mode's file-key lookup and `hasSigningKey`). An in-memory private key and Basic mode do not consult key files and are unchanged; the server still refuses an id outside the rule. The refusal names the rule.

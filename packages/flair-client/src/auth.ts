@@ -247,7 +247,7 @@ export function formatKeyLookup(state: KeyLookupState): string {
       "The server rejected those admin credentials. Check FLAIR_ADMIN_USER and FLAIR_ADMIN_PASSWORD — this 401 is not a missing agent key."
     );
   }
-  if (state.agentId && !isValidAgentId(state.agentId)) {
+  if (!isValidAgentId(state.agentId)) {
     return `${actor} was refused: ${invalidAgentIdMessage(state.agentId)}.`;
   }
   const stateLine = method === "ed25519"

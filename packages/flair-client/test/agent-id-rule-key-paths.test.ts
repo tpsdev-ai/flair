@@ -2,9 +2,11 @@
 // derives any key path from an id. An id outside the rule gets no candidates,
 // so nothing is probed or read; a valid id resolves exactly as before.
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import * as fsModule from "node:fs";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import * as pathModule from "node:path";
 import { join } from "node:path";
 import { keyPathCandidates, resolveKeyPath, formatKeyLookup } from "../src/auth.js";
 import { FlairClient, MissingSigningKeyError } from "../src/client.js";
@@ -104,6 +106,51 @@ describe("flair#3188 — an id outside the agent-ID rule has no key paths", () =
     expect(text).toContain("invalid agent id");
     expect(text).toContain("^[a-zA-Z0-9_-]{1,64}$");
     expect(text).not.toContain("Looked for a key at");
+  });
+
+  test("formatKeyLookup refuses an empty id with the rule, not a missing-home diagnostic", () => {
+    const text = formatKeyLookup({
+      agentId: "",
+      home: "",
+      candidates: [],
+      resolvedPath: null,
+      signed: false,
+    });
+    expect(text).toContain('invalid agent id ""');
+    expect(text).toContain("^[a-zA-Z0-9_-]{1,64}$");
+    expect(text).not.toContain("os.homedir()");
+    expect(text).not.toContain("no candidate paths");
+  });
+
+  test("formatKeyLookup keeps the Basic-mode message for an empty id", () => {
+    const text = formatKeyLookup({
+      agentId: "",
+      home: "",
+      candidates: [],
+      resolvedPath: null,
+      signed: false,
+      authMethod: "basic",
+    });
+    expect(text).toContain("Basic admin credentials");
+    expect(text).not.toContain("invalid agent id");
+  });
+
+  test("an id outside the rule builds no key path and probes nothing, for the lookup and hasSigningKey", () => {
+    const home = tempDir("no-probe");
+    const joinSpy = spyOn(pathModule, "join");
+    const existsSpy = spyOn(fsModule, "existsSync");
+    try {
+      for (const id of INVALID_IDS) {
+        expect(resolveKeyPath(id, undefined, [home]), JSON.stringify(id)).toBeNull();
+        const client = new FlairClient({ agentId: id });
+        expect(client.hasSigningKey(), JSON.stringify(id)).toBe(false);
+      }
+      expect(joinSpy.mock.calls.length).toBe(0);
+      expect(existsSpy.mock.calls.length).toBe(0);
+    } finally {
+      joinSpy.mockRestore();
+      existsSpy.mockRestore();
+    }
   });
 });
 
