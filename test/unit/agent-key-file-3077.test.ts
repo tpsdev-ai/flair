@@ -27,6 +27,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -446,23 +447,36 @@ test.skipIf(process.platform === "win32")("the keys-directory sync uses the keys
   const dir = keysDir();
   ensureAgentKeysDir(dir);
   const keyPath = join(dir, "synced-identity.key");
+  const moved = `${dir}.moved`;
   let syncs = 0;
+  let synced: number[] = [];
+  let checked: number[] = [];
   setAgentKeyFileTestHooks({
     syncKeysDir: (fd) => {
-      const synced = fstatSync(fd);
-      const keys = statSync(dir);
-      expect([synced.dev, synced.ino]).toEqual([keys.dev, keys.ino]);
+      const held = fstatSync(fd);
+      const movedDir = statSync(moved);
+      synced = [held.dev, held.ino];
+      checked = [movedDir.dev, movedDir.ino];
       syncs += 1;
       fsyncSync(fd);
     },
   });
+  // The final-path callback runs after the bound check and before the sync;
+  // moving the checked directory there makes a fresh open of the path reach
+  // the replacement, so only the held descriptor matches the moved directory.
+  const onCreated = (path: string) => {
+    if (path !== keyPath) return;
+    renameSync(dir, moved);
+    mkdirSync(dir, { mode: 0o700 });
+  };
   try {
-    createAgentKeyFile(keyPath, Buffer.alloc(32));
+    createAgentKeyFile(keyPath, Buffer.alloc(32), onCreated);
   } finally {
     setAgentKeyFileTestHooks(undefined);
   }
   expect(syncs).toBe(1);
-  expect(existsSync(keyPath)).toBe(true);
+  expect(synced).toEqual(checked);
+  expect(readdirSync(moved)).toContain("synced-identity.key");
 });
 
 test.skipIf(process.platform === "win32")("a keys directory replaced between the check and the write is refused and leaves no key in either directory", () => {
@@ -484,8 +498,43 @@ test.skipIf(process.platform === "win32")("a keys directory replaced between the
     setAgentKeyFileTestHooks(undefined);
   }
   expect(caught).toBeInstanceOf(AgentKeyFileRefusal);
-  expect((caught as Error).message).toContain("changed after the key was written");
+  expect((caught as Error).message).toBe(
+    `keys directory ${dir} changed after the key was written; the key it wrote at ${join(dir, "agent-a.key")} was removed. ` +
+      `Retry once the directory is stable`,
+  );
   expect(readdirSync(moved)).toEqual([]);
+  expect(readdirSync(dir)).toEqual([]);
+});
+
+test.skipIf(process.platform === "win32")("a keys directory moved after the key is linked is refused, and the key in the moved directory is reported, not removed", () => {
+  const dir = keysDir();
+  ensureAgentKeysDir(dir);
+  const moved = `${dir}.moved`;
+  setAgentKeyFileTestHooks({
+    afterPublish: () => {
+      renameSync(dir, moved);
+      mkdirSync(dir, { mode: 0o700 });
+    },
+  });
+  let caught: unknown;
+  try {
+    createAgentKeyFile(join(dir, "agent-a.key"), Buffer.alloc(32));
+  } catch (error) {
+    caught = error;
+  } finally {
+    setAgentKeyFileTestHooks(undefined);
+  }
+  expect(caught).toBeInstanceOf(AgentKeyFileRefusal);
+  expect((caught as Error).message).toBe(
+    `keys directory ${dir} changed after the key was written; the key path no longer names the file this command wrote, ` +
+      `so a key linked into the checked directory before it moved was not removed. Retry once the directory is stable`,
+  );
+  // The moved directory keeps the linked key and its temp link; the
+  // replacement is empty.
+  const left = readdirSync(moved);
+  expect(left).toHaveLength(2);
+  expect(left).toContain("agent-a.key");
+  expect(left.filter((name) => name.includes(".tmp-"))).toHaveLength(1);
   expect(readdirSync(dir)).toEqual([]);
 });
 
@@ -560,7 +609,8 @@ test.skipIf(process.platform === "win32")("an ancestor inside the flair home own
   const flairHome = join(home, ".flair");
   const dir = join(flairHome, "keys");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  chmodSync(flairHome, 0o775);
+  // Not writable by others, so only the owner rule can refuse it.
+  chmodSync(flairHome, 0o755);
   // A single-user test cannot chown a directory; ownership is read through
   // process.getuid(), so the first call (the keys directory) sees the real uid
   // and the ancestor walk sees a uid that owns no directory.
@@ -577,12 +627,36 @@ test.skipIf(process.platform === "win32")("an ancestor inside the flair home own
     getuid.mockRestore();
   }
   expect(caught).toBeInstanceOf(AgentKeyFileRefusal);
-  const message = (caught as Error).message;
-  expect(message).toContain(flairHome);
-  expect(message).toContain("0775");
-  expect(message).toContain("uid");
+  expect((caught as Error).message).toContain(`has ancestor ${realpathSync(flairHome)} owned by uid ${realUid} with mode 0755;`);
   expect(existsSync(join(dir, "agent-a.key"))).toBe(false);
-  expect(statSync(flairHome).mode & 0o777).toBe(0o775);
+  expect(statSync(flairHome).mode & 0o777).toBe(0o755);
+});
+
+test.skipIf(process.platform === "win32")("an ancestor outside the flair home owned by another uid is refused (stat seam: process.getuid)", () => {
+  if (typeof process.getuid !== "function") return;
+  const realUid = process.getuid();
+  const home = tempDir("flair-keyfile-3077-");
+  const custom = join(home, "custom");
+  const dir = join(custom, "keys");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // Not writable by others, so only the owner rule can refuse it.
+  chmodSync(custom, 0o755);
+  let calls = 0;
+  const getuid = spyOn(process, "getuid").mockImplementation(() => (calls++ === 0 ? realUid : realUid + 1));
+  let caught: unknown;
+  try {
+    withHome(home, () => {
+      createAgentKeyFile(join(dir, "agent-a.key"), Buffer.alloc(32));
+    });
+  } catch (error) {
+    caught = error;
+  } finally {
+    getuid.mockRestore();
+  }
+  expect(caught).toBeInstanceOf(AgentKeyFileRefusal);
+  expect((caught as Error).message).toContain(`has ancestor ${realpathSync(custom)} owned by uid ${realUid} with mode 0755;`);
+  expect(existsSync(join(dir, "agent-a.key"))).toBe(false);
+  expect(statSync(custom).mode & 0o777).toBe(0o755);
 });
 
 test.skipIf(process.platform === "win32")("a sticky world-writable ancestor with a user-owned keys directory passes", () => {

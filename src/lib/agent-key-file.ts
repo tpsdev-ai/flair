@@ -198,8 +198,7 @@ function isInside(path: string, dir: string): boolean {
  * and must not be group- or world-writable unless it carries the sticky bit.
  * Inside flair's home, an ancestor owned by the current user has its group and
  * world write bits removed instead, with one notice, because an existing
- * install can carry them from a umask 002 host; every ancestor flair creates
- * there is owner-only, so a fresh install never needs the notice.
+ * install can carry them from a umask 002 host.
  * A refusal names the first failing ancestor (nearest the keys directory) with
  * its owner and mode.
  */
@@ -280,7 +279,11 @@ function openCheckedAgentKeysDir(keysDir: string): AgentKeysDirHandle {
  * On POSIX, refuse when the key path's parent is no longer the keys directory
  * whose descriptor was held. Called after the key is linked into place.
  */
-function assertKeyPathStillBound(handle: AgentKeysDirHandle, privateKeyPath: string): void {
+function assertKeyPathStillBound(
+  handle: AgentKeysDirHandle,
+  privateKeyPath: string,
+  identity: KeyFileIdentity,
+): void {
   const parent = dirname(privateKeyPath);
   let matches = false;
   try {
@@ -290,8 +293,12 @@ function assertKeyPathStillBound(handle: AgentKeysDirHandle, privateKeyPath: str
     matches = false;
   }
   if (!matches) {
+    const removed = removePublishedKey(privateKeyPath, identity);
+    const keyState = removed
+      ? `the key it wrote at ${privateKeyPath} was removed`
+      : `the key path no longer names the file this command wrote, so a key linked into the checked directory before it moved was not removed`;
     throw new AgentKeyFileRefusal(
-      `keys directory ${handle.path} changed after the key was written; the key it wrote is not kept. ` +
+      `keys directory ${handle.path} changed after the key was written; ${keyState}. ` +
         `Retry once the directory is stable`,
     );
   }
@@ -593,7 +600,7 @@ export function createAgentKeyFile(
     linkSync(temp.path, privateKeyPath);
     linked = true;
     testHooks?.afterPublish?.(privateKeyPath);
-    if (handle) assertKeyPathStillBound(handle, privateKeyPath);
+    if (handle) assertKeyPathStillBound(handle, privateKeyPath, temp.identity);
     // The hard link initially publishes the temp file's inode at the final
     // path; the identity recorded from the temp descriptor stays that inode
     // even if the path is replaced later. Never re-derive it from the path.
