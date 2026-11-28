@@ -7,7 +7,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
@@ -214,4 +214,28 @@ describe("flair export: the default output is published with a temp file and a h
     expect(readFileSync(planted, "utf8")).toBe("sentinel");
     expect(readdirSync(join(planted, ".."))).toEqual([`${AGENT}-${CLOCK_MS}.json`]);
   }, 60_000);
+
+  test("defaultExportWriteOps.openTemp refuses an existing file and a dangling symlink", async () => {
+    const { defaultExportWriteOps } = await import(pathToFileURL(EXPORT_MODULE).href) as typeof import("../../src/commands/export.js");
+    const openErrorCode = (path: string): string => {
+      try {
+        closeSync(defaultExportWriteOps.openTemp(path, 0o600));
+        return "opened";
+      } catch (err) {
+        return (err as NodeJS.ErrnoException).code ?? "no-code";
+      }
+    };
+
+    const dir = tempDir("flair-3136-open-temp-");
+    const planted = join(dir, `${AGENT}-planted.json`);
+    writeFileSync(planted, "sentinel");
+    expect(openErrorCode(planted)).toBe("EEXIST");
+    expect(readFileSync(planted, "utf8")).toBe("sentinel");
+
+    const missingTarget = join(dir, "missing-target");
+    const linkPath = join(dir, `${AGENT}-link.json`);
+    symlinkSync(missingTarget, linkPath);
+    expect(openErrorCode(linkPath)).toBe("EEXIST");
+    expect(existsSync(missingTarget)).toBe(false);
+  }, 20_000);
 });

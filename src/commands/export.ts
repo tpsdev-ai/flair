@@ -127,7 +127,7 @@ function writeDefaultExport(outputPath: string, content: string, mode: number): 
       try {
         defaultExportWriteOps.close(fd);
       } catch {
-        // The write, fsync or link failure is what this call reports.
+        // The original write, fsync or close failure is what this call reports.
       }
     }
     removeExportTemp(tempPath);
