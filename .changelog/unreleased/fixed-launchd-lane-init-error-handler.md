@@ -1,1 +1,0 @@
-- **In the macOS launchd lane, a failed `flair init` whose output passes the password scan now prints its diagnostics.** ([#3102](https://github.com/tpsdev-ai/flair/pull/3102))

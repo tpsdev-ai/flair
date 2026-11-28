@@ -1,1 +1,0 @@
-- **The Harper start waiter CLI rejects a `NODE_` credentials name, an excessive request timeout, or a credentialed health URL with exit 2.** The `--per-request-ms` maximum is `2147483647`. Direct `main()` calls also reject the credentials name and credentialed URL with return value 2. ([#3083](https://github.com/tpsdev-ai/flair/pull/3083))
