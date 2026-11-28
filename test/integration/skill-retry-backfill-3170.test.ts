@@ -99,6 +99,20 @@ async function waitForLongVector(id: string, timeoutMs = 30_000): Promise<any> {
   return row;
 }
 
+/** Poll /HealthDetail until the boot migration cycle reports done; returns the last phase read. */
+async function waitForBootCycle(timeoutMs: number): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  let phase = "";
+  while (Date.now() < deadline) {
+    const res = await h.admin("GET", "/HealthDetail");
+    const text = await res.text();
+    phase = res.ok ? String(JSON.parse(text)?.migrations?.cyclePhase) : `HTTP ${res.status}`;
+    if (phase === "done") return phase;
+    await Bun.sleep(100);
+  }
+  return phase;
+}
+
 beforeAll(async () => {
   if (process.env.HARPER_HTTP_URL) throw new Error("requires an isolated Harper; unset HARPER_HTTP_URL");
   home = mkdtempSync(join(tmpdir(), "flair-3170-home-"));
@@ -115,6 +129,9 @@ beforeAll(async () => {
   });
   h.assertOwnInstance();
   await h.seedAgent(writer, "admin");
+  // flair#3179: the boot migration cycle can re-embed a row a case has just
+  // POSTed, inside that case's race window. Let the cycle finish before any case runs.
+  expect(await waitForBootCycle(120_000), "the boot migration cycle did not reach done").toBe("done");
 }, 240_000);
 
 afterAll(async () => {
