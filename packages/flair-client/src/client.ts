@@ -11,6 +11,7 @@
 import type { KeyObject } from "node:crypto";
 import { createHash, createPrivateKey } from "node:crypto";
 import { inspectKeyLookup, loadPrivateKeyBounded, signRequest, type KeyLookupState } from "./auth.js";
+import { invalidAgentIdMessage, isValidAgentId } from "./agent-id-rule.js";
 import { readEnvOrUnset } from "./env-guard.js";
 import { FLAIR_CLIENT_VERSION_HEADER, flairClientVersionToken } from "./version.js";
 import type {
@@ -1029,6 +1030,7 @@ class TeamDirectoryApi {
  *  Names only key-file paths, never credentials. */
 function describeKeyLookup(state: KeyLookupState | undefined): string {
   if (!state) return "no signing key was looked up for this request";
+  if (!isValidAgentId(state.agentId)) return invalidAgentIdMessage(state.agentId);
   if (state.resolvedPath) return `the key resolved at ${state.resolvedPath} could not be loaded`;
   if (state.candidates.length === 0) return "no candidate key path could be resolved for this home";
   return `checked ${state.candidates.map((c) => `${c.path} (${c.exists ? "found" : "missing"})`).join(", ")}`;
