@@ -8,6 +8,7 @@
  */
 import { Command } from "commander";
 import { ApiRequestOutcomeUnknown, authedRequest } from "../lib/auth-resolve.js";
+import { requireAgentId } from "../lib/key-dir.js";
 import * as render from "../render.js";
 
 export type BootstrapCli = {
@@ -64,6 +65,7 @@ program
       console.error(`${render.icons.error} --agent <id> required (or set FLAIR_AGENT_ID)`);
       process.exit(2);
     }
+    requireAgentId(agentId);
     const baseUrl = resolveBaseUrl(opts);
     const mode = render.resolveOutputMode(opts);
     try {
