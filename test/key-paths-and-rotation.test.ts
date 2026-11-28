@@ -23,7 +23,7 @@ import { setAgentKeyFileTestHooks } from "../src/lib/agent-key-file.js";
 
 function makeTmpDir(): string {
   const dir = join(tmpdir(), `flair-keyrot-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
   return dir;
 }
 
@@ -435,7 +435,7 @@ describe("agent rotate-key (real command, POSIX)", () => {
     rmSync(keysDir, { recursive: true });
     const target = join(tmpDir, "real-parent");
     const ancestor = join(tmpDir, "linked-parent");
-    mkdirSync(target);
+    mkdirSync(target, { mode: 0o700 });
     symlinkSync(target, ancestor);
     keysDir = join(ancestor, "nested", "keys");
     privPath = join(keysDir, `${id}.key`);
@@ -472,7 +472,7 @@ describe("agent rotate-key (real command, POSIX)", () => {
   it.skipIf(process.platform === "win32")("syncs a pre-existing keys directory's resolved parent before the update", async () => {
     const target = join(tmpDir, "real-parent");
     const ancestor = join(tmpDir, "linked-parent");
-    mkdirSync(target);
+    mkdirSync(target, { mode: 0o700 });
     symlinkSync(target, ancestor);
     keysDir = join(ancestor, "keys");
     mkdirSync(keysDir);

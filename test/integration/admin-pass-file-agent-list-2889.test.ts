@@ -98,7 +98,7 @@ beforeAll(async () => {
   expect(Number(ops.port)).toBeGreaterThan(0);
 
   cliHome = mkdtempSync(join(tmpdir(), "flair-2889-home-"));
-  mkdirSync(join(cliHome, ".flair"));
+  mkdirSync(join(cliHome, ".flair"), { mode: 0o700 });
   writeFileSync(join(cliHome, ".flair", "config.yaml"), `port: ${http.port}\nopsPort: ${ops.port}\n`);
   passFile0600 = join(cliHome, "admin-pass-0600");
   passFile0644 = join(cliHome, "admin-pass-0644");

@@ -34,6 +34,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
+import { program } from "../../src/cli.ts";
 import {
   AgentKeyFileRefusal,
   createAgentKeyFile,
@@ -438,7 +439,108 @@ test.skipIf(process.platform === "win32")("createAgentKeyFile syncs the key's di
   expect(existsSync(keyPath)).toBe(true);
 });
 
-test.skipIf(process.platform === "win32")("a failed directory sync refuses with the published key path and leaves the key", () => {
+test.skipIf(process.platform === "win32")("the keys-directory sync uses the keys directory's own device and inode", () => {
+  const dir = keysDir();
+  ensureAgentKeysDir(dir);
+  const keyPath = join(dir, "synced-identity.key");
+  let syncs = 0;
+  setAgentKeyFileTestHooks({
+    syncKeysDir: (fd) => {
+      const synced = fstatSync(fd);
+      const keys = statSync(dir);
+      expect([synced.dev, synced.ino]).toEqual([keys.dev, keys.ino]);
+      syncs += 1;
+      fsyncSync(fd);
+    },
+  });
+  try {
+    createAgentKeyFile(keyPath, Buffer.alloc(32));
+  } finally {
+    setAgentKeyFileTestHooks(undefined);
+  }
+  expect(syncs).toBe(1);
+  expect(existsSync(keyPath)).toBe(true);
+});
+
+test.skipIf(process.platform === "win32")("a keys directory replaced between the check and the write is refused and leaves no key in either directory", () => {
+  const dir = keysDir();
+  ensureAgentKeysDir(dir);
+  const moved = `${dir}.moved`;
+  setAgentKeyFileTestHooks({
+    afterKeysDirCheck: () => {
+      renameSync(dir, moved);
+      mkdirSync(dir, { mode: 0o700 });
+    },
+  });
+  let caught: unknown;
+  try {
+    createAgentKeyFile(join(dir, "agent-a.key"), Buffer.alloc(32));
+  } catch (error) {
+    caught = error;
+  } finally {
+    setAgentKeyFileTestHooks(undefined);
+  }
+  expect(caught).toBeInstanceOf(AgentKeyFileRefusal);
+  expect((caught as Error).message).toContain("changed after the key was written");
+  expect(readdirSync(moved)).toEqual([]);
+  expect(readdirSync(dir)).toEqual([]);
+});
+
+test.skipIf(process.platform === "win32")("a keys directory under an ancestor another user can change is refused, naming that ancestor", () => {
+  const home = tempDir("flair-keyfile-3077-");
+  const shared = join(home, "shared");
+  mkdirSync(shared, { mode: 0o700 });
+  chmodSync(shared, 0o777);
+  const dir = join(shared, "keys");
+  ensureAgentKeysDir(dir);
+  let caught: unknown;
+  try {
+    createAgentKeyFile(join(dir, "agent-a.key"), Buffer.alloc(32));
+  } catch (error) {
+    caught = error;
+  } finally {
+    setAgentKeyFileTestHooks(undefined);
+  }
+  expect(caught).toBeInstanceOf(AgentKeyFileRefusal);
+  const message = (caught as Error).message;
+  expect(message).toContain(shared);
+  expect(message).toContain("0777");
+  expect(message).toContain("uid");
+  expect(existsSync(join(dir, "agent-a.key"))).toBe(false);
+});
+
+test.skipIf(process.platform === "win32")("a sticky world-writable ancestor with a user-owned keys directory passes", () => {
+  const home = tempDir("flair-keyfile-3077-");
+  const shared = join(home, "shared");
+  mkdirSync(shared, { mode: 0o700 });
+  // Bun's chmod drops the sticky bit (measured on bun 1.3.10), so a node child
+  // installs the precondition while the code under test observes it.
+  const chmod = spawnSync("node", ["-e", `require("node:fs").chmodSync(${JSON.stringify(shared)}, 0o1777)`], {
+    timeout: 10_000,
+  });
+  expect(chmod.status).toBe(0);
+  expect(statSync(shared).mode & 0o1000).toBe(0o1000);
+  const dir = join(shared, "keys");
+  ensureAgentKeysDir(dir);
+  const keyPath = join(dir, "agent-a.key");
+  createAgentKeyFile(keyPath, Buffer.alloc(32));
+  expect(existsSync(keyPath)).toBe(true);
+  expect(statSync(keyPath).mode & 0o777).toBe(0o600);
+});
+
+test.skipIf(process.platform === "win32")("a normal keys directory under the test home and a custom --keys-dir under it pass", () => {
+  const home = tempDir("flair-keyfile-3077-");
+  const standard = join(home, ".flair", "keys");
+  const custom = join(home, "custom", "keys");
+  ensureAgentKeysDir(standard);
+  ensureAgentKeysDir(custom);
+  createAgentKeyFile(join(standard, "agent-a.key"), Buffer.alloc(32));
+  createAgentKeyFile(join(custom, "agent-b.key"), Buffer.alloc(32));
+  expect(existsSync(join(standard, "agent-a.key"))).toBe(true);
+  expect(existsSync(join(custom, "agent-b.key"))).toBe(true);
+});
+
+test.skipIf(process.platform === "win32")("a failed directory sync refuses with the published key path and removes the key", () => {
   const dir = keysDir();
   ensureAgentKeysDir(dir);
   const keyPath = join(dir, "unsynced.key");
@@ -457,9 +559,9 @@ test.skipIf(process.platform === "win32")("a failed directory sync refuses with 
   }
   expect(caught).toBeInstanceOf(AgentKeyFileRefusal);
   expect((caught as Error).message).toContain(keyPath);
-  expect((caught as Error).message).toContain("not confirmed durable");
-  expect(existsSync(keyPath)).toBe(true);
-  expect(statSync(keyPath).mode & 0o777).toBe(0o600);
+  expect((caught as Error).message).toContain("was removed");
+  expect(existsSync(keyPath)).toBe(false);
+  expect(tempEntries(dir)).toHaveLength(0);
 });
 
 test.skipIf(process.platform === "win32")("a keys directory replaced by a symlink after creation is refused and nothing is written", () => {
@@ -485,6 +587,7 @@ test.skipIf(process.platform === "win32")("a reused key is refused when its dire
   const dir = keysDir();
   ensureAgentKeysDir(dir);
   const keyPath = join(dir, "reused.key");
+  writeFileSync(keyPath, Buffer.alloc(32, 3), { mode: 0o600 });
   let syncFails = true;
   setAgentKeyFileTestHooks({
     syncKeysDir: (fd) => {
@@ -499,10 +602,10 @@ test.skipIf(process.platform === "win32")("a reused key is refused when its dire
     return contents;
   };
   try {
-    // The first create publishes the key, then refuses on its directory sync.
+    // The existing key is read, then its directory sync fails; the key stays.
     expect(attempt).toThrow(/not confirmed durable/);
     expect(existsSync(keyPath)).toBe(true);
-    // A retry reads that published key and repeats the sync before returning it.
+    // A retry reads the key again and repeats the sync before returning it.
     expect(attempt).toThrow(AgentKeyFileRefusal);
     expect(attempt).toThrow(/not confirmed durable/);
     expect(registered).toHaveLength(0);
@@ -596,6 +699,29 @@ test.skipIf(process.platform === "win32")("a parent sync failure after another p
   expect(existsSync(keyPath)).toBe(false);
 });
 
+const INSERT_LOG_OPS_SOURCE = `
+const { appendFileSync, writeFileSync } = require("node:fs");
+let stored = "";
+const logPath = process.argv[3];
+const server = Bun.serve({
+  port: 0,
+  fetch: async (req) => {
+    const body = await req.json();
+    if (body.operation === "sql") return Response.json([]);
+    if (body.operation === "search_by_value" && body.table === "Agent") {
+      return Response.json(stored ? [{ id: "agent-a", name: "agent-a", publicKey: stored }] : []);
+    }
+    if (body.operation === "insert") {
+      appendFileSync(logPath, "insert\\n");
+      stored = body.records && body.records[0] ? body.records[0].publicKey : "";
+      return Response.json({ inserted_hashes: 1 });
+    }
+    return Response.json({});
+  },
+});
+writeFileSync(process.argv[2], String(server.port));
+`;
+
 const MOCK_OPS_SOURCE = `
 const { writeFileSync } = require("node:fs");
 let stored = "";
@@ -657,3 +783,70 @@ test.skipIf(process.platform !== "win32")("win32 reuses an existing key without 
   writeFileSync(keyPath, prior);
   expect(Buffer.from(readExistingAgentKey(keyPath)!).equals(prior)).toBe(true);
 });
+
+test.skipIf(process.platform === "win32")("flair agent add exits 1, writes no key and sends no insert when the keys-directory sync fails", async () => {
+  const home = tempDir("flair-keyfile-3077-home-");
+  const keysDir = join(home, "keys");
+  const passFile = join(home, "admin-pass");
+  const serverScript = join(home, "mock-ops.js");
+  const portFile = join(home, "mock-ops.port");
+  const insertLog = join(home, "inserts.log");
+  writeFileSync(passFile, "fixture-pass", { mode: 0o600 });
+  writeFileSync(serverScript, INSERT_LOG_OPS_SOURCE);
+  const server = Bun.spawn(["bun", serverScript, portFile, insertLog], { stdout: "ignore", stderr: "ignore" });
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const logSpy = spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+    stdout.push(args.map((arg) => String(arg)).join(" "));
+  });
+  const errSpy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+    stderr.push(args.map((arg) => String(arg)).join(" "));
+  });
+  const origExit = process.exit;
+  process.exit = ((code?: number) => {
+    throw new Error(`process.exit(${code ?? 0})`);
+  }) as typeof process.exit;
+  let code = 0;
+  try {
+    const deadline = Date.now() + 10_000;
+    while (!existsSync(portFile)) {
+      if (Date.now() > deadline) throw new Error("mock ops server did not start");
+      await Bun.sleep(25);
+    }
+    const port = readFileSync(portFile, "utf8").trim();
+    setAgentKeyFileTestHooks({
+      syncKeysDir: (fd) => {
+        const synced = fstatSync(fd);
+        const keys = statSync(keysDir);
+        if (synced.dev === keys.dev && synced.ino === keys.ino) throw new Error("fixture sync failure");
+        fsyncSync(fd);
+      },
+    });
+    try {
+      await program.parseAsync([
+        "node", "flair", "agent", "add", "agent-a",
+        "--keys-dir", keysDir,
+        "--ops-target", `http://127.0.0.1:${port}`,
+        "--admin-pass-file", passFile,
+      ]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const match = message.match(/^process\.exit\((\d+)\)$/);
+      if (!match) throw error;
+      code = Number(match[1]);
+    }
+  } finally {
+    setAgentKeyFileTestHooks(undefined);
+    process.exit = origExit;
+    logSpy.mockRestore();
+    errSpy.mockRestore();
+    server.kill();
+    await server.exited.catch(() => {});
+  }
+  expect(code).toBe(1);
+  expect(existsSync(join(keysDir, "agent-a.key"))).toBe(false);
+  expect(existsSync(keysDir) ? tempEntries(keysDir) : []).toHaveLength(0);
+  expect(existsSync(insertLog) ? readFileSync(insertLog, "utf8") : "").toBe("");
+  expect(stderr.join("\n")).toContain("was removed");
+  expect(stdout.join("\n")).not.toContain("Keypair written");
+}, 30_000);

@@ -16,7 +16,7 @@ const OPS_PORT = 20990;
 function fixture(installed = false) {
   const home = tempDir("iss-");
   const dataDir = join(home, ".flair", "data");
-  mkdirSync(dataDir, { recursive: true });
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   if (installed) writeFileSync(join(dataDir, "harper-config.yaml"), `rootPath: ${dataDir}\n`);
   return { home, dataDir, log: join(home, "requests.jsonl") };
 }
