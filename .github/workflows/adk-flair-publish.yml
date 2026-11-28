@@ -96,12 +96,14 @@ jobs:
           # PyPI's JSON API can lag an upload by seconds to minutes (2026-11-25: 404 one second after a
           # successful publish). Retry the lookup and a missing file for up to ~5 minutes; a SHA256
           # mismatch or an invalid file list fails at once.
-          attempts=20
+          attempts="${PYPI_VERIFY_ATTEMPTS:-20}"
+          interval="${PYPI_VERIFY_INTERVAL:-15}"
+          missing=""
           for attempt in $(seq 1 "$attempts"); do
             if curl --fail --silent --show-error --connect-timeout 10 --max-time 30 \
               --output "$RELEASE_JSON" "https://pypi.org/pypi/adk-flair/$VERSION/json"; then
               set +e
-              python3 - "$RELEASE_JSON" <<'PY'
+              python3 - "$RELEASE_JSON" > "$RUNNER_TEMP/adk-flair-verify.out" <<'PY'
           import hashlib
           import json
           from pathlib import Path
@@ -119,7 +121,7 @@ jobs:
               sys.exit(f"::error::Invalid PyPI file list: {error}")
           for artifact in wheels + sdists:
               if artifact.name not in published:
-                  print(f"PyPI does not list {artifact.name} yet.")
+                  print(f"MISSING {artifact.name}")
                   sys.exit(3)
               digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
               if published[artifact.name] != digest:
@@ -128,12 +130,22 @@ jobs:
           PY
               status=$?
               set -e
+              grep -v '^MISSING ' "$RUNNER_TEMP/adk-flair-verify.out" || true
               [ "$status" -eq 0 ] && exit 0
               [ "$status" -ne 3 ] && exit "$status"
+              missing=$(sed -n 's/^MISSING //p' "$RUNNER_TEMP/adk-flair-verify.out")
+              echo "PyPI does not list $missing yet (lookup $attempt of $attempts)."
+            else
+              missing=""
+              echo "PyPI lookup for adk-flair $VERSION failed (lookup $attempt of $attempts)."
             fi
-            [ "$attempt" -lt "$attempts" ] && sleep 15
+            [ "$attempt" -lt "$attempts" ] && sleep "$interval"
           done
-          echo "::error::PyPI does not list both adk-flair $VERSION files after $attempts lookups."
+          if [ -n "$missing" ]; then
+            echo "::error::Missing PyPI file: $missing after $attempts lookups."
+          else
+            echo "::error::PyPI lookup failed for adk-flair $VERSION after $attempts lookups."
+          fi
           exit 1
 
       - name: Summary

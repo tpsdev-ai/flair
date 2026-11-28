@@ -209,7 +209,10 @@ describe("adk-flair publishing", () => {
     });
   }
 
-  for (const scenario of ["complete", "missing wheel", "missing sdist", "wheel mismatch", "sdist mismatch", "lookup error", "HTTP error", "invalid JSON"] as const) {
+  // The step retries a lookup and a not-yet-listed file (PyPI's JSON API lags uploads); the tests run it with two
+  // attempts and no sleep, and count lookups: a mismatch or an invalid file list must fail on the first one.
+  const expectedLookups = { "complete": 1, "listed on retry": 2, "missing wheel": 2, "missing sdist": 2, "wheel mismatch": 1, "sdist mismatch": 1, "lookup error": 2, "HTTP error": 2, "invalid JSON": 1 } as const;
+  for (const scenario of ["complete", "listed on retry", "missing wheel", "missing sdist", "wheel mismatch", "sdist mismatch", "lookup error", "HTTP error", "invalid JSON"] as const) {
     test(`PyPI verification: ${scenario}`, () => {
       const cwd = tempDir("flair-adk-pypi-");
       const dist = join(cwd, "packages/adk-flair/dist");
@@ -224,10 +227,14 @@ describe("adk-flair publishing", () => {
       const urls = files.filter(file => !scenario.startsWith("missing") || file.filename !== affected)
         .map(file => scenario.endsWith("mismatch") && file.filename === affected ? { ...file, digests: { sha256: "0".repeat(64) } } : file);
       const args = join(cwd, "args");
+      const count = join(cwd, "lookups");
       writeFileSync(join(cwd, "curl"), `#!/bin/bash
 printf "%s\\n" "$@" > "$LOOKUP_ARGS"
+printf "x" >> "$LOOKUP_COUNT"
+body="$LOOKUP_BODY"
+[ "$(wc -c < "$LOOKUP_COUNT")" -eq 1 ] && [ -n "$LOOKUP_BODY_FIRST" ] && body="$LOOKUP_BODY_FIRST"
 while [ "$#" -gt 0 ]; do
-  if [ "$1" = "--output" ]; then printf "%s" "$LOOKUP_BODY" > "$2"; shift; fi
+  if [ "$1" = "--output" ]; then printf "%s" "$body" > "$2"; shift; fi
   shift
 done
 exit "$LOOKUP_EXIT"
@@ -235,16 +242,19 @@ exit "$LOOKUP_EXIT"
       const result = spawnSync("bash", [shellScript(verify.run!)], {
         cwd, encoding: "utf8",
         env: { ...process.env, PATH: `${cwd}:${process.env.PATH}`, VERSION: "0.59.0", RUNNER_TEMP: cwd, LOOKUP_ARGS: args,
+          LOOKUP_COUNT: count, PYPI_VERIFY_ATTEMPTS: "2", PYPI_VERIFY_INTERVAL: "0",
+          LOOKUP_BODY_FIRST: scenario === "listed on retry" ? JSON.stringify({ urls: files.slice(0, 1) }) : "",
           LOOKUP_BODY: scenario === "invalid JSON" ? "invalid" : JSON.stringify({ urls }),
           LOOKUP_EXIT: scenario === "lookup error" ? "7" : scenario === "HTTP error" ? "22" : "0" },
       });
       const text = result.stdout + result.stderr;
-      expect(result.status, text).toBe(scenario === "complete" ? 0 : 1);
+      expect(result.status, text).toBe(scenario === "complete" || scenario === "listed on retry" ? 0 : 1);
+      expect(readFileSync(count, "utf8").length, text).toBe(expectedLookups[scenario]);
       const request = readFileSync(args, "utf8");
       expect(request).toContain("https://pypi.org/pypi/adk-flair/0.59.0/json\n");
       expect(request).toContain("--fail\n");
       expect(request).toContain("--max-time\n30\n");
-      if (scenario === "complete") {
+      if (scenario === "complete" || scenario === "listed on retry") {
         for (const file of files) expect(text).toContain(`Verified ${file.filename}: ${file.digests.sha256}`);
       }
       if (scenario.startsWith("missing")) expect(text).toContain(`Missing PyPI file: ${affected}`);
