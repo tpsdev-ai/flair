@@ -183,7 +183,7 @@ async function seedRows(rows: Record<string, unknown>[]): Promise<Map<string, an
   return before;
 }
 
-function runReembed(args: string[], opts: { admin?: boolean } = {}): { code: number | null; out: string } {
+function runReembed(args: string[], opts: { admin?: boolean; env?: Record<string, string> } = {}): { code: number | null; out: string } {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(FLAIR_|HARPER_|HDB_|FABRIC_)/.test(key)));
   const admin = opts.admin !== false
     ? { FLAIR_OPS_PORT: new URL(harper.opsURL).port, FLAIR_ADMIN_USER: harper.admin.username, FLAIR_ADMIN_PASS: harper.admin.password }
@@ -192,6 +192,7 @@ function runReembed(args: string[], opts: { admin?: boolean } = {}): { code: num
     ...env,
     HOME: home,
     ...admin,
+    ...(opts.env ?? {}),
   };
   const r = spawnSync(nodeBin({ env: childEnv }), [CLI, "reembed", "--port", new URL(harper.httpURL).port, ...args], {
     encoding: "utf-8",
@@ -348,5 +349,28 @@ describe("flair#2296: flair reembed", () => {
     });
     expect(anonymous.status, await anonymous.clone().text()).toBe(401);
     expect(await read("owned-a")).toEqual(before.get("owned-a"));
+  }, 240_000);
+
+  // flair#3093: the updated credential reads treat empty FLAIR_ADMIN_PASS as
+  // unset and fall back to HDB_ADMIN_PASSWORD on both paths.
+  test("empty FLAIR_ADMIN_PASS falls back to HDB_ADMIN_PASSWORD on all-agents and single-agent paths (#3093)", async () => {
+    const fallbackEnv = {
+      FLAIR_ADMIN_PASS: "",
+      HDB_ADMIN_PASSWORD: harper.admin.password,
+    };
+
+    // 1. All-agents path
+    const beforeAll = await seedRows([fixtureRow("fallback-all", agentA.id)]);
+    const rAll = runReembed(["--batch-size", "1", "--delay-ms", "0"], { env: fallbackEnv });
+    expect(rAll.code, rAll.out).toBe(0);
+    expect(rAll.out).not.toContain("Admin password required");
+    for (const row of beforeAll.values()) await expectOnlyEmbeddingChanged(row);
+
+    // 2. Single-agent path (reads adminPassSingle ~ line 378)
+    const beforeSingle = await seedRows([fixtureRow("fallback-single", agentC.id)]);
+    const rSingle = runReembed(["--agent", agentC.id, "--batch-size", "1", "--delay-ms", "0"], { env: fallbackEnv });
+    expect(rSingle.code, rSingle.out).toBe(0);
+    expect(rSingle.out).not.toContain("Admin password required");
+    for (const row of beforeSingle.values()) await expectOnlyEmbeddingChanged(row);
   }, 240_000);
 });

@@ -131,6 +131,7 @@ import {
   defaultAdminPassPath,
   defaultKeysDir,
   resolveLocalAdminPass,
+  envAdminPass,
   addAdminPassOptions,
   DEFAULT_ADMIN_USER,
   resolveAdminUser,
@@ -5360,7 +5361,7 @@ async function fetchHealthDetail(opts: { port?: string; url?: string; target?: s
   try {
     let res = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(5000) });
     if (!res.ok && res.status === 401) {
-      const adminPass = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD;
+      const adminPass = envAdminPass();
       if (adminPass) {
         res = await fetch(`${baseUrl}/Health`, {
           headers: { Authorization: `Basic ${Buffer.from(`${resolveAdminUser(undefined)}:${adminPass}`).toString("base64")}` },
@@ -5383,7 +5384,7 @@ async function fetchHealthDetail(opts: { port?: string; url?: string; target?: s
       try {
         let res = await fetch(`${altUrl}/Health`, { signal: AbortSignal.timeout(5000) });
         if (!res.ok && res.status === 401) {
-          const adminPass = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD;
+          const adminPass = envAdminPass();
           if (adminPass) {
             res = await fetch(`${altUrl}/Health`, {
               headers: { Authorization: `Basic ${Buffer.from(`${resolveAdminUser(undefined)}:${adminPass}`).toString("base64")}` },
@@ -7025,7 +7026,7 @@ function resolveAdminPassAvailability(path: string): AdminPassAvailability {
       };
     }
   }
-  if (process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD) {
+  if (envAdminPass()) {
     return { kind: "candidate", source: "env" };
   }
   return {
@@ -7258,7 +7259,7 @@ export async function writeInitLaunchdPlist(
   // 0600, else refuse with no plist.
   if (resolveAdminPassAvailability(adminPassPath).kind !== "existing-valid") {
     const candidate =
-      opts.adminPass || process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD;
+      opts.adminPass || envAdminPass();
     if (!candidate) {
       return {
         kind: "refused",
@@ -8153,7 +8154,7 @@ async function prepareLaunchdRepair(
   // with no plist and no bounce, when nothing proves.
   const adminPassPath = defaultAdminPassPath();
   if (plan.credential.writeAdminPassFile) {
-    const candidate = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD;
+    const candidate = envAdminPass();
     if (!candidate) {
       return {
         kind: "refused",

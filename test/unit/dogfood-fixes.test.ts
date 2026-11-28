@@ -50,6 +50,16 @@ describe("Dogfood fixes", () => {
       expect(output).toContain("Admin password required");
     });
 
+    it("reembed's updated credential read omits 'Admin password required' when empty FLAIR_ADMIN_PASS is set (#3093)", () => {
+      const output = run(`${FLAIR_BIN} reembed --stale-only --dry-run`, {
+        HOME: TEST_DIR,
+        FLAIR_URL: "http://127.0.0.1:19999", // no Harper running
+        FLAIR_ADMIN_PASS: "",
+        HDB_ADMIN_PASSWORD: "test-admin-password",
+      });
+      expect(output).not.toContain("Admin password required");
+    });
+
     it("should accept optional --agent flag", () => {
       const output = run(`${FLAIR_BIN} reembed --help`);
       expect(output).toContain("--agent <id>");

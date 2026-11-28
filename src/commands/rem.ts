@@ -17,7 +17,7 @@ import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 
 import { dirname, resolve } from "node:path";
 import * as render from "../render.js";
-import { isLocalBase, resolveAdminUser, resolveLocalAdminPass, addAdminPassOptions, AdminPassSourceError, ADMIN_PASS_FILE_FLAG, ADMIN_PASS_HELP, ApiRequestOutcomeUnknown, apiErrorRawBody, boundErrorText, resolveRemRequestDeadlineMs, DEFAULT_REM_REQUEST_DEADLINE_MS } from "../lib/auth-resolve.js";
+import { isLocalBase, envAdminPass, resolveAdminUser, resolveLocalAdminPass, addAdminPassOptions, AdminPassSourceError, ADMIN_PASS_FILE_FLAG, ADMIN_PASS_HELP, ApiRequestOutcomeUnknown, apiErrorRawBody, boundErrorText, resolveRemRequestDeadlineMs, DEFAULT_REM_REQUEST_DEADLINE_MS } from "../lib/auth-resolve.js";
 import type { OpsSearch } from "../rem/runner.js";
 import {
   validatePromoteOpts,
@@ -1295,7 +1295,7 @@ export function register(program: Command): void {
       // hook before any cycle work. A refused FILE is reported as `Dedup: NOT
       // RUN` rather than issuing an agent-authed call that an agent key cannot
       // authorize.
-      const adminPass = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD ?? "";
+      const adminPass = opts.adminPass || envAdminPass() || "";
       // Every agent-scoped call is signed by the selected agent and nothing
       // else: the identity is pinned here (never FLAIR_AGENT_ID), and
       // signedOnly refuses FLAIR_TOKEN / FLAIR_ADMIN_PASS / the local

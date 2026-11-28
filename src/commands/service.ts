@@ -7,7 +7,7 @@
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
 import { Command } from "commander";
-import { DEFAULT_ADMIN_USER, defaultAdminPassPath, readAdminPassFileSecure } from "../lib/auth-resolve.js";
+import { DEFAULT_ADMIN_USER, envAdminPass, defaultAdminPassPath, readAdminPassFileSecure } from "../lib/auth-resolve.js";
 import { seedUsingFlairSkill } from "../lib/skill-seed.js";
 import { reconcilePendingSkillSeed, skillSeedPendingPath } from "../lib/skill-seed-pending.js";
 import { classifyDaemonState, healthIndicatesListener } from "../lib/daemon-liveness.js";
@@ -234,7 +234,7 @@ async function seedAfterStart(dataDir: string, port: number): Promise<void> {
   try {
     const outcome = await reconcilePendingSkillSeed(dataDir, async () => {
       const passPath = defaultAdminPassPath();
-      const pass = process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD ||
+      const pass = envAdminPass() ||
         (existsSync(passPath) ? readAdminPassFileSecure(passPath) : "");
       if (!pass) {
         throw new Error(

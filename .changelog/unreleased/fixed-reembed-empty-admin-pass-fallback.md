@@ -1,0 +1,2 @@
+- **The updated credential reads treat an empty FLAIR_ADMIN_PASS environment variable as unset, falling back to HDB_ADMIN_PASSWORD.**
+  flair reembed failed with "Admin password required" when FLAIR_ADMIN_PASS was set to an empty string by a shell or other external setup, because nullish coalescing kept the empty string instead of falling back to a configured HDB_ADMIN_PASSWORD. The credential reads now share a single envAdminPass helper (#3093).

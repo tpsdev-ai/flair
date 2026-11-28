@@ -32,6 +32,7 @@ import {
   ApiHttpError,
   apiErrorRawBody,
   defaultAdminPassPath,
+  envAdminPass,
   isLocalBase,
   resolveAdminUser,
   addAdminPassOptions,
@@ -381,7 +382,7 @@ async function loadInstanceSecretKey(instanceId: string, opts: { adminPass?: str
   // legacy-key spoke cannot pass preflight and then fail here for a different
   // endpoint or a credential the fallback would not send.
   const opsEndpoint = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
-  const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD ?? "";
+  const adminPass: string = opts.adminPass || envAdminPass() || "";
   const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
   const res = await fetch(`${opsEndpoint}/`, {
     method: "POST",
@@ -2031,7 +2032,7 @@ export function register(program: Command): void {
       // ops preflight and the signing-key fallback below both read.
       const adminPass = resolveFederationAdminPass(
         opts,
-        process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD,
+        envAdminPass(),
       );
       // One URL for the identity GET and the named error. resolveBaseUrl
       // honors --target / FLAIR_TARGET / FLAIR_URL / --port — the same host

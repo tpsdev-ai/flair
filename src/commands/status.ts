@@ -7,7 +7,7 @@
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
 import { Command } from "commander";
-import { resolveAdminUser } from "../lib/auth-resolve.js";
+import { envAdminPass, resolveAdminUser } from "../lib/auth-resolve.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
 import { agentKeyLocations, formatKeyModeFinding, keyModesUnsupported, KEY_MODES_UNSUPPORTED_MESSAGE, type KeyLocation, scanAgentKeyModes } from "../lib/key-dir.js";
 import { escapeTerminalText } from "../lib/terminal-text.js";
@@ -1005,7 +1005,7 @@ statusCmd
           : []) as string[];
     const bootstrapBytes: Record<string, { bytes: number; tokenEstimate?: number; memoriesIncluded?: number; error?: string }> = {};
     if (opts.bootstrap && agentList.length > 0) {
-      const adminPass = process.env.HDB_ADMIN_PASSWORD || process.env.FLAIR_ADMIN_PASS;
+      const adminPass = envAdminPass();
       if (!adminPass) {
         if (!opts.json) {
           console.log("⚠ --bootstrap requires HDB_ADMIN_PASSWORD or FLAIR_ADMIN_PASS env var");

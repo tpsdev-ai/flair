@@ -109,7 +109,7 @@ mock.module("../../src/lib/instance-identity-row.js", () => ({
 }));
 mock.module("../../resources/Federation.js", () => ({ readAllInstanceRows: async () => [] }));
 mock.module("../../src/rem/scheduler.js", () => ({ queryActiveStateAsync: async () => { if (activeError) return absent(activeError); return activeState; } }));
-mock.module("../../src/lib/auth-resolve.js", () => ({ resolveAdminUser: () => "fixture" }));
+mock.module("../../src/lib/auth-resolve.js", () => ({ resolveAdminUser: () => "fixture", envAdminPass: () => process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD || undefined }));
 mock.module("../../src/version-check.js", () => ({
   checkVersion: async () => ({}), formatVersionNudge: () => null, FLAIR_PKG_NAME: "fixture",
 }));

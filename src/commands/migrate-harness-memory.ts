@@ -7,7 +7,7 @@
  * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
  */
 import { Command } from "commander";
-import { authFetch, resolveAdminUser } from "../lib/auth-resolve.js";
+import { authFetch, envAdminPass, resolveAdminUser } from "../lib/auth-resolve.js";
 import { load as parseYaml } from "js-yaml";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync } from "node:fs";
@@ -266,7 +266,7 @@ program
           }
           
           if (!authSuccess) {
-            const adminPass = process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD || "";
+            const adminPass = envAdminPass() || "";
             if (adminPass) {
               const memoryId = `${agentId}-${randomUUID()}`;
               const body = {

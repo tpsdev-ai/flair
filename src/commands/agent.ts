@@ -28,6 +28,7 @@ import {
   credentialsInHeader,
   defaultKeysDir,
   describeHttpFailure,
+  envAdminPass,
   resolveLocalAdminPass,
   resolveAdminUser,
   resolveKeyPath,
@@ -571,7 +572,7 @@ export function register(program: Command): void {
       if (shouldShowInlineSecretWarning(opts.inlineAdminPass, false, new Set(["--admin-pass"]), "--admin-pass")) {
         console.error(INLINE_ADMIN_PASS_WARNING);
       }
-      const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD ?? "";
+      const adminPass: string = opts.adminPass || envAdminPass() || "";
       const mode = render.resolveOutputMode(opts);
       let agents: any[];
       if (adminPass) {
