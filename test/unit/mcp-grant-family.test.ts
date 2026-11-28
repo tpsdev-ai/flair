@@ -615,6 +615,7 @@ describe("grantMcpClient — lookup refusals (flair#3077)", () => {
 
     expect(thrown).toBeDefined();
     expect(thrown!.message).toContain(`Agent '${name}'`);
+    expect(thrown!.message).toContain("status 200");
     expect(thrown!.message).toMatch(/unreadable lookup response/);
     expect(existsSync(keysDir)).toBe(false);
     expect(calls.map((c) => c.operation)).toEqual(["search_by_value"]);
@@ -633,7 +634,8 @@ describe("grantMcpClient — lookup refusals (flair#3077)", () => {
 
     expect(thrown).toBeDefined();
     expect(thrown!.message).toContain(`Agent '${name}'`);
-    expect(thrown!.message).toMatch(/lookup response was not a list/);
+    expect(thrown!.message).toContain("status 200");
+    expect(thrown!.message).toMatch(/non-list lookup response/);
     expect(existsSync(keysDir)).toBe(false);
     expect(calls.map((c) => c.operation)).toEqual(["search_by_value"]);
     expect(readMcpClientManifest(manifestPath)).toHaveLength(0);
@@ -641,7 +643,7 @@ describe("grantMcpClient — lookup refusals (flair#3077)", () => {
 });
 
 describe("grantMcpClient — insert and delete uncertainty (flair#3077)", () => {
-  test("an insert request that throws keeps both key files, sends no delete and prints the remedy", async () => {
+  test("an insert request that throws keeps both key files, sends no delete and its error contains the remedy", async () => {
     const calls: any[] = [];
     const fetchImpl = (async (_url: any, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body ?? "{}"));

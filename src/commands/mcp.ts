@@ -353,13 +353,13 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
     existing = await existingRes.json();
   } catch {
     throw new Error(
-      `Could not check whether Agent '${name}' already exists (unreadable lookup response); ` +
+      `Could not check whether Agent '${name}' already exists (status ${existingRes.status}, unreadable lookup response); ` +
         `refusing the grant before any key or Agent record write.`,
     );
   }
   if (!Array.isArray(existing)) {
     throw new Error(
-      `Could not check whether Agent '${name}' already exists (lookup response was not a list); ` +
+      `Could not check whether Agent '${name}' already exists (status ${existingRes.status}, non-list lookup response); ` +
         `refusing the grant before any key or Agent record write.`,
     );
   }
