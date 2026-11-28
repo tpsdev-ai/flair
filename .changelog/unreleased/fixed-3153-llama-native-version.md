@@ -1,2 +1,1 @@
-- **Checkout CI installs the platform native version `harper-fabric-embeddings` declares.**
-  Installed mode uses a native package found inside the tree by its own version, else the declared platform version, else refuses. Manifests without a canonical path inside the selected tree are skipped.
+- **Checkout CI installs the platform native version `harper-fabric-embeddings` declares in `bun.lock`.** Installed-package CI uses a native package found inside the selected install tree by its own version, or the platform version declared by that tree's `harper-fabric-embeddings`; otherwise it refuses. ([#3157](https://github.com/tpsdev-ai/flair/pull/3157), [#3137](https://github.com/tpsdev-ai/flair/pull/3137))
