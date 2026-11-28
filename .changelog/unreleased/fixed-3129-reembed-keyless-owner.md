@@ -1,2 +1,2 @@
-- **Keyless `flair reembed --agent <id>` excludes other agents' listed rows from the candidate, up-to-date and updated counts, and reports them in `Skipped (other agents)`.**
-  The keyless listing reads through `POST /SemanticSearch`, whose scope includes other agents' non-private rows. A listing at the row limit exits non-zero without a success marker.
+- **`flair reembed --agent <id>` without administrator credentials excludes other agents' listed rows from its counts.**
+  Other owners are reported in `Skipped (other agents)`. This listing reads through `POST /SemanticSearch`, whose scope includes other agents' non-private rows. A listing at the row limit exits non-zero without a success marker. ([#3135](https://github.com/tpsdev-ai/flair/pull/3135))

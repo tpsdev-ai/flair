@@ -1,11 +1,7 @@
-- **`flair status` escapes the stored fields it prints, and reports unknown per-agent counts after an incomplete scan.**
+- **`flair status` escapes the stored fields it prints, and reports unknown per-agent counts after an incomplete scan.** ([#3101](https://github.com/tpsdev-ai/flair/pull/3101), [#3111](https://github.com/tpsdev-ai/flair/pull/3111))
 
-  `flair status` and `flair status deep` escape control, format, surrogate,
-  unassigned, line- and paragraph-separator code points in agent ids, model
-  names, Soul keys, federation and OAuth fields, warning messages,
-  bridge-installed names and disk paths, the BM25 index summary in both views;
-  deep also escapes the REM nightly and last-distilled timestamps and bootstrap
-  error text. Terminal escaping does not change JSON
+  `flair status`, `flair status deep`, `flair status federation` and
+  `flair status rem` render control characters in stored text visibly. Terminal escaping does not change JSON
   output; a failed Memory scan makes the per-agent `memoryCount`,
   `hashFallback`, `writes24h`, `usageCount` and `lastWriteAt` values null in
   JSON. When a row's memory count is unknown, plain status prints "unknown" for

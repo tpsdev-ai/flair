@@ -2,4 +2,4 @@
   Both used the agent id plus the current millisecond, so two writes in the same
   millisecond reached the same `PUT /Memory/<id>` and the upsert kept one row.
   The quality snapshot keeps its `-quality-snapshot-` prefix and ends in a UUID;
-  the hermes-flair client's `flair_store` id ends in a UUID too.
+  the hermes-flair client's `flair_store` id ends in a UUID too. ([#3117](https://github.com/tpsdev-ai/flair/pull/3117))

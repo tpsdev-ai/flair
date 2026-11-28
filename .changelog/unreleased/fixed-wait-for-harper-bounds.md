@@ -1,2 +1,1 @@
-- **The Harper start waiter rejects a `NODE_` credentials name, a per-request cap above `2147483647` ms, and a credentialed health URL from a direct `main` caller.**
-  Once the waiter starts, each refusal ends the CLI with exit status 2, and a direct `main` call returns 2, before any Docker or HTTP work; Node reads `NODE_OPTIONS` itself before the waiter starts.
+- **The Harper start waiter CLI rejects a `NODE_` credentials name, an excessive request timeout, or a credentialed health URL with exit 2.** The `--per-request-ms` maximum is `2147483647`. Direct `main()` calls also reject the credentials name and credentialed URL with return value 2. ([#3083](https://github.com/tpsdev-ai/flair/pull/3083))
