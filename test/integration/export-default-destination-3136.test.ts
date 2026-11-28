@@ -5,7 +5,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ensureCliBuild } from "../helpers/build-cli-once";
@@ -68,7 +68,8 @@ const exportArgs = (home: string, extra: string[] = []): string[] => [
   "export", AGENT, "--url", harper.httpURL, "--admin-pass", harper.admin.password, "--keys-dir", join(home, "keys"), ...extra,
 ];
 
-const defaultPath = (home: string): string => join(home, ".flair", "exports", `${AGENT}-${CLOCK_MS}.json`);
+/** The default export path under the REAL home (an ancestor may be a symlink). */
+const defaultPath = (home: string): string => join(realpathSync(home), ".flair", "exports", `${AGENT}-${CLOCK_MS}.json`);
 
 beforeAll(async () => {
   ensureCliBuild();

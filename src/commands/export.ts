@@ -9,11 +9,12 @@
 import { Command } from "commander";
 import { defaultKeysDir, resolveAdminUser, addAdminPassOptions } from "../lib/auth-resolve.js";
 import * as render from "../render.js";
-import { closeSync, constants as fsConstants, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { writeFilesAtomically } from "../lib/atomic-write.js";
 import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
 
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { resolveHome } from "../lib/home.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 
@@ -67,46 +68,71 @@ function defaultExportClockMs(): number {
 }
 
 /** The file operations `writeDefaultExport` performs. A test replaces a member
- *  to inject a failure after the exclusive create. */
+ *  to inject a failure through the module seam. */
 export const defaultExportWriteOps = {
+  openTemp: (tempPath: string, mode: number): number =>
+    openSync(tempPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0), mode),
   write: (fd: number, content: string): void => { writeFileSync(fd, content); },
   fsync: (fd: number): void => { fsyncSync(fd); },
   close: (fd: number): void => { closeSync(fd); },
+  link: (tempPath: string, outputPath: string): void => { linkSync(tempPath, outputPath); },
   unlink: (path: string): void => { unlinkSync(path); },
 };
 
-/** Create `outputPath` exclusively at requested `mode` and write `content`.
- *  An existing path — file, symlink or anything else — is refused and nothing
- *  is written. A failed write removes the file this call created. */
-function writeDefaultExport(outputPath: string, content: string, mode: number): void {
-  let fd: number;
+/** Report a temp file this call could not remove. */
+function removeExportTemp(tempPath: string): void {
   try {
-    fd = openSync(outputPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0), mode);
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === "EEXIST" || code === "ELOOP") {
-      console.error(`Error: refusing to write to existing path ${outputPath}`);
-      process.exit(1);
-    }
-    throw err;
+    defaultExportWriteOps.unlink(tempPath);
+  } catch (cleanupErr) {
+    console.error(`Error: failed to remove the temporary export at ${tempPath}: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`);
   }
+}
+
+/** Create `outputPath` at requested `mode` and write `content` by writing a
+ *  complete temp file in the same directory and linking it into place. An
+ *  existing path — file, symlink or anything else — is refused and survives.
+ *  A failed write, fsync or link removes only this call's temp. */
+function writeDefaultExport(outputPath: string, content: string, mode: number): void {
+  const name = basename(outputPath);
+  let tempPath = "";
+  let fd: number | undefined;
+  for (let attempt = 0; attempt < 5 && fd === undefined; attempt += 1) {
+    const candidate = join(dirname(outputPath), `.${name}.tmp-${randomBytes(8).toString("hex")}`);
+    try {
+      fd = defaultExportWriteOps.openTemp(candidate, mode);
+      tempPath = candidate;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST" || attempt === 4) throw err;
+    }
+  }
+  if (fd === undefined) throw new Error(`could not create a temporary export beside ${outputPath}`);
   try {
     defaultExportWriteOps.write(fd, content);
     defaultExportWriteOps.fsync(fd);
+    defaultExportWriteOps.close(fd);
+    fd = undefined;
+    try {
+      defaultExportWriteOps.link(tempPath, outputPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+        removeExportTemp(tempPath);
+        console.error(`Error: refusing to write to existing path ${outputPath}`);
+        process.exit(1);
+      }
+      throw err;
+    }
   } catch (err) {
-    try {
-      defaultExportWriteOps.close(fd);
-    } catch {
-      // The write failure is what this call reports.
+    if (fd !== undefined) {
+      try {
+        defaultExportWriteOps.close(fd);
+      } catch {
+        // The write, fsync or link failure is what this call reports.
+      }
     }
-    try {
-      defaultExportWriteOps.unlink(outputPath);
-    } catch (cleanupErr) {
-      console.error(`Error: failed to remove the partial export at ${outputPath}: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`);
-    }
+    removeExportTemp(tempPath);
     throw err;
   }
-  defaultExportWriteOps.close(fd);
+  removeExportTemp(tempPath);
 }
 
 function hasRequiredStringFields(value: unknown, fields: readonly string[]): value is Record<string, unknown> {
@@ -220,37 +246,41 @@ addAdminPassOptions(
       ...(privateKey ? { privateKey } : {}),
     };
 
-    let rawOutputPath: string;
-    let defaultExportsDir: string | undefined;
+    let outputPath: string;
+    let wroteDefault = false;
     if (opts.output !== undefined) {
-      rawOutputPath = opts.output;
+      outputPath = resolve(opts.output);
+      mkdirSync(dirname(outputPath), { recursive: true });
     } else {
-      defaultExportsDir = join(resolveHome(), ".flair", "exports");
-      const defaultPath = defaultExportOutputPath(defaultExportsDir, agentId, defaultExportClockMs());
-      if (defaultPath === null) {
-        console.error(`Error: refusing to write agent '${agentId}' outside the exports directory ${resolve(defaultExportsDir)}`);
+      const home = resolveHome();
+      const exportsDir = join(home, ".flair", "exports");
+      const lexicalPath = defaultExportOutputPath(exportsDir, agentId, defaultExportClockMs());
+      if (lexicalPath === null) {
+        console.error(`Error: refusing to write agent '${agentId}' outside the exports directory ${resolve(exportsDir)}`);
         process.exit(1);
       }
-      rawOutputPath = defaultPath;
-    }
-    // Canonicalize to prevent path traversal (e.g. ../../etc/passwd)
-    const outputPath = resolve(rawOutputPath);
-    mkdirSync(join(outputPath, ".."), { recursive: true });
-    if (defaultExportsDir !== undefined && dirname(outputPath) !== realpathSync(defaultExportsDir)) {
-      console.error(`Error: refusing to write agent '${agentId}' outside the exports directory ${resolve(defaultExportsDir)}`);
-      process.exit(1);
+      mkdirSync(dirname(lexicalPath), { recursive: true });
+      // The exports directory must be the one under the REAL home. Checked once,
+      // after the directory exists and before any temp file is created; a
+      // concurrent replacement of .flair or exports between this check and the
+      // write is not prevented (Node has no directory-descriptor open).
+      const resolvedExports = realpathSync(exportsDir);
+      if (resolvedExports !== join(realpathSync(home), ".flair", "exports")) {
+        console.error(`Error: refusing to write agent '${agentId}' outside the exports directory ${resolve(exportsDir)}`);
+        process.exit(1);
+      }
+      outputPath = join(resolvedExports, basename(lexicalPath));
+      wroteDefault = true;
     }
     const fileMode = opts.includeKey ? 0o600 : 0o644;
     const content = JSON.stringify(exportData, null, 2);
-    if (opts.output !== undefined) {
-      if (opts.includeKey) {
-        // Stage at 0600 to avoid retaining an existing output file's wider mode.
-        writeFilesAtomically([{ path: outputPath, content, mode: 0o600 }]);
-      } else {
-        writeFileSync(outputPath, content, { mode: fileMode });
-      }
-    } else {
+    if (wroteDefault) {
       writeDefaultExport(outputPath, content, fileMode);
+    } else if (opts.includeKey) {
+      // Stage at 0600 to avoid retaining an existing output file's wider mode.
+      writeFilesAtomically([{ path: outputPath, content, mode: 0o600 }]);
+    } else {
+      writeFileSync(outputPath, content, { mode: fileMode });
     }
 
     console.log(`\n${render.icons.ok} ${render.wrap(render.c.green, `Agent '${agentId}' exported`)}`);
