@@ -94,8 +94,15 @@ jobs:
           set -euo pipefail
           RELEASE_JSON="$RUNNER_TEMP/adk-flair-pypi.json"
           # PyPI's JSON API can lag an upload by seconds to minutes (2026-11-25: 404 one second after a
-          # successful publish). Retry the lookup and a missing file for up to ~5 minutes; a SHA256
-          # mismatch or an invalid file list fails at once.
+          # successful publish). Retry the lookup and a not-yet-listed file up to 20 lookups, 15 s apart;
+          # a wrong local file count, a SHA256 mismatch on any listed file, or an invalid file list fails
+          # at once.
+          wheel_count=$(find packages/adk-flair/dist -maxdepth 1 -name '*.whl' | wc -l)
+          sdist_count=$(find packages/adk-flair/dist -maxdepth 1 -name '*.tar.gz' | wc -l)
+          if [ "$wheel_count" -ne 1 ] || [ "$sdist_count" -ne 1 ]; then
+            echo "::error::Expected one locally built wheel and one sdist."
+            exit 1
+          fi
           attempts="${PYPI_VERIFY_ATTEMPTS:-20}"
           interval="${PYPI_VERIFY_INTERVAL:-15}"
           missing=""
@@ -119,14 +126,18 @@ jobs:
               published = {file["filename"]: file["digests"]["sha256"] for file in release["urls"]}
           except (OSError, ValueError, KeyError, TypeError) as error:
               sys.exit(f"::error::Invalid PyPI file list: {error}")
-          for artifact in wheels + sdists:
-              if artifact.name not in published:
-                  print(f"MISSING {artifact.name}")
+          # Every listed file's digest is checked before a missing file is reported, so a mismatch fails
+          # at once even while another file is not listed yet.
+          digests = {artifact.name: hashlib.sha256(artifact.read_bytes()).hexdigest() for artifact in wheels + sdists}
+          for name, digest in digests.items():
+              if name in published and published[name] != digest:
+                  sys.exit(f"::error::SHA256 mismatch for PyPI file: {name}")
+          for name in digests:
+              if name not in published:
+                  print(f"MISSING {name}")
                   sys.exit(3)
-              digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
-              if published[artifact.name] != digest:
-                  sys.exit(f"::error::SHA256 mismatch for PyPI file: {artifact.name}")
-              print(f"Verified {artifact.name}: {digest}")
+          for name, digest in digests.items():
+              print(f"Verified {name}: {digest}")
           PY
               status=$?
               set -e

@@ -2,7 +2,7 @@ import { shellScript } from "../helpers/shell-script.ts";
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import yaml from "js-yaml";
 import { tempDir } from "../helpers/temp-dir.ts";
@@ -211,8 +211,8 @@ describe("adk-flair publishing", () => {
 
   // The step retries a lookup and a not-yet-listed file (PyPI's JSON API lags uploads); the tests run it with two
   // attempts and no sleep, and count lookups: a mismatch or an invalid file list must fail on the first one.
-  const expectedLookups = { "complete": 1, "listed on retry": 2, "missing wheel": 2, "missing sdist": 2, "wheel mismatch": 1, "sdist mismatch": 1, "lookup error": 2, "HTTP error": 2, "invalid JSON": 1 } as const;
-  for (const scenario of ["complete", "listed on retry", "missing wheel", "missing sdist", "wheel mismatch", "sdist mismatch", "lookup error", "HTTP error", "invalid JSON"] as const) {
+  const expectedLookups = { "complete": 1, "listed on retry": 2, "missing wheel": 2, "missing sdist": 2, "wheel mismatch": 1, "sdist mismatch": 1, "sdist mismatch, wheel unlisted": 1, "lookup error": 2, "HTTP error": 2, "invalid JSON": 1, "two local wheels": 0 } as const;
+  for (const scenario of ["complete", "listed on retry", "missing wheel", "missing sdist", "wheel mismatch", "sdist mismatch", "sdist mismatch, wheel unlisted", "lookup error", "HTTP error", "invalid JSON", "two local wheels"] as const) {
     test(`PyPI verification: ${scenario}`, () => {
       const cwd = tempDir("flair-adk-pypi-");
       const dist = join(cwd, "packages/adk-flair/dist");
@@ -223,9 +223,12 @@ describe("adk-flair publishing", () => {
         writeFileSync(join(dist, filename), data);
         return { filename, digests: { sha256: createHash("sha256").update(data).digest("hex") } };
       });
+      if (scenario === "two local wheels") writeFileSync(join(dist, "adk_flair-0.59.0-py3-none-other.whl"), "extra");
       const affected = scenario.includes("sdist") ? names[1] : names[0];
-      const urls = files.filter(file => !scenario.startsWith("missing") || file.filename !== affected)
-        .map(file => scenario.endsWith("mismatch") && file.filename === affected ? { ...file, digests: { sha256: "0".repeat(64) } } : file);
+      const urls = scenario === "sdist mismatch, wheel unlisted"
+        ? [{ ...files[1], digests: { sha256: "0".repeat(64) } }]
+        : files.filter(file => !scenario.startsWith("missing") || file.filename !== affected)
+          .map(file => scenario.endsWith("mismatch") && file.filename === affected ? { ...file, digests: { sha256: "0".repeat(64) } } : file);
       const args = join(cwd, "args");
       const count = join(cwd, "lookups");
       writeFileSync(join(cwd, "curl"), `#!/bin/bash
@@ -245,20 +248,23 @@ exit "$LOOKUP_EXIT"
           LOOKUP_COUNT: count, PYPI_VERIFY_ATTEMPTS: "2", PYPI_VERIFY_INTERVAL: "0",
           LOOKUP_BODY_FIRST: scenario === "listed on retry" ? JSON.stringify({ urls: files.slice(0, 1) }) : "",
           LOOKUP_BODY: scenario === "invalid JSON" ? "invalid" : JSON.stringify({ urls }),
-          LOOKUP_EXIT: scenario === "lookup error" ? "7" : scenario === "HTTP error" ? "22" : "0" },
+          LOOKUP_EXIT: scenario === "lookup error" ? "7" : scenario === "HTTP error" || scenario === "two local wheels" ? "22" : "0" },
       });
       const text = result.stdout + result.stderr;
       expect(result.status, text).toBe(scenario === "complete" || scenario === "listed on retry" ? 0 : 1);
-      expect(readFileSync(count, "utf8").length, text).toBe(expectedLookups[scenario]);
-      const request = readFileSync(args, "utf8");
-      expect(request).toContain("https://pypi.org/pypi/adk-flair/0.59.0/json\n");
-      expect(request).toContain("--fail\n");
-      expect(request).toContain("--max-time\n30\n");
+      expect(existsSync(count) ? readFileSync(count, "utf8").length : 0, text).toBe(expectedLookups[scenario]);
+      if (expectedLookups[scenario] > 0) {
+        const request = readFileSync(args, "utf8");
+        expect(request).toContain("https://pypi.org/pypi/adk-flair/0.59.0/json\n");
+        expect(request).toContain("--fail\n");
+        expect(request).toContain("--max-time\n30\n");
+      }
       if (scenario === "complete" || scenario === "listed on retry") {
         for (const file of files) expect(text).toContain(`Verified ${file.filename}: ${file.digests.sha256}`);
       }
       if (scenario.startsWith("missing")) expect(text).toContain(`Missing PyPI file: ${affected}`);
-      if (scenario.endsWith("mismatch")) expect(text).toContain(`SHA256 mismatch for PyPI file: ${affected}`);
+      if (scenario.includes("mismatch")) expect(text).toContain(`SHA256 mismatch for PyPI file: ${affected}`);
+      if (scenario === "two local wheels") expect(text).toContain("::error::Expected one locally built wheel and one sdist.");
       if (scenario.endsWith("error")) expect(text).toContain("::error::PyPI lookup failed");
       if (scenario === "invalid JSON") expect(text).toContain("::error::Invalid PyPI file list");
     });
