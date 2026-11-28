@@ -1,0 +1,2 @@
+- **`flair restore --replace --dry-run` runs preflight checks before reporting dry-run completion (#2992).**
+  In `--replace --dry-run` mode, restore now runs the replace-only preflight and reports that preflight's refusals with the same diagnostics as a real replace, exiting non-zero without deleting or writing any records. The dry run exits zero when the preflight completes without a refusal or a read error.
