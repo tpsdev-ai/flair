@@ -7,11 +7,13 @@
  * files through it (slice C).
  *
  * POSIX policy:
- *   - every ancestor of the keys directory, up to `/`, must be owned by root
- *     or the current user and must not be group- or world-writable unless it
- *     carries the sticky bit; a failing ancestor is refused with its owner and
- *     mode, the first failing one named. Inside flair's home (`~/.flair`, the
- *     parent of the default keys directory) an ancestor the current user owns
+ *   - every ancestor of the keys directory's resolved path, up to `/`, must be
+ *     owned by root or the current user and must not be group- or
+ *     world-writable unless it carries the sticky bit; a failing ancestor is
+ *     refused with its owner and mode, the first failing one named. This runs
+ *     before the keys directory is created or its mode is changed. Inside
+ *     flair's home (`~/.flair`, the parent of the default keys directory, when
+ *     it is a directory and not a symlink) an ancestor the current user owns
  *     has its group and world write bits removed instead, with one notice
  *     naming it and its old and new modes, and the walk continues; an ancestor
  *     there owned by anyone else is refused as above.
@@ -74,6 +76,8 @@ export interface AgentKeyFileTestHooks {
   beforeKeysDirCreate?: (dir: string) => void;
   /** Runs after the keys directory is created, before anything else touches it. */
   afterKeysDirCreate?: (dir: string) => void;
+  /** Runs after the keys directory is checked and before it is opened and held. */
+  beforeKeysDirOpen?: (dir: string) => void;
   /** Runs after the keys directory is checked and held, before the key is written. */
   afterKeysDirCheck?: (dir: string) => void;
   /** Runs with the opened key descriptor immediately before its bytes are read. */
@@ -177,13 +181,44 @@ function modeWithSpecial(mode: number): string {
   return (mode & 0o7777).toString(8).padStart(4, "0");
 }
 
-/** Real path of flair's home, read once per ancestor walk. */
-function flairHomeDir(): string {
+/**
+ * Real path of flair's home (`~/.flair`), read once per ancestor walk; none
+ * when it is absent, a symlink or not a directory, so nothing is tightened.
+ */
+function flairHomeDir(): string | undefined {
   const home = dirname(defaultKeysDir());
+  let st: Stats;
   try {
-    return realpathSync(home);
-  } catch {
-    return resolve(home);
+    st = lstatSync(home);
+  } catch (error) {
+    if (errnoCode(error) === "ENOENT") return undefined;
+    throw error;
+  }
+  if (st.isSymbolicLink() || !st.isDirectory()) return undefined;
+  return realpathSync(home);
+}
+
+/**
+ * Real path of the first directory the ancestor walk checks: the parent of the
+ * keys directory's resolved path, or, when the keys directory does not exist
+ * yet, its nearest existing ancestor.
+ */
+function firstKeysDirAncestor(keysDir: string): string {
+  let path = resolve(keysDir);
+  try {
+    return dirname(realpathSync(path));
+  } catch (error) {
+    if (errnoCode(error) !== "ENOENT") throw error;
+  }
+  for (;;) {
+    const parent = dirname(path);
+    if (parent === path) return path;
+    path = parent;
+    try {
+      return realpathSync(path);
+    } catch (error) {
+      if (errnoCode(error) !== "ENOENT") throw error;
+    }
   }
 }
 
@@ -194,11 +229,13 @@ function isInside(path: string, dir: string): boolean {
 
 /**
  * On POSIX, refuse a keys directory with an ancestor that another user can
- * change: every ancestor up to `/` must be owned by root or the current user
- * and must not be group- or world-writable unless it carries the sticky bit.
- * Inside flair's home, an ancestor owned by the current user has its group and
- * world write bits removed instead, with one notice, because an existing
- * install can carry them from a umask 002 host.
+ * change: every ancestor of the keys directory's resolved path up to `/` must
+ * be owned by root or the current user and must not be group- or
+ * world-writable unless it carries the sticky bit.
+ * Inside flair's home (when `~/.flair` is a directory, not a symlink), an
+ * ancestor owned by the current user has its group and world write bits
+ * removed instead, with one notice, because an existing install can carry them
+ * from a umask 002 host.
  * A refusal names the first failing ancestor (nearest the keys directory) with
  * its owner and mode.
  */
@@ -206,7 +243,7 @@ function assertAgentKeysDirAncestors(keysDir: string): void {
   if (WIN32) return;
   const uid = currentUid();
   const home = flairHomeDir();
-  let ancestor = dirname(realpathSync(keysDir));
+  let ancestor = firstKeysDirAncestor(keysDir);
   for (;;) {
     const st = lstatSync(ancestor);
     const otherWritable = (st.mode & 0o022) !== 0;
@@ -221,12 +258,12 @@ function assertAgentKeysDirAncestors(keysDir: string): void {
       );
     }
     if (otherWritable) {
-      if (uid !== undefined && st.uid === uid && isInside(ancestor, home)) {
+      if (uid !== undefined && st.uid === uid && home !== undefined && isInside(ancestor, home)) {
         const oldMode = st.mode & 0o7777;
         const newMode = oldMode & ~0o022;
         chmodSync(ancestor, newMode);
         console.log(
-          `Flair home directory ${ancestor} was accessible to other users; permissions tightened from ${modeWithSpecial(oldMode)} to ${modeWithSpecial(newMode)}.`,
+          `Directory ${ancestor} in the flair home was accessible to other users; permissions tightened from ${modeWithSpecial(oldMode)} to ${modeWithSpecial(newMode)}.`,
         );
       } else if (!sticky) {
         throw new AgentKeyFileRefusal(
@@ -249,7 +286,9 @@ function assertAgentKeysDirAncestors(keysDir: string): void {
  * the directory that was checked; a directory swapped in between is refused.
  */
 function openCheckedAgentKeysDir(keysDir: string): AgentKeysDirHandle {
+  assertAgentKeysDirAncestors(keysDir);
   const checked = checkAgentKeysDir(keysDir);
+  testHooks?.beforeKeysDirOpen?.(keysDir);
   let fd: number;
   try {
     fd = openSync(keysDir, constants.O_RDONLY | constants.O_DIRECTORY | NOFOLLOW);
@@ -323,9 +362,10 @@ function removePublishedKey(privateKeyPath: string, identity: KeyFileIdentity): 
  * On POSIX, request mode 0700 for a missing `keysDir` (the umask may make it
  * narrower), check the path after creation like an existing directory, sync
  * the created directory's parent, and tighten an owned directory; a symlink, a
- * non-directory or another owner is refused. A retry with `keysDir` already
- * present repeats the parent sync. On Windows the directory is created and
- * returned unchecked.
+ * non-directory or another owner is refused. The ancestor rule runs first,
+ * before the directory is created or its mode is changed. A retry with
+ * `keysDir` already present repeats the parent sync. On Windows the directory
+ * is created and returned unchecked.
  */
 export function ensureAgentKeysDir(keysDir: string): void {
   if (WIN32) {
@@ -333,6 +373,7 @@ export function ensureAgentKeysDir(keysDir: string): void {
     return;
   }
 
+  assertAgentKeysDirAncestors(keysDir);
   let missing = false;
   try {
     lstatSync(keysDir);
@@ -792,6 +833,7 @@ export function readOrCreateAgentKey(
  * in place. Windows cannot sync a directory.
  */
 function syncReusedAgentKeyDir(privateKeyPath: string): void {
+  if (WIN32) return;
   const keysDir = dirname(privateKeyPath);
   let handle: AgentKeysDirHandle | undefined;
   try {

@@ -32,6 +32,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
@@ -125,7 +126,10 @@ test("a keys directory owned by another user is refused", () => {
   const uid = process.getuid();
   const dir = keysDir();
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  spyOn(process, "getuid").mockReturnValue(uid + 1);
+  // The ancestor walk reads the uid first and sees the real one; the
+  // keys-directory check then sees a uid that does not own the directory.
+  let calls = 0;
+  spyOn(process, "getuid").mockImplementation(() => (calls++ === 0 ? uid : uid + 1));
   expect(() => ensureAgentKeysDir(dir)).toThrow(/not owned by the current user/);
 });
 
@@ -570,11 +574,11 @@ test.skipIf(process.platform === "win32")("an older install's group-writable fla
   expect(existsSync(join(dir, "agent-b.key"))).toBe(true);
   expect(statSync(join(dir, "agent-a.key")).mode & 0o777).toBe(0o600);
   expect(statSync(flairHome).mode & 0o777).toBe(0o755);
-  const notices = firstRun.filter((line) => line.includes(`Flair home directory ${flairHome}`));
+  const notices = firstRun.filter((line) => line.includes(`Directory ${flairHome} in the flair home`));
   expect(notices).toHaveLength(1);
   expect(notices[0]).toContain("0775");
   expect(notices[0]).toContain("0755");
-  expect(secondRun.filter((line) => line.includes(`Flair home directory ${flairHome}`))).toHaveLength(0);
+  expect(secondRun.filter((line) => line.includes(`Directory ${flairHome} in the flair home`))).toHaveLength(0);
 });
 
 test.skipIf(process.platform === "win32")("a keys directory under an ancestor another user can change is refused, naming that ancestor", () => {
@@ -600,6 +604,7 @@ test.skipIf(process.platform === "win32")("a keys directory under an ancestor an
   expect(message).toContain("0777");
   expect(message).toContain("uid");
   expect(existsSync(join(dir, "agent-a.key"))).toBe(false);
+  expect(existsSync(dir)).toBe(false);
 });
 
 test.skipIf(process.platform === "win32")("an ancestor inside the flair home owned by another uid is refused (stat seam: process.getuid)", () => {
@@ -612,10 +617,9 @@ test.skipIf(process.platform === "win32")("an ancestor inside the flair home own
   // Not writable by others, so only the owner rule can refuse it.
   chmodSync(flairHome, 0o755);
   // A single-user test cannot chown a directory; ownership is read through
-  // process.getuid(), so the first call (the keys directory) sees the real uid
-  // and the ancestor walk sees a uid that owns no directory.
-  let calls = 0;
-  const getuid = spyOn(process, "getuid").mockImplementation(() => (calls++ === 0 ? realUid : realUid + 1));
+  // process.getuid(), mocked to a uid that owns none of the directories. The
+  // ancestor walk runs before the keys-directory check, so it refuses first.
+  const getuid = spyOn(process, "getuid").mockImplementation(() => realUid + 1);
   let caught: unknown;
   try {
     withHome(home, () => {
@@ -641,8 +645,7 @@ test.skipIf(process.platform === "win32")("an ancestor outside the flair home ow
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   // Not writable by others, so only the owner rule can refuse it.
   chmodSync(custom, 0o755);
-  let calls = 0;
-  const getuid = spyOn(process, "getuid").mockImplementation(() => (calls++ === 0 ? realUid : realUid + 1));
+  const getuid = spyOn(process, "getuid").mockImplementation(() => realUid + 1);
   let caught: unknown;
   try {
     withHome(home, () => {
@@ -658,6 +661,170 @@ test.skipIf(process.platform === "win32")("an ancestor outside the flair home ow
   expect(existsSync(join(dir, "agent-a.key"))).toBe(false);
   expect(statSync(custom).mode & 0o777).toBe(0o755);
 });
+
+test.skipIf(process.platform === "win32")("a refused ancestor leaves an existing keys directory's mode unchanged", () => {
+  const home = tempDir("flair-keyfile-3077-");
+  const shared = join(home, "shared");
+  mkdirSync(shared, { mode: 0o700 });
+  chmodSync(shared, 0o777);
+  const ensured = join(shared, "ensured");
+  const written = join(shared, "written");
+  for (const dir of [ensured, written]) {
+    mkdirSync(dir, { mode: 0o700 });
+    chmodSync(dir, 0o755);
+  }
+  const refusals: unknown[] = [];
+  withHome(home, () => {
+    const attempts = [
+      () => ensureAgentKeysDir(ensured),
+      () => createAgentKeyFile(join(written, "agent-a.key"), Buffer.alloc(32)),
+    ];
+    for (const attempt of attempts) {
+      try {
+        attempt();
+      } catch (error) {
+        refusals.push(error);
+      }
+    }
+  });
+  expect(refusals).toHaveLength(2);
+  for (const refusal of refusals) {
+    expect(refusal).toBeInstanceOf(AgentKeyFileRefusal);
+    expect((refusal as Error).message).toContain(`has ancestor ${realpathSync(shared)} owned by uid`);
+  }
+  expect(readdirSync(written)).toEqual([]);
+  expect(statSync(ensured).mode & 0o777).toBe(0o755);
+  expect(statSync(written).mode & 0o777).toBe(0o755);
+});
+
+test.skipIf(process.platform === "win32")("a symlinked flair home tightens nothing: a group-writable directory in its target is refused and keeps its mode", () => {
+  const home = tempDir("flair-keyfile-3077-");
+  const target = tempDir("flair-keyfile-3077-target-");
+  const child = join(target, "sub");
+  mkdirSync(child, { mode: 0o700 });
+  chmodSync(child, 0o775);
+  symlinkSync(target, join(home, ".flair"));
+  let caught: unknown;
+  try {
+    withHome(home, () => {
+      ensureAgentKeysDir(join(home, ".flair", "sub", "keys"));
+    });
+  } catch (error) {
+    caught = error;
+  }
+  expect(caught).toBeInstanceOf(AgentKeyFileRefusal);
+  expect((caught as Error).message).toContain(`has ancestor ${realpathSync(child)} owned by uid`);
+  expect(existsSync(join(child, "keys"))).toBe(false);
+  expect(statSync(child).mode & 0o777).toBe(0o775);
+});
+
+test.skipIf(process.platform === "win32")("the walk continues past a tightened flair home and refuses a world-writable ancestor above it", () => {
+  const home = tempDir("flair-keyfile-3077-");
+  const flairHome = join(home, ".flair");
+  const dir = join(flairHome, "keys");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(flairHome, 0o777);
+  chmodSync(home, 0o757);
+  const lines: string[] = [];
+  const log = spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+    lines.push(args.map(String).join(" "));
+  });
+  let caught: unknown;
+  try {
+    // One walk: createAgentKeyFile walks again before the write.
+    withHome(home, () => {
+      ensureAgentKeysDir(dir);
+    });
+  } catch (error) {
+    caught = error;
+  } finally {
+    log.mockRestore();
+  }
+  expect(caught).toBeInstanceOf(AgentKeyFileRefusal);
+  expect((caught as Error).message).toContain(`has ancestor ${realpathSync(home)} owned by uid`);
+  expect((caught as Error).message).toContain("with mode 0757;");
+  expect(lines.filter((line) => line.includes(`Directory ${realpathSync(flairHome)} in the flair home`))).toHaveLength(1);
+  expect(statSync(flairHome).mode & 0o777).toBe(0o755);
+});
+
+test.skipIf(process.platform === "win32")("a keys directory replaced between its check and its open is refused and nothing is written", () => {
+  const dir = keysDir();
+  ensureAgentKeysDir(dir);
+  const moved = `${dir}.moved`;
+  setAgentKeyFileTestHooks({
+    beforeKeysDirOpen: () => {
+      renameSync(dir, moved);
+      mkdirSync(dir, { mode: 0o700 });
+    },
+  });
+  let caught: unknown;
+  try {
+    createAgentKeyFile(join(dir, "agent-a.key"), Buffer.alloc(32));
+  } catch (error) {
+    caught = error;
+  } finally {
+    setAgentKeyFileTestHooks(undefined);
+  }
+  expect(caught).toBeInstanceOf(AgentKeyFileRefusal);
+  expect((caught as Error).message).toBe(
+    `keys directory ${dir} changed while it was being checked; retry the command once the directory is stable`,
+  );
+  expect(readdirSync(moved)).toEqual([]);
+  expect(readdirSync(dir)).toEqual([]);
+});
+
+test.skipIf(process.platform === "win32")("a failed directory sync leaves a key path that another file replaced", () => {
+  const dir = keysDir();
+  ensureAgentKeysDir(dir);
+  const keyPath = join(dir, "replaced.key");
+  const other = Buffer.alloc(32, 9);
+  setAgentKeyFileTestHooks({
+    afterPublish: () => {
+      unlinkSync(keyPath);
+      writeFileSync(keyPath, other, { mode: 0o600 });
+    },
+    syncKeysDir: () => {
+      throw new Error("fixture sync failure");
+    },
+  });
+  let caught: unknown;
+  try {
+    createAgentKeyFile(keyPath, Buffer.alloc(32));
+  } catch (error) {
+    caught = error;
+  } finally {
+    setAgentKeyFileTestHooks(undefined);
+  }
+  expect(caught).toBeInstanceOf(AgentKeyFileRefusal);
+  expect((caught as Error).message).toContain("no longer names the file this command wrote");
+  expect(readFileSync(keyPath).equals(other)).toBe(true);
+});
+
+test.skipIf(process.platform === "win32")("on win32 a reused key's directory is neither re-moded nor synced (platform seam: a bun child)", () => {
+  const home = tempDir("flair-keyfile-3077-");
+  const dir = join(home, "keys");
+  mkdirSync(dir, { mode: 0o700 });
+  chmodSync(dir, 0o755);
+  const prior = Buffer.alloc(32, 5);
+  writeFileSync(join(dir, "agent-a.key"), prior, { mode: 0o600 });
+  const script = join(home, "win32-reuse.mjs");
+  writeFileSync(script, `
+Object.defineProperty(process, "platform", { value: "win32" });
+const { join } = await import("node:path");
+const keyFile = await import(${JSON.stringify(new URL("../../src/lib/agent-key-file.ts", import.meta.url).href)});
+let syncs = 0;
+keyFile.setAgentKeyFileTestHooks({ syncKeysDir: () => { syncs += 1; } });
+const result = keyFile.readOrCreateAgentKey(join(process.argv[2], "agent-a.key"), () => {
+  throw new Error("create must not run");
+});
+console.log(JSON.stringify({ created: result.created, bytes: Buffer.from(result.bytes).toString("hex"), syncs }));
+`);
+  const child = spawnSync("bun", [script, dir], { encoding: "utf8", timeout: 20_000 });
+  expect(child.status).toBe(0);
+  const report = JSON.parse(child.stdout.trim().split("\n").at(-1) ?? "{}");
+  expect(report).toEqual({ created: false, bytes: prior.toString("hex"), syncs: 0 });
+  expect(statSync(dir).mode & 0o777).toBe(0o755);
+}, 30_000);
 
 test.skipIf(process.platform === "win32")("a sticky world-writable ancestor with a user-owned keys directory passes", () => {
   const home = tempDir("flair-keyfile-3077-");
@@ -1066,6 +1233,6 @@ test.skipIf(process.platform === "win32")("flair agent add tightens an older ins
   expect(existsSync(join(keysDir, "agent-a.key"))).toBe(true);
   expect(statSync(join(keysDir, "agent-a.key")).mode & 0o777).toBe(0o600);
   expect(statSync(flairHome).mode & 0o777).toBe(0o755);
-  expect(stdout.filter((line) => line.includes(`Flair home directory ${flairHome}`))).toHaveLength(1);
+  expect(stdout.filter((line) => line.includes(`Directory ${flairHome} in the flair home`))).toHaveLength(1);
   expect(stderr.join("\n")).toBe("");
 }, 30_000);
