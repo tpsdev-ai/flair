@@ -209,6 +209,40 @@ describe("adk-flair publishing", () => {
     });
   }
 
+  test("PyPI verification: default bound", () => {
+    // The production limit is the fix for a good publish failing its verify: 20 lookups, 15 s apart, with neither
+    // override set anywhere in the workflow. A stub sleep logs its argument instead of waiting.
+    const w = workflow as unknown as { env?: Record<string, string> };
+    const j = job as unknown as { env?: Record<string, string> };
+    expect(w.env?.PYPI_VERIFY_ATTEMPTS).toBeUndefined();
+    expect(w.env?.PYPI_VERIFY_INTERVAL).toBeUndefined();
+    expect(j.env?.PYPI_VERIFY_ATTEMPTS).toBeUndefined();
+    expect(j.env?.PYPI_VERIFY_INTERVAL).toBeUndefined();
+    expect(verify.env).toEqual({ VERSION: "${{ needs.resolve.outputs.version }}" });
+    const cwd = tempDir("flair-adk-pypi-bound-");
+    const dist = join(cwd, "packages/adk-flair/dist");
+    mkdirSync(dist, { recursive: true });
+    for (const name of ["adk_flair-0.59.0-py3-none-any.whl", "adk_flair-0.59.0.tar.gz"]) writeFileSync(join(dist, name), `built ${name}`);
+    const count = join(cwd, "lookups");
+    const sleeps = join(cwd, "sleeps");
+    writeFileSync(join(cwd, "curl"), `#!/bin/bash
+printf "x" >> "$LOOKUP_COUNT"
+exit 22
+`, { mode: 0o755 });
+    writeFileSync(join(cwd, "sleep"), `#!/bin/bash
+printf "%s\\n" "$1" >> "$SLEEP_LOG"
+`, { mode: 0o755 });
+    const env: Record<string, string | undefined> = { ...process.env, PATH: `${cwd}:${process.env.PATH}`, VERSION: "0.59.0", RUNNER_TEMP: cwd, LOOKUP_COUNT: count, SLEEP_LOG: sleeps };
+    delete env.PYPI_VERIFY_ATTEMPTS;
+    delete env.PYPI_VERIFY_INTERVAL;
+    const result = spawnSync("bash", [shellScript(verify.run!)], { cwd, encoding: "utf8", env });
+    const text = result.stdout + result.stderr;
+    expect(result.status, text).toBe(1);
+    expect(readFileSync(count, "utf8").length, text).toBe(20);
+    expect(readFileSync(sleeps, "utf8")).toBe("15\n".repeat(19));
+    expect(text).toContain("after 20 lookups");
+  });
+
   // The step retries a lookup and a not-yet-listed file (PyPI's JSON API lags uploads); the tests run it with two
   // attempts and no sleep, and count lookups: a mismatch or an invalid file list must fail on the first one.
   const expectedLookups = { "complete": 1, "listed on retry": 2, "missing wheel": 2, "missing sdist": 2, "wheel mismatch": 1, "sdist mismatch": 1, "sdist mismatch, wheel unlisted": 1, "lookup error": 2, "HTTP error": 2, "invalid JSON": 1, "two local wheels": 0 } as const;

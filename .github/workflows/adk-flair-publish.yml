@@ -126,8 +126,8 @@ jobs:
               published = {file["filename"]: file["digests"]["sha256"] for file in release["urls"]}
           except (OSError, ValueError, KeyError, TypeError) as error:
               sys.exit(f"::error::Invalid PyPI file list: {error}")
-          # Every listed file's digest is checked before a missing file is reported, so a mismatch fails
-          # at once even while another file is not listed yet.
+          # Each locally built file that PyPI lists has its digest checked before a missing file is
+          # reported, so a mismatch fails at once even while the other file is not listed yet.
           digests = {artifact.name: hashlib.sha256(artifact.read_bytes()).hexdigest() for artifact in wheels + sdists}
           for name, digest in digests.items():
               if name in published and published[name] != digest:
