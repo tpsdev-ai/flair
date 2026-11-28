@@ -1,0 +1,1 @@
+- **The Harper start waiter reports the budget's timeout, not an inspect failure, when the budget ends during a first `docker inspect`** (flair#3180).
