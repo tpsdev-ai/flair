@@ -1,0 +1,1 @@
+- **The published `@tpsdev-ai/flair-client` refuses an agent id outside the agent-ID rule before it derives a key path.** The refusal names the rule.

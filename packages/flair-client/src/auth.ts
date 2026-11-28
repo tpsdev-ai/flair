@@ -11,6 +11,7 @@ import { open, constants as fsConstants } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { readEnvOrUnset } from "./env-guard.js";
+import { invalidAgentIdMessage, isValidAgentId } from "./agent-id-rule.js";
 
 const PKCS8_ED25519_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
 
@@ -164,8 +165,12 @@ function toAbsoluteKeyPath(p: string): string | null {
   return resolve(p);
 }
 
-/** Candidate key files for `agentId`, in probe order. Deduplicated. */
+/** Candidate key files for `agentId`, in probe order. Deduplicated.
+ *
+ * An id outside the agent-ID rule has no candidates: no path is built, so
+ * nothing outside the key directories can be probed or read. */
 export function keyPathCandidates(agentId: string, keyPath?: string, homes: string[] = callTimeHomes()): string[] {
+  if (!isValidAgentId(agentId)) return [];
   const primaryHome = homes[0] ?? "";
 
   if (keyPath) {
@@ -241,6 +246,9 @@ export function formatKeyLookup(state: KeyLookupState): string {
       `${actor} sent this request with Basic admin credentials (FLAIR_ADMIN_USER / FLAIR_ADMIN_PASSWORD), not an Ed25519 key.\n` +
       "The server rejected those admin credentials. Check FLAIR_ADMIN_USER and FLAIR_ADMIN_PASSWORD — this 401 is not a missing agent key."
     );
+  }
+  if (state.agentId && !isValidAgentId(state.agentId)) {
+    return `${actor} was refused: ${invalidAgentIdMessage(state.agentId)}.`;
   }
   const stateLine = method === "ed25519"
     ? `${actor} signed with ${state.resolvedPath}.`
