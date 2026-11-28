@@ -63,16 +63,27 @@ interface Literal {
   index: number;
 }
 
+/** Reports the parse diagnostics of the SourceFile passed to getSyntacticDiagnostics. */
+const PARSE_CHECK = ts.createProgram({ rootNames: [], options: { noLib: true, noResolve: true, types: [] } });
+
 /** Comments are skipped because the parser classifies them; literals come from
- *  the AST, so no regex pass reads code as comment text. */
-function literals(source: string): Literal[] {
+ *  the AST, so no regex pass reads code as comment text. A source with a parse
+ *  diagnostic fails before its AST is walked: error recovery can leave a literal
+ *  out of the tree. */
+function literals(source: string, fileName: string): Literal[] {
   const sourceFile = ts.createSourceFile(
-    "agent-key-path-guard.ts",
+    fileName,
     source,
     ts.ScriptTarget.Latest,
     true,
     ts.ScriptKind.TS,
   );
+  const [diagnostic] = PARSE_CHECK.getSyntacticDiagnostics(sourceFile);
+  if (diagnostic) {
+    const { line, character } = sourceFile.getLineAndCharacterOfPosition(diagnostic.start);
+    const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n");
+    throw new Error(`${fileName}:${line + 1}:${character + 1}: ${message}`);
+  }
   const found: Literal[] = [];
   visit(sourceFile);
   return found;
@@ -100,8 +111,8 @@ function isLiteralToken(kind: ts.SyntaxKind): boolean {
   );
 }
 
-function keyLiterals(source: string): Literal[] {
-  return literals(source).filter((literal) =>
+function keyLiterals(source: string, fileName = "fixture.ts"): Literal[] {
+  return literals(source, fileName).filter((literal) =>
     KEY_SUFFIXES.some((suffix) => literal.text.endsWith(suffix)),
   );
 }
@@ -130,7 +141,7 @@ function allowed(file: string, source: string, literal: Literal): boolean {
 function offendersIn(relativeFile: string, source: string): string[] {
   const lines = source.split("\n");
   const found: string[] = [];
-  for (const literal of keyLiterals(source)) {
+  for (const literal of keyLiterals(source, relativeFile)) {
     const lineText = lines[literal.line - 1]?.trim() ?? "";
     if (allowed(relativeFile, source, literal)) continue;
     found.push(`${relativeFile}:${literal.line}: ${lineText}`);
@@ -160,6 +171,30 @@ test("the detector sees string, concatenation and nested template-literal shapes
   }
   expect(keyLiterals('join(dir, `${agentId}.json`)')).toEqual([]);
   expect(keyLiterals('join(dir, agentId + ".pubx")')).toEqual([]);
+});
+
+for (const [kind, sample] of [
+  ["StringLiteral", 'const path = "agent.key";'],
+  ["NoSubstitutionTemplateLiteral", "const path = `agent.key`;"],
+  ["TemplateHead", "const path = `agent.key${suffix}`;"],
+  ["TemplateMiddle", "const path = `${agentId}.key${suffix}`;"],
+  ["TemplateTail", "const path = `${agentId}.key`;"],
+] as const) {
+  test(`a ${kind} ending in .key is flagged`, () => {
+    expect(offendersIn("src/lib/example.ts", sample)).toEqual([`src/lib/example.ts:1: ${sample}`]);
+  });
+}
+
+test("a source with a parse diagnostic fails the guard, naming the file and location", () => {
+  expect(() => offendersIn("src/lib/example.ts", "const x = ;"))
+    .toThrow("src/lib/example.ts:1:11: Expression expected.");
+  // Error recovery reads this unterminated template so that no literal ends in .key.
+  const recovered = "const broken = `unterminated\nconst bad = join(dir, `${agentId}.key`);";
+  expect(() => offendersIn("src/lib/example.ts", recovered))
+    .toThrow("src/lib/example.ts:2:24: ',' expected.");
+  const init = `${readFileSync(join(SRC, "commands", "init.ts"), "utf8")}\nconst x = ;`;
+  expect(() => offendersIn("src/commands/init.ts", init))
+    .toThrow(`src/commands/init.ts:${init.split("\n").length}:11: Expression expected.`);
 });
 
 test("a key-path literal after each comment-opener shape is still flagged", () => {
