@@ -378,7 +378,7 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
     createdKeyFiles.push({ path, dev: identity.dev, ino: identity.ino });
   };
   // The row belongs to this grant only when the insert's result body confirms
-  // THIS id through the one shared rule every verified write uses: a readable
+  // THIS id through the shared rule this grant's insert and delete use: a readable
   // body names it in `inserted_hashes`, does not name it in `skipped_hashes`
   // and carries no `error`. A 2xx alone does not: Harper answers 2xx with the
   // id skipped when the row already exists, so a status read as a create could

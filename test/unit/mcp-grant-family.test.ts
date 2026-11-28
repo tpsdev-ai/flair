@@ -764,7 +764,7 @@ describe("grantMcpClient — insert and delete uncertainty (flair#3077)", () => 
     expect(readMcpClientManifest(failingManifest)).toHaveLength(0);
   });
 
-  test("a 2xx delete that Harper reports as skipped keeps the keys and reports the deletion as unconfirmed", async () => {
+  test("a simulated 2xx delete result that names the id as skipped keeps the keys and reports the deletion as unconfirmed", async () => {
     const parentAsFile = join(dir, "manifest-parent-delete-skip");
     writeFileSync(parentAsFile, "occupied");
     const failingManifest = join(parentAsFile, "mcp-clients.json");
