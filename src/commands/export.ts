@@ -91,8 +91,8 @@ function removeExportTemp(tempPath: string): void {
 /** With no concurrent changes to directory entries by another writer, write
  *  `content` to a complete temp file in the same directory and link it to
  *  `outputPath`. An existing path — file, symlink or anything else — is refused
- *  and survives. A failed write, fsync or link attempts to remove only this call's
- *  temp; a failed removal is reported with its path. */
+ *  and survives. A failed write, fsync, close or link attempts to remove only this
+ *  call's temp; a failed removal is reported with its path. */
 function writeDefaultExport(outputPath: string, content: string, mode: number): void {
   const name = basename(outputPath);
   let tempPath = "";
