@@ -1,1 +1,0 @@
-- **Superseding skill POST retries tolerate embedding backfill changes to an existing target.** ([#3171](https://github.com/tpsdev-ai/flair/pull/3171))
