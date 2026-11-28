@@ -1,1 +1,0 @@
-- **Remote `flair init` authenticates its later calls as the administrator provisioning selected.** The summary identifies the selected credential. ([#3109](https://github.com/tpsdev-ai/flair/pull/3109))

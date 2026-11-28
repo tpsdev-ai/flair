@@ -18,6 +18,114 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.63.1] - 2026-11-28
+
+### Changed
+
+- **Remote init's fabric-provisioning binding is typed instead of `any`.** No runtime behaviour changes.
+
+### Fixed
+
+- **On Homebrew Node, `flair init` and `flair federation sync enable` record the stable `opt/<formula>/bin/node` alias when it resolves to the same binary.**
+  On a Homebrew Node install the launchd plist and the federation sync shim held the realpath `Cellar/<formula>/<version>/bin/node`, which the cleanup step of `brew upgrade node` can remove. A plist `flair init` writes and a shim `flair federation sync enable` writes now record the alias instead, and `flair init` makes the same replacement in an existing plist or shim that runs this CLI's install tree (when it accepts the file for re-pointing). The Homebrew alias does not apply to a path outside the Cellar layout. With federation peers configured and the sync job loaded, `flair doctor` names the node path and points at `flair init` when the federation-sync unit file names the flair-generated shim as its program and the absolute node path on the shim's exec line does not exist; it checks this only when both files can be read as regular files (not symlinks) of at most 64 KiB and the shim is in the shape `flair federation sync enable` writes. ([#3097](https://github.com/tpsdev-ai/flair/pull/3097))
+
+- **The in-process facade's read methods now resolve to the shapes they document.** `recall()` resolves to an array of hits, `memory.get()` resolves to the stored row or `null` when the record is absent or not readable by the calling agent (`flair.admin.memory.get()` resolves to the stored row or `null` for an absent id), and `memory.search()` resolves to an array of at most its `limit` rows; error responses reject instead of resolving to `{ error, status }`. ([#3080](https://github.com/tpsdev-ai/flair/pull/3080))
+
+- **Each native `/mcp` tool requires the OAuth scope its operation needs.** A tool call whose access token does not grant that scope gets HTTP 403
+  with a JSON-RPC `insufficient_scope` error naming the scope, and the tool does
+  not run. A token with no `scope` claim grants no scope. The 401 challenge and
+  Flair's client metadata documents name `memory:read memory:write
+  principal:read`, and `docs/auth.md` lists the scope each tool requires. ([#3081](https://github.com/tpsdev-ai/flair/pull/3081))
+
+  > **Heads-up:** a refreshed token keeps the scope of its sign-in. Each tool
+  > call is refused when its required scope is missing from that sign-in, before
+  > and after a refresh, until the client signs in again requesting it.
+
+- **On POSIX, agent private-key files are created owner-only.** `flair agent add`, local `flair init --agent/--agent-id`, remote `flair init --target ... --agent-id`, `flair principal add`, and `flair import` create private keys at mode `0600`. Keys directories are owner-only, and reuse refuses private keys with group or world permissions. Windows mode bits do not establish owner-only access. ([#3127](https://github.com/tpsdev-ai/flair/pull/3127))
+
+- **On POSIX, `flair doctor` and local `flair status` warn about agent key files wider than owner-only.** The scan covers `$FLAIR_KEY_DIR` when set, `~/.flair/keys`, and legacy `~/.tps/secrets/flair` key filenames, including those without a public-key sibling. It reports the path, mode and `chmod 600` remedy; symlinks and other non-regular entries are reported as not checked. Explicit key paths are outside this scan. ([#3155](https://github.com/tpsdev-ai/flair/pull/3155))
+
+- **`flair mcp grant` creates its private key owner-only on POSIX and refuses to replace an existing private or public key file.** ([#3150](https://github.com/tpsdev-ai/flair/pull/3150))
+
+- **`flair agent rotate-key` protects the replacement private key with owner-only permissions on POSIX and verifies the stored public key before installation.** The old key is backed up under a new `<agentId>.key.bak.<UTC timestamp>` name; an existing backup is left untouched. ([#3142](https://github.com/tpsdev-ai/flair/pull/3142))
+
+  > **Heads-up:** After an accepted update and failed readback, the current private key may no longer authenticate; the command prints the retained replacement's path.
+
+- **`flair reembed` reads Memory rows page by page on both administrator paths before the first re-embed write.**
+  The all-agent read selects by `id` greater than `0` on its first page; the single-agent administrator read filters on `agentId`. Both then page with `id` greater than the last id seen, sorted by `id`, and report how many memories and pages they read. A page is used only when every row carries a non-empty string `id` and `agentId` and a string `content`; anything else exits 1 before any write. The read refuses when page 10,000 — the last page it may read — comes back full, because more rows may follow, and exits non-zero before writing rather than reporting a complete read. The single-agent listing without administrator credentials has no paging parameter: when `/SemanticSearch` returns exactly its 10,000-row limit, the command prints a notice naming the count and the `FLAIR_ADMIN_PASS` remedy, then exits 1. ([#3122](https://github.com/tpsdev-ai/flair/pull/3122))
+
+- **With a launchd plist and an unloaded job, `flair stop` re-checks the job and instance after the recorded pid exits.** An unconfirmed stop prints what the launchd job and the instance now read, adds the instance's detail when it reads `DISAGREEMENT` or `UNKNOWN`, and names the next step. ([#3092](https://github.com/tpsdev-ai/flair/pull/3092), [#3112](https://github.com/tpsdev-ai/flair/pull/3112))
+
+  > **Heads-up:** That path exits non-zero unless the re-check reads `not-loaded` and `NOT_RUNNING`.
+
+- **`flair memory add` gives each command its own collision-resistant memory id, and its provider-timeout retries reuse that id.**
+  The id was the agent id plus the current millisecond, so two adds by one agent in the same millisecond wrote one memory row: the server's `PUT /Memory/<id>` overwrites an existing row. The id now carries a random UUID suffix, computed once per command, so every attempt of one add reuses it and a successful retry writes one row. `flair memory write-task-summary` builds its id the same way. ([#3108](https://github.com/tpsdev-ai/flair/pull/3108))
+
+- **Generated ids for `flair quality --emit` snapshots and hermes-flair `flair_store` writes end in a UUID.**
+  Both used the agent id plus the current millisecond, so two writes in the same
+  millisecond reached the same `PUT /Memory/<id>` and the upsert kept one row.
+  The quality snapshot keeps its `-quality-snapshot-` prefix and ends in a UUID;
+  the hermes-flair client's `flair_store` id ends in a UUID too. ([#3117](https://github.com/tpsdev-ai/flair/pull/3117))
+
+- **`flair import`, `flair init` and `flair agent rotate-key` refuse an invalid agent id before their own key file writes or `fetch` calls.** ([#3125](https://github.com/tpsdev-ai/flair/pull/3125))
+
+- **On POSIX, key-bearing exports and keystore seeds are written owner-only, and the keystore's generated passphrase file must be owner-only.** Explicit `flair export --include-key --output <path>` output and keystore seeds replace existing files at mode `0600`. An existing generated passphrase file with group or world permissions is refused unchanged when `FLAIR_KEY_PASSPHRASE` is unset. Windows mode bits do not establish owner-only access. ([#3143](https://github.com/tpsdev-ai/flair/pull/3143))
+
+- **Remote init checks the using-flair skill seed before its role, user and Agent writes.** A preflight refusal prevents those writes; Fabric deployment and administrator provisioning may already have occurred. ([#3168](https://github.com/tpsdev-ai/flair/pull/3168))
+
+- **Remote `flair init` validates the cluster user records that decide administrator provisioning.** The authenticated cluster administrator must appear once, and `admin` at most once; those records require boolean `super_user` permissions. Other records require a readable, non-empty username. A super_user cluster administrator is reused; otherwise, init creates or updates `admin` according to whether it exists. The reserved `flair-agent` account, including case and whitespace variants, is refused as an administrator input. ([#3147](https://github.com/tpsdev-ai/flair/pull/3147), [#3160](https://github.com/tpsdev-ai/flair/pull/3160))
+
+- **`flair reembed`'s all-agent run re-embeds every owner's content rows, or only stale ones with `--stale-only`, and exits non-zero when a write or readback failed.**
+  All-agent write runs prove the local HTTP/ops pair before contacting HTTP. It sends each two-field re-embed PATCH with the administrator credential it lists rows with, so an owner with no local key is no longer skipped: rows owned by an agent without a key, by the administrator (including the `skill:using-flair` row `flair init` seeds), or by an owner with no Agent row are re-embedded. The final summary is printed for row failures after the listing (an initial ops read failure exits before it), drops the success marker, and reports each distinct row-failure reason once with the number of rows it covers; a readback that fails, including a 2xx answer whose shape is not the expected record or an empty result, is reported as a failed read, not as a missing stamp, and a clean run exits 0. ([#3135](https://github.com/tpsdev-ai/flair/pull/3135))
+
+- **`flair reembed --agent <id>` without administrator credentials excludes other agents' listed rows from its counts.**
+  Other owners are reported in `Skipped (other agents)`. This listing reads through `POST /SemanticSearch`, whose scope includes other agents' non-private rows. A listing at the row limit exits non-zero without a success marker. ([#3135](https://github.com/tpsdev-ai/flair/pull/3135))
+
+- **Remote `flair init` saves Flair's administrator password before attempting the cluster password change.** A run that reuses a super_user skips the save. An existing credential stays in place until the staged value passes verification and is renamed. After password acceptance, a failed rename gives a move step if the staged path passes re-verification; a failed check gives recovery advice based on whether init reset the authenticating account. ([#3139](https://github.com/tpsdev-ai/flair/pull/3139))
+
+- With `--key`, `flair bootstrap`, `flair attention`, `flair search`, `flair bridge import` and `flair bridge export` refuse a non-empty id outside the rule with the shared agent-ID message before a key read or request for that record.
+
+- **`flair bridge import` refuses a non-empty agent id outside the rule carried by an imported record.**
+
+- **`flair export` refuses an invalid agent id before reading export data or a key, and creates its default output exclusively, refusing an existing path.** ([#3163](https://github.com/tpsdev-ai/flair/pull/3163))
+
+- **`flair export` publishes its default output from a temp file and requires the real-home exports directory.**
+  After creating the exports directory, the command compares its real path with `<real home>/.flair/exports` once and refuses when they differ, writing no export file. In a directory whose entries are not changed concurrently by another writer, it writes a complete temp file at the requested mode, subject to the process umask, and links it to the default name, so an existing path is refused and no partial file is published at the default name. A failed write, fsync, close or link attempts to remove the temp; a failed removal is reported with its path.
+
+- **Remote `flair init` omits operations API response bodies from cluster-user lookup, component deployment, and administrator creation or update refusals.** These refusals report the HTTP status, operation and a fixed description. Connection-failure diagnostics for those requests omit URL credentials and report a fixed failure category. ([#3145](https://github.com/tpsdev-ai/flair/pull/3145))
+
+- **`flair agent rotate-key` takes a per-agent lock before reading the current key.** Rotations of one agent that use the same keys directory on a filesystem with reliable exclusive create are serialized. A second rotation of that agent in that keys directory retries within a bounded wait and refuses if the lock still exists after the retries, naming the lock file; a rotation that uses a different keys directory does not share the lock. The run attempts to release the lock when it ends, including a failed update that exits 1, and a leftover lock from a killed run keeps refusing until an operator removes it. ([#3161](https://github.com/tpsdev-ai/flair/pull/3161))
+
+- **On POSIX, agent key provisioning requires a successful directory sync before registration, including when a retry reuses the key.** Keys directories must be real directories owned by the current user. After `flair agent rotate-key` installs a replacement, a failed directory sync warns and leaves the new key in place. Windows skips directory syncing and these directory checks. ([#3167](https://github.com/tpsdev-ai/flair/pull/3167))
+
+- **Checkout CI installs the platform native version `harper-fabric-embeddings` declares in `bun.lock`.** Installed-package CI uses a native package found inside the selected install tree by its own version, or the platform version declared by that tree's `harper-fabric-embeddings`; otherwise it refuses. ([#3157](https://github.com/tpsdev-ai/flair/pull/3157), [#3137](https://github.com/tpsdev-ai/flair/pull/3137))
+
+- **Superseding skill POST retries tolerate embedding backfill changes to an existing target.** ([#3171](https://github.com/tpsdev-ai/flair/pull/3171))
+
+- **The Harper start waiter reports the budget's timeout, not an inspect failure, when the budget ends during a first `docker inspect`** (flair#3180).
+
+- **Remote `flair init` authenticates its later calls as the administrator provisioning selected.** The summary identifies the selected credential. ([#3109](https://github.com/tpsdev-ai/flair/pull/3109))
+
+- **In the macOS launchd lane, a failed `flair init` whose output passes the password scan now prints its diagnostics.** ([#3102](https://github.com/tpsdev-ai/flair/pull/3102))
+
+- **`flair status` escapes the stored fields it prints, and reports unknown per-agent counts after an incomplete scan.** ([#3101](https://github.com/tpsdev-ai/flair/pull/3101), [#3111](https://github.com/tpsdev-ai/flair/pull/3111))
+
+  `flair status`, `flair status deep`, `flair status federation` and
+  `flair status rem` render control characters in stored text visibly. Terminal escaping does not change JSON
+  output; a failed Memory scan makes the per-agent `memoryCount`,
+  `hashFallback`, `writes24h`, `usageCount` and `lastWriteAt` values null in
+  JSON. When a row's memory count is unknown, plain status prints "unknown" for
+  memory count and last write, deep status also prints hash-fallback count and
+  24h writes as "unknown", and neither table displays `usageCount`;
+  `flair quality` reports no citation rate or quiet verdict for those rows.
+
+  `flair init --agent-id` refuses an administrator username
+  reserved by this init path — the default administrator name, the cluster administrator
+  on the provisioning path, or the administrator name configured for an
+  already-running instance — before it writes a key or registers the agent.
+
+- **The Harper start waiter CLI rejects a `NODE_` credentials name, an excessive request timeout, or a credentialed health URL with exit 2.** The `--per-request-ms` maximum is `2147483647`. Direct `main()` calls also reject the credentials name and credentialed URL with return value 2. ([#3083](https://github.com/tpsdev-ai/flair/pull/3083))
+
 ## [0.63.0] - 2026-11-24
 
 ### Added

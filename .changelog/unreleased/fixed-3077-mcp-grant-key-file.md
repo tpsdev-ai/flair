@@ -1,1 +1,0 @@
-- **`flair mcp grant` creates its private key owner-only on POSIX and refuses to replace an existing private or public key file.** ([#3150](https://github.com/tpsdev-ai/flair/pull/3150))

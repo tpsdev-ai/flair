@@ -1,6 +1,6 @@
 {
   "name": "@tpsdev-ai/openclaw-flair",
-  "version": "0.63.0",
+  "version": "0.63.1",
   "description": "OpenClaw memory plugin for Flair — agent identity and semantic memory",
   "type": "module",
   "main": "./dist/index.js",
@@ -61,7 +61,7 @@
   },
   "dependencies": {
     "@sinclair/typebox": "0.34.48",
-    "@tpsdev-ai/flair-client": "0.63.0"
+    "@tpsdev-ai/flair-client": "0.63.1"
   },
   "devDependencies": {
     "openclaw-supported": "npm:openclaw@2026.9.6",

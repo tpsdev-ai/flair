@@ -1,1 +1,0 @@
-- **Remote init checks the using-flair skill seed before its role, user and Agent writes.** A preflight refusal prevents those writes; Fabric deployment and administrator provisioning may already have occurred. ([#3168](https://github.com/tpsdev-ai/flair/pull/3168))

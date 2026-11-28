@@ -1,1 +1,0 @@
-- **`flair bridge import` refuses a non-empty agent id outside the rule carried by an imported record.**

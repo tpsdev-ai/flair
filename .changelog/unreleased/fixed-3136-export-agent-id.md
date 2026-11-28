@@ -1,1 +1,0 @@
-- **`flair export` refuses an invalid agent id before reading export data or a key, and creates its default output exclusively, refusing an existing path.** ([#3163](https://github.com/tpsdev-ai/flair/pull/3163))
