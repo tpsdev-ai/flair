@@ -1,6 +1,7 @@
 // Injects a failure through the export module's write seam, never node:fs.
 // MOCK_EXPORT_MODULE names the built module; MOCK_EXPORT_FAIL_MODE names the
-// branch; MOCK_EXPORT_SEAM_LOG records the descriptor closes and temp removals.
+// branch; MOCK_EXPORT_SEAM_LOG records close calls and, in write+unlink mode,
+// temp-removal attempts.
 import { appendFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 

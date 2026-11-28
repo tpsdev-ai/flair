@@ -1,9 +1,9 @@
 /**
  * flair#3136: `flair export` publishes its default output inside the resolved
  * exports directory via a temp file and a hard link. Real CLI, real files, a
- * sandboxed HOME; fetch is the only network stand-in. Every failure branch is
- * injected through the export module's write seam (`defaultExportWriteOps`), not
- * a global node:fs patch.
+ * sandboxed HOME; fetch is the only network stand-in. Write, fsync, link and
+ * temp-removal failures are injected through the export module's write seam
+ * (`defaultExportWriteOps`), not a global node:fs patch.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";

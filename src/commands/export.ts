@@ -88,10 +88,11 @@ function removeExportTemp(tempPath: string): void {
   }
 }
 
-/** Create `outputPath` at requested `mode` and write `content` by writing a
- *  complete temp file in the same directory and linking it into place. An
- *  existing path — file, symlink or anything else — is refused and survives.
- *  A failed write, fsync or link removes only this call's temp. */
+/** With no concurrent changes to directory entries by another writer, write
+ *  `content` to a complete temp file in the same directory and link it to
+ *  `outputPath`. An existing path — file, symlink or anything else — is refused
+ *  and survives. A failed write, fsync or link attempts to remove only this call's
+ *  temp; a failed removal is reported with its path. */
 function writeDefaultExport(outputPath: string, content: string, mode: number): void {
   const name = basename(outputPath);
   let tempPath = "";
@@ -263,7 +264,8 @@ addAdminPassOptions(
       // The exports directory must be the one under the REAL home. Checked once,
       // after the directory exists and before any temp file is created; a
       // concurrent replacement of .flair or exports between this check and the
-      // write is not prevented (Node has no directory-descriptor open).
+      // write is not prevented: the Node filesystem API used here has no directory-relative
+      // create or link anchored to a held directory descriptor.
       const resolvedExports = realpathSync(exportsDir);
       if (resolvedExports !== join(realpathSync(home), ".flair", "exports")) {
         console.error(`Error: refusing to write agent '${agentId}' outside the exports directory ${resolve(exportsDir)}`);
