@@ -108,6 +108,20 @@ describe("flair#3188 — an id outside the agent-ID rule has no key paths", () =
     expect(text).not.toContain("Looked for a key at");
   });
 
+  test("formatKeyLookup names the rule for a signed request with an invalid id", () => {
+    const text = formatKeyLookup({
+      agentId: "../escape",
+      resolvedPath: "(in-memory)",
+      candidates: [],
+      home: "",
+      signed: true,
+      authMethod: "ed25519",
+    });
+    expect(text).toContain("invalid agent id");
+    expect(text).toContain("^[a-zA-Z0-9_-]{1,64}$");
+    expect(text).not.toContain("signed with");
+  });
+
   test("formatKeyLookup refuses an empty id with the rule, not a missing-home diagnostic", () => {
     const text = formatKeyLookup({
       agentId: "",
