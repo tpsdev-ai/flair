@@ -680,8 +680,8 @@ export function createAgentKeyFile(
     }
     closeSync(handle.fd);
   } else {
-    // On POSIX, sync the key's directory before returning so the entry is durable
-    // before the caller registers the key; a failure refuses.
+    // Windows: no directory is held, and syncAgentKeysDir returns without syncing
+    // (Windows cannot open a directory for fsync).
     try {
       syncAgentKeysDir(keysDir);
     } catch (error) {
