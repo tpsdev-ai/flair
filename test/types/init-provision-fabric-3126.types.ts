@@ -3,7 +3,7 @@
  * types are not `any` and equal `Promise<ProvisionedFabricPrincipal>`.
  * Typecheck-only; bun test does not load this file.
  */
-import type { ProvisionedFabricPrincipal } from "../../src/cli.ts";
+import type { provisionFabric as cliProvisionFabric, ProvisionedFabricPrincipal } from "../../src/cli.ts";
 import type { InitCli, InitProvisionFabricFn } from "../../src/commands/init.ts";
 
 type IsAny<T> = 0 extends 1 & T ? true : false;
@@ -24,6 +24,13 @@ const wrapperReturnIsExact: WrapperReturnIsExact = true;
 type BindingReturnIsExact = Assert<Equal<ReturnType<InitCli["provisionFabric"]>, Promise<ProvisionedFabricPrincipal>>>;
 const bindingReturnIsExact: BindingReturnIsExact = true;
 
+type WrapperParametersAreExact = Assert<Equal<Parameters<InitProvisionFabricFn>, Parameters<typeof cliProvisionFabric>>>;
+const wrapperParametersAreExact: WrapperParametersAreExact = true;
+type BindingParametersAreExact = Assert<Equal<Parameters<InitCli["provisionFabric"]>, Parameters<typeof cliProvisionFabric>>>;
+const bindingParametersAreExact: BindingParametersAreExact = true;
+
+void wrapperParametersAreExact;
+void bindingParametersAreExact;
 void wrapperReturnIsExact;
 void bindingReturnIsExact;
 void wrapperReturnIsNotAny;

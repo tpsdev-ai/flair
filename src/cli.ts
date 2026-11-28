@@ -5134,7 +5134,7 @@ program.hook("preAction", async (_thisCommand, actionCommand) => {
 
 // ─── flair init ────────────────────────────────────────────────────────────
 // Command registration lives in src/commands/init.ts (flair#1636).
-// Bind shared cli-locals first so the extracted module never imports this file.
+// Bind shared cli-locals first so the extracted module never imports this file at runtime.
 bindInitCli({
   api,
   b64url,
