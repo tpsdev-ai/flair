@@ -1,9 +1,8 @@
 /**
- * flair#3136 item 1: an invalid agent id from `--agent`, `FLAIR_AGENT_ID`
- * or an imported record is refused before a key read or request for that record.
- * An empty imported-record agent id uses the existing missing-id refusal;
- * other invalid ids use the shared agent-ID message.
- * Records earlier in the import stream may already have been written.
+ * flair#3136 item 1: `flair bootstrap`, `flair attention`, `flair search`,
+ * `flair bridge import` and `flair bridge export` refuse a non-empty id outside
+ * the rule with the shared agent-ID message before a key read or request for
+ * that record.
  * Each case runs the built CLI with an explicit `--key` against a local stub server
  * with a real Ed25519 key file; the child's preload records the
  * readFileSync/openSync path arguments.

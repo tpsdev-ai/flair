@@ -1,6 +1,5 @@
 /**
- * flair#3136 item 1: every command that builds an agent key path from an id
- * applies the shared agent-ID rule before it builds the path. Each case runs
+ * Each case runs
  * the built CLI in a HOME-isolated child whose preload records the readFileSync
  * and openSync path arguments and the path of each global fetch request. A
  * planted sentinel sits at
