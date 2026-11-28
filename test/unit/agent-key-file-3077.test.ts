@@ -13,7 +13,9 @@
  * publication is reused, not overwritten; a reused key's directory is synced
  * before the key is returned, and a created keys directory repeats its parent
  * sync on the next call; and owned-by-another-user, non-directory and
- * non-regular paths are refused.
+ * non-regular paths are refused. An existing install whose flair home is
+ * group-writable (umask 002) is tightened once with a notice, and the key
+ * write proceeds.
  */
 import { afterEach, describe, expect, mock, test, spyOn } from "bun:test";
 import { spawnSync } from "node:child_process";
@@ -34,6 +36,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
+import { withHome } from "../../src/lib/home.ts";
 import { program } from "../../src/cli.ts";
 import {
   AgentKeyFileRefusal,
@@ -486,16 +489,57 @@ test.skipIf(process.platform === "win32")("a keys directory replaced between the
   expect(readdirSync(dir)).toEqual([]);
 });
 
+test.skipIf(process.platform === "win32")("an older install's group-writable flair home is tightened once, and the key write succeeds", () => {
+  const home = tempDir("flair-keyfile-3077-");
+  const flairHome = join(home, ".flair");
+  const dir = join(flairHome, "keys");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(flairHome, 0o775);
+  chmodSync(dir, 0o775);
+  const lines: string[] = [];
+  const log = spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+    lines.push(args.map(String).join(" "));
+  });
+  const previousUmask = process.umask(0o002);
+  const firstRun: string[] = [];
+  let secondRun: string[] = [];
+  try {
+    withHome(home, () => {
+      createAgentKeyFile(join(dir, "agent-a.key"), Buffer.alloc(32));
+    });
+    firstRun.push(...lines);
+    lines.length = 0;
+    withHome(home, () => {
+      createAgentKeyFile(join(dir, "agent-b.key"), Buffer.alloc(32));
+    });
+    secondRun = [...lines];
+  } finally {
+    process.umask(previousUmask);
+    log.mockRestore();
+  }
+  expect(existsSync(join(dir, "agent-a.key"))).toBe(true);
+  expect(existsSync(join(dir, "agent-b.key"))).toBe(true);
+  expect(statSync(join(dir, "agent-a.key")).mode & 0o777).toBe(0o600);
+  expect(statSync(flairHome).mode & 0o777).toBe(0o755);
+  const notices = firstRun.filter((line) => line.includes(`Flair home directory ${flairHome}`));
+  expect(notices).toHaveLength(1);
+  expect(notices[0]).toContain("0775");
+  expect(notices[0]).toContain("0755");
+  expect(secondRun.filter((line) => line.includes(`Flair home directory ${flairHome}`))).toHaveLength(0);
+});
+
 test.skipIf(process.platform === "win32")("a keys directory under an ancestor another user can change is refused, naming that ancestor", () => {
   const home = tempDir("flair-keyfile-3077-");
   const shared = join(home, "shared");
   mkdirSync(shared, { mode: 0o700 });
   chmodSync(shared, 0o777);
   const dir = join(shared, "keys");
-  ensureAgentKeysDir(dir);
   let caught: unknown;
   try {
-    createAgentKeyFile(join(dir, "agent-a.key"), Buffer.alloc(32));
+    withHome(home, () => {
+      ensureAgentKeysDir(dir);
+      createAgentKeyFile(join(dir, "agent-a.key"), Buffer.alloc(32));
+    });
   } catch (error) {
     caught = error;
   } finally {
@@ -507,6 +551,38 @@ test.skipIf(process.platform === "win32")("a keys directory under an ancestor an
   expect(message).toContain("0777");
   expect(message).toContain("uid");
   expect(existsSync(join(dir, "agent-a.key"))).toBe(false);
+});
+
+test.skipIf(process.platform === "win32")("an ancestor inside the flair home owned by another uid is refused (stat seam: process.getuid)", () => {
+  if (typeof process.getuid !== "function") return;
+  const realUid = process.getuid();
+  const home = tempDir("flair-keyfile-3077-");
+  const flairHome = join(home, ".flair");
+  const dir = join(flairHome, "keys");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(flairHome, 0o775);
+  // A single-user test cannot chown a directory; ownership is read through
+  // process.getuid(), so the first call (the keys directory) sees the real uid
+  // and the ancestor walk sees a uid that owns no directory.
+  let calls = 0;
+  const getuid = spyOn(process, "getuid").mockImplementation(() => (calls++ === 0 ? realUid : realUid + 1));
+  let caught: unknown;
+  try {
+    withHome(home, () => {
+      createAgentKeyFile(join(dir, "agent-a.key"), Buffer.alloc(32));
+    });
+  } catch (error) {
+    caught = error;
+  } finally {
+    getuid.mockRestore();
+  }
+  expect(caught).toBeInstanceOf(AgentKeyFileRefusal);
+  const message = (caught as Error).message;
+  expect(message).toContain(flairHome);
+  expect(message).toContain("0775");
+  expect(message).toContain("uid");
+  expect(existsSync(join(dir, "agent-a.key"))).toBe(false);
+  expect(statSync(flairHome).mode & 0o777).toBe(0o775);
 });
 
 test.skipIf(process.platform === "win32")("a sticky world-writable ancestor with a user-owned keys directory passes", () => {
@@ -849,4 +925,73 @@ test.skipIf(process.platform === "win32")("flair agent add exits 1, writes no ke
   expect(existsSync(insertLog) ? readFileSync(insertLog, "utf8") : "").toBe("");
   expect(stderr.join("\n")).toContain("was removed");
   expect(stdout.join("\n")).not.toContain("Keypair written");
+}, 30_000);
+
+test.skipIf(process.platform === "win32")("flair agent add tightens an older install's group-writable key home and writes the key", async () => {
+  const home = tempDir("flair-keyfile-3077-home-");
+  const flairHome = join(home, ".flair");
+  const keysDir = join(flairHome, "keys");
+  const passFile = join(home, "admin-pass");
+  const serverScript = join(home, "mock-ops.js");
+  const portFile = join(home, "mock-ops.port");
+  const insertLog = join(home, "inserts.log");
+  mkdirSync(keysDir, { recursive: true, mode: 0o700 });
+  chmodSync(flairHome, 0o775);
+  chmodSync(keysDir, 0o775);
+  writeFileSync(passFile, "fixture-pass", { mode: 0o600 });
+  writeFileSync(serverScript, INSERT_LOG_OPS_SOURCE);
+  const server = Bun.spawn(["bun", serverScript, portFile, insertLog], { stdout: "ignore", stderr: "ignore" });
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const logSpy = spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+    stdout.push(args.map((arg) => String(arg)).join(" "));
+  });
+  const errSpy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+    stderr.push(args.map((arg) => String(arg)).join(" "));
+  });
+  const origExit = process.exit;
+  process.exit = ((code?: number) => {
+    throw new Error(`process.exit(${code ?? 0})`);
+  }) as typeof process.exit;
+  const prevHome = process.env.HOME;
+  const previousUmask = process.umask(0o002);
+  let failure: unknown;
+  let exitCode: number | undefined;
+  try {
+    const deadline = Date.now() + 10_000;
+    while (!existsSync(portFile)) {
+      if (Date.now() > deadline) throw new Error("mock ops server did not start");
+      await Bun.sleep(25);
+    }
+    const port = readFileSync(portFile, "utf8").trim();
+    process.env.HOME = home;
+    try {
+      await program.parseAsync([
+        "node", "flair", "agent", "add", "agent-a",
+        "--ops-target", `http://127.0.0.1:${port}`,
+        "--admin-pass-file", passFile,
+      ]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const match = message.match(/^process\.exit\((\d+)\)$/);
+      if (match) exitCode = Number(match[1]);
+      else failure = error;
+    }
+  } finally {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    process.umask(previousUmask);
+    process.exit = origExit;
+    logSpy.mockRestore();
+    errSpy.mockRestore();
+    server.kill();
+    await server.exited.catch(() => {});
+  }
+  expect(failure).toBeUndefined();
+  expect(exitCode).toBeUndefined();
+  expect(existsSync(join(keysDir, "agent-a.key"))).toBe(true);
+  expect(statSync(join(keysDir, "agent-a.key")).mode & 0o777).toBe(0o600);
+  expect(statSync(flairHome).mode & 0o777).toBe(0o755);
+  expect(stdout.filter((line) => line.includes(`Flair home directory ${flairHome}`))).toHaveLength(1);
+  expect(stderr.join("\n")).toBe("");
 }, 30_000);

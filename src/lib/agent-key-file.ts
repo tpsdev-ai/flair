@@ -9,8 +9,12 @@
  * POSIX policy:
  *   - every ancestor of the keys directory, up to `/`, must be owned by root
  *     or the current user and must not be group- or world-writable unless it
- *     carries the sticky bit; otherwise the keys directory is refused with the
- *     first failing ancestor's owner and mode.
+ *     carries the sticky bit; a failing ancestor is refused with its owner and
+ *     mode, the first failing one named. Inside flair's home (`~/.flair`, the
+ *     parent of the default keys directory) an ancestor the current user owns
+ *     has its group and world write bits removed instead, with one notice
+ *     naming it and its old and new modes, and the walk continues; an ancestor
+ *     there owned by anyone else is refused as above.
  *   - the keys directory is requested with mode 0700 (the umask may make it
  *     narrower); an existing directory owned by the current user is tightened
  *     to 0700 when it has group or world bits, with one notice line; a symlink,
@@ -49,7 +53,8 @@ import {
   writeSync,
 } from "node:fs";
 import type { Stats } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
+import { defaultKeysDir } from "./key-dir.js";
 
 /** A refusal is operator-facing: the caller prints the message and exits 1. */
 export class AgentKeyFileRefusal extends Error {
@@ -172,29 +177,66 @@ function modeWithSpecial(mode: number): string {
   return (mode & 0o7777).toString(8).padStart(4, "0");
 }
 
+/** Real path of flair's home, read once per ancestor walk. */
+function flairHomeDir(): string {
+  const home = dirname(defaultKeysDir());
+  try {
+    return realpathSync(home);
+  } catch {
+    return resolve(home);
+  }
+}
+
+/** True when `path` is `dir` or below it. Both are real paths. */
+function isInside(path: string, dir: string): boolean {
+  return path === dir || path.startsWith(dir + sep);
+}
+
 /**
  * On POSIX, refuse a keys directory with an ancestor that another user can
  * change: every ancestor up to `/` must be owned by root or the current user
  * and must not be group- or world-writable unless it carries the sticky bit.
- * The refusal names the first failing ancestor (nearest the keys directory)
- * with its owner and mode.
+ * Inside flair's home, an ancestor owned by the current user has its group and
+ * world write bits removed instead, with one notice, because an existing
+ * install can carry them from a umask 002 host; every ancestor flair creates
+ * there is owner-only, so a fresh install never needs the notice.
+ * A refusal names the first failing ancestor (nearest the keys directory) with
+ * its owner and mode.
  */
 function assertAgentKeysDirAncestors(keysDir: string): void {
   if (WIN32) return;
   const uid = currentUid();
+  const home = flairHomeDir();
   let ancestor = dirname(realpathSync(keysDir));
   for (;;) {
     const st = lstatSync(ancestor);
     const otherWritable = (st.mode & 0o022) !== 0;
     const sticky = (st.mode & 0o1000) !== 0;
     const foreignOwner = uid !== undefined && st.uid !== 0 && st.uid !== uid;
-    if (foreignOwner || (otherWritable && !sticky)) {
+    if (foreignOwner) {
       throw new AgentKeyFileRefusal(
         `keys directory ${keysDir} has ancestor ${ancestor} owned by uid ${st.uid} with mode ${modeWithSpecial(st.mode)}; ` +
           `another user can change that ancestor, so the keys directory cannot be trusted. ` +
           `Move the keys directory, or make ${ancestor} owned by root or the current user and not group- or world-writable ` +
           `(or set its sticky bit), then retry`,
       );
+    }
+    if (otherWritable) {
+      if (uid !== undefined && st.uid === uid && isInside(ancestor, home)) {
+        const oldMode = st.mode & 0o7777;
+        const newMode = oldMode & ~0o022;
+        chmodSync(ancestor, newMode);
+        console.log(
+          `Flair home directory ${ancestor} was accessible to other users; permissions tightened from ${modeWithSpecial(oldMode)} to ${modeWithSpecial(newMode)}.`,
+        );
+      } else if (!sticky) {
+        throw new AgentKeyFileRefusal(
+          `keys directory ${keysDir} has ancestor ${ancestor} owned by uid ${st.uid} with mode ${modeWithSpecial(st.mode)}; ` +
+            `another user can change that ancestor, so the keys directory cannot be trusted. ` +
+            `Move the keys directory, or make ${ancestor} owned by root or the current user and not group- or world-writable ` +
+            `(or set its sticky bit), then retry`,
+        );
+      }
     }
     const parent = dirname(ancestor);
     if (parent === ancestor) return;
