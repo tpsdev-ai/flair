@@ -546,11 +546,11 @@ export function readWriteResult(
  * it in the changed field, does not also name it in `skipped_hashes`, and carries
  * no `error`. Anything else, including a contradictory result that names the id
  * as both changed and skipped, is not a confirmation. One rule for every write
- * this module and the cleanup sweep verify.
+ * this module, the cleanup sweep and `mcp grant` verify.
  */
 export function writeConfirmed(
   result: unknown,
-  changedField: "deleted_hashes" | "update_hashes",
+  changedField: "deleted_hashes" | "inserted_hashes" | "update_hashes",
   id: string,
 ): boolean {
   const body = (result ?? {}) as Record<string, unknown>;

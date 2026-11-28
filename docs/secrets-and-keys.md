@@ -148,8 +148,12 @@ Treat `~/.flair/keys/<agent>.key` like an SSH private key:
 ## Key cleanup
 
 `flair keys prune` classifies every `.key` file in the key directory and, with
-`--apply`, moves prunable keys into `<keysDir>/.pruned/<date>/`; keys with
-refused sidecars stay in place.
+`--apply`, moves prunable keys into `<keysDir>/.pruned/<date>/`; on POSIX the
+archive directory must be a directory the current user owns with no group or
+other bits (a missing one is created that way, an existing wider one is
+tightened), and a successfully moved private key is left at `0600`; where
+`process.getuid` is unavailable the archive move is refused and nothing moves.
+Keys with refused sidecars stay in place.
 It never deletes a file itself. A move can still replace an entry that a
 concurrent writer creates at the destination before the move lands: the selected
 archive name, or, when a failed key move rolls its sidecar back, the sidecar's

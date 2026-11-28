@@ -57,6 +57,7 @@ import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
 import { AgentKeyPathRefusal } from "../lib/key-dir.js";
 import { agentHomeEndpoint, resolveTargetInstanceId } from "../lib/agent-home.js";
 import { createAgentKeyFile, ensureAgentKeysDir, type KeyFileIdentity } from "../lib/agent-key-file.js";
+import { writeConfirmed } from "../lib/instance-identity-row.js";
 
 export type McpCli = {
   resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
@@ -318,23 +319,54 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
   // pre-existing Agent id (e.g. a human-run principal sharing this name).
   const opsUrl = typeof opsPortOrUrl === "number" ? `http://127.0.0.1:${opsPortOrUrl}/` : `${opsPortOrUrl.replace(/\/$/, "")}/`;
   const authHeader = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
-  const existingRes = await fetchImpl(opsUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: authHeader },
-    body: JSON.stringify({
-      operation: "search_by_value",
-      database: "flair",
-      table: "Agent",
-      search_attribute: "id",
-      search_value: name,
-      get_attributes: ["id"],
-    }),
-  });
-  if (existingRes.ok) {
-    const existing = await existingRes.json().catch(() => []);
-    if (Array.isArray(existing) && existing.length > 0) {
-      throw new McpClientAgentIdCollisionError(name);
-    }
+  // The lookup must answer with a 2xx and a list: an error, a transport
+  // failure or an unreadable body cannot prove the id is free, so the grant
+  // refuses here, before any key or Agent record write.
+  let existingRes: Response;
+  try {
+    existingRes = await fetchImpl(opsUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: authHeader },
+      body: JSON.stringify({
+        operation: "search_by_value",
+        database: "flair",
+        table: "Agent",
+        search_attribute: "id",
+        search_value: name,
+        get_attributes: ["id"],
+      }),
+    });
+  } catch (lookupError) {
+    const reason = lookupError instanceof Error ? lookupError.message : String(lookupError);
+    throw new Error(
+      `Could not check whether Agent '${name}' already exists: ${reason}; refusing the grant before any key or Agent record write.`,
+      { cause: lookupError },
+    );
+  }
+  if (!existingRes.ok) {
+    const text = await existingRes.text().catch(() => "");
+    throw new Error(
+      `Could not check whether Agent '${name}' already exists (status ${existingRes.status}${text ? `: ${text}` : ""}); ` +
+        `refusing the grant before any key or Agent record write.`,
+    );
+  }
+  let existing: unknown;
+  try {
+    existing = await existingRes.json();
+  } catch {
+    throw new Error(
+      `Could not check whether Agent '${name}' already exists (status ${existingRes.status}, unreadable lookup response); ` +
+        `refusing the grant before any key or Agent record write.`,
+    );
+  }
+  if (!Array.isArray(existing)) {
+    throw new Error(
+      `Could not check whether Agent '${name}' already exists (status ${existingRes.status}, non-list lookup response); ` +
+        `refusing the grant before any key or Agent record write.`,
+    );
+  }
+  if (existing.length > 0) {
+    throw new McpClientAgentIdCollisionError(name);
   }
 
   ensureAgentKeysDir(keysDir);
@@ -346,6 +378,15 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
   const trackKeyFile = (path: string, identity: KeyFileIdentity) => {
     createdKeyFiles.push({ path, dev: identity.dev, ino: identity.ino });
   };
+  // The row belongs to this grant only when the insert's result body confirms
+  // THIS id through the shared rule this grant's insert and delete use: a readable
+  // body names it in `inserted_hashes`, does not name it in `skipped_hashes`
+  // and carries no `error`. A 2xx alone does not: Harper answers 2xx with the
+  // id skipped when the row already exists, so a status read as a create could
+  // later delete an Agent this grant did not create. Until the body confirms
+  // it, no delete is safe: an error, a timeout, a transport failure or an
+  // unconfirmed result leaves existence unknown.
+  let insertState: "not-sent" | "sent" | "acknowledged" = "not-sent";
   try {
     createAgentKeyFile(privPath, Buffer.from(seed), trackKeyFile);
     createAgentKeyFile(pubPath, Buffer.from(kp.publicKey), trackKeyFile);
@@ -354,6 +395,7 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
     // flair#2433 — the new Agent row's home is THIS instance's federation id,
     // resolved through the one shared rule; a create stamps it.
     const home = await resolveTargetInstanceId(agentHomeEndpoint(opsUrl, adminUser, adminPass, fetchImpl));
+    insertState = "sent";
     const insertRes = await fetchImpl(opsUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: authHeader },
@@ -382,6 +424,13 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
       const text = await insertRes.text().catch(() => "");
       throw new Error(`Failed to create Agent '${name}' via operations API (${insertRes.status}): ${text}`);
     }
+    const insertBody = (await insertRes.json().catch(() => null)) as unknown;
+    if (!writeConfirmed(insertBody, "inserted_hashes", name)) {
+      throw new Error(
+        `Failed to create Agent '${name}' via operations API (${insertRes.status}): the result body did not confirm that this insert created the row`,
+      );
+    }
+    insertState = "acknowledged";
 
     const clientId = `${issuer.replace(/\/+$/, "")}/MCPClientMetadata/${name}`;
     const entry: McpClientManifestEntry = {
@@ -400,17 +449,15 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
     const config = buildMcpGrantConfig({ name, resource, keyFile: privPath });
     return { entry, config };
   } catch (error) {
-    // On failure, try to remove the key files this call created. File identity decides
-    // eligibility at the check: a path is removed (by path) only if, when
-    // checked, it still names the file this grant created. A path replaced
-    // between that check and the unlink can still be removed; a POSIX unlink by
-    // name cannot close that window. On POSIX the keys directory has no group or
-    // world permissions: a new directory requests 0700, and an existing narrower
-    // one keeps its mode. A path that no longer names the
+    // File identity decides eligibility at the check: a path is removed (by path)
+    // only if, when checked, it still names the file this grant created. A path
+    // replaced between that check and the unlink can still be removed; a POSIX
+    // unlink by name cannot close that window. A path that no longer names the
     // created file, or whose check or unlink fails with an error other than
-    // ENOENT, is named in the error; a created file moved to another name is
+    // ENOENT, is named in the error; an absent path (ENOENT) is treated as
+    // already gone and not reported; a created file moved to another name is
     // not tracked.
-    if (createdKeyFiles.length > 0) {
+    const cleanupCreatedKeyFiles = (): string[] => {
       const leftBehind: string[] = [];
       for (const created of createdKeyFiles) {
         let current: Stats;
@@ -434,7 +481,48 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
           if (code !== "ENOENT") leftBehind.push(`${created.path} (not removed: ${code ?? "unlink failed"})`);
         }
       }
-      const message = error instanceof Error ? error.message : String(error);
+      return leftBehind;
+    };
+    const message = error instanceof Error ? error.message : String(error);
+    if (insertState === "acknowledged") {
+      let deleted = false;
+      try {
+        const delRes = await fetchImpl(opsUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: authHeader },
+          body: JSON.stringify({ operation: "delete", database: "flair", table: "Agent", ids: [name] }),
+        });
+        if (delRes.ok) {
+          const delBody = await delRes.json().catch(() => null);
+          deleted = writeConfirmed(delBody, "deleted_hashes", name);
+        }
+      } catch {
+        /* deletion not acknowledged */
+      }
+      if (!deleted) {
+        throw new Error(
+          `${message}; Agent '${name}' may exist on the server and its deletion was not acknowledged, ` +
+          `so the key files were kept at ${privPath} and ${pubPath} — check the Agent row with \`flair agent show ${name}\`, ` +
+          `and if it exists run \`flair agent remove ${name}\`, then remove the key files.`,
+          { cause: error },
+        );
+      }
+      const leftBehind = cleanupCreatedKeyFiles();
+      const outcome = leftBehind.length === 0
+        ? `the Agent '${name}' was deleted and its key files were removed`
+        : `the Agent '${name}' was deleted but key file(s) were kept: ${leftBehind.join("; ")}`;
+      throw new Error(`${message}; ${outcome}`, { cause: error });
+    }
+    if (insertState === "sent") {
+      throw new Error(
+        `${message}; the insert of Agent '${name}' was sent but not acknowledged, so the outcome is unknown: ` +
+        `the Agent row may or may not exist. No delete was sent and the key files were kept at ${privPath} and ${pubPath} — ` +
+        `check the Agent row with \`flair agent show ${name}\`, and if it exists run \`flair agent remove ${name}\`, then remove the key files.`,
+        { cause: error },
+      );
+    }
+    if (createdKeyFiles.length > 0) {
+      const leftBehind = cleanupCreatedKeyFiles();
       const cleanup = leftBehind.length === 0
         ? "removed the key paths that still named this call's files when checked"
         : `could not remove key file(s): ${leftBehind.join("; ")}`;

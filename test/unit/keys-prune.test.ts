@@ -23,8 +23,8 @@
  * in-process call can't observe process.exit().
  */
 
-import { describe, it, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { describe, it, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
+import { mkdtempSync, mkdirSync, chmodSync, statSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync, symlinkSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -392,6 +392,226 @@ describe("applyKeyPrune — --apply moves prunable keys, leaves registered ones 
 
     const archiveDir = join(keysDir, PRUNED_DIR_NAME, "2026-07-18");
     expect(readdirSync(archiveDir).sort()).toEqual(["agent-stray.key", "agent-stray.key.2"]);
+  });
+});
+
+// ─── --apply keeps archived material owner-only (flair#3077 slice D) ──────
+
+describe("applyKeyPrune — archived material is owner-only (flair#3077 slice D)", () => {
+  async function staleEntries(agentId: string) {
+    writeSeedKey(keysDir, agentId);
+    globalThis.fetch = mockRegistrationFetch(new Set());
+    const classified = await classifyKeysDir(keysDir, BASE_URL, noInstanceRead);
+    expect(classified.aborted).toBe(false);
+    return classified.entries;
+  }
+
+  it("creates a missing archive directory owner-only", async () => {
+    const entries = await staleEntries("agent-archive-dir-new");
+    const archiveDir = join(keysDir, PRUNED_DIR_NAME, "2026-07-19");
+    const { moved } = applyKeyPrune(keysDir, entries, "2026-07-19");
+    expect(moved).toHaveLength(1);
+    expect(statSync(archiveDir).mode & 0o777).toBe(0o700);
+  });
+
+  it("tightens an existing world-readable archive directory to owner-only", async () => {
+    const entries = await staleEntries("agent-archive-dir-wide");
+    const archiveDir = join(keysDir, PRUNED_DIR_NAME, "2026-07-19");
+    mkdirSync(archiveDir, { recursive: true });
+    chmodSync(archiveDir, 0o755);
+    const { moved } = applyKeyPrune(keysDir, entries, "2026-07-19");
+    expect(moved).toHaveLength(1);
+    expect(statSync(archiveDir).mode & 0o777).toBe(0o700);
+  });
+
+  it("tightens an existing world-readable .pruned directory to owner-only", async () => {
+    const entries = await staleEntries("agent-archive-pruned-wide");
+    const prunedDir = join(keysDir, PRUNED_DIR_NAME);
+    const archiveDir = join(prunedDir, "2026-07-19");
+    mkdirSync(archiveDir, { recursive: true });
+    chmodSync(prunedDir, 0o755);
+    chmodSync(archiveDir, 0o700);
+    const { moved } = applyKeyPrune(keysDir, entries, "2026-07-19");
+    expect(moved).toHaveLength(1);
+    expect(statSync(prunedDir).mode & 0o777).toBe(0o700);
+  });
+
+  it("leaves an archived private key owner-only when the key was 0644", async () => {
+    const entries = await staleEntries("agent-archive-key-wide");
+    const keyPath = join(keysDir, "agent-archive-key-wide.key");
+    chmodSync(keyPath, 0o644);
+    const { moved } = applyKeyPrune(keysDir, entries, "2026-07-19");
+    expect(moved).toHaveLength(1);
+    const archived = join(keysDir, PRUNED_DIR_NAME, "2026-07-19", "agent-archive-key-wide.key");
+    expect(statSync(archived).mode & 0o777).toBe(0o600);
+  });
+});
+
+// ─── --apply refuses an archive path it does not own (flair#3077) ──────────
+
+describe("applyKeyPrune — the archive path is a directory this user owns (flair#3077)", () => {
+  async function staleEntries(agentId: string) {
+    writeSeedKey(keysDir, agentId);
+    globalThis.fetch = mockRegistrationFetch(new Set());
+    const classified = await classifyKeysDir(keysDir, BASE_URL, noInstanceRead);
+    expect(classified.aborted).toBe(false);
+    return classified.entries;
+  }
+
+  it("a symlinked .pruned component refuses and moves nothing", async () => {
+    const agentId = "agent-pruned-symlink";
+    const entries = await staleEntries(agentId);
+    const elsewhere = join(keysDir, "elsewhere");
+    mkdirSync(elsewhere);
+    symlinkSync(elsewhere, join(keysDir, PRUNED_DIR_NAME));
+    expect(() => applyKeyPrune(keysDir, entries, "2026-07-19")).toThrow(/is a symlink.*nothing was moved/);
+    expect(existsSync(join(keysDir, `${agentId}.key`))).toBe(true);
+    expect(readdirSync(elsewhere)).toEqual([]);
+  });
+
+  it("a symlinked date component refuses and moves nothing", async () => {
+    const agentId = "agent-date-symlink";
+    const entries = await staleEntries(agentId);
+    const elsewhere = join(keysDir, "elsewhere");
+    mkdirSync(join(keysDir, PRUNED_DIR_NAME), { recursive: true });
+    mkdirSync(elsewhere);
+    symlinkSync(elsewhere, join(keysDir, PRUNED_DIR_NAME, "2026-07-19"));
+    expect(() => applyKeyPrune(keysDir, entries, "2026-07-19")).toThrow(/is a symlink.*nothing was moved/);
+    expect(existsSync(join(keysDir, `${agentId}.key`))).toBe(true);
+    expect(readdirSync(elsewhere)).toEqual([]);
+  });
+
+  it("a date component owned by another user refuses and moves nothing", async () => {
+    if (typeof process.getuid !== "function") return;
+    const agentId = "agent-dir-foreign";
+    const entries = await staleEntries(agentId);
+    const archiveDir = join(keysDir, PRUNED_DIR_NAME, "2026-07-19");
+    mkdirSync(join(keysDir, PRUNED_DIR_NAME), { recursive: true });
+    chmodSync(join(keysDir, PRUNED_DIR_NAME), 0o700);
+    mkdirSync(archiveDir);
+    const uid = process.getuid();
+    // The .pruned component passes; only the date directory reads as foreign.
+    const spy = spyOn(process, "getuid").mockReturnValueOnce(uid).mockReturnValue(uid + 1);
+    let message = "";
+    try {
+      applyKeyPrune(keysDir, entries, "2026-07-19");
+    } catch (error) { message = (error as Error).message; } finally {
+      spy.mockRestore();
+    }
+    expect(message).toContain(`${archiveDir} is not owned by the current user`);
+    expect(message).toContain("nothing was moved");
+    expect(existsSync(join(keysDir, `${agentId}.key`))).toBe(true);
+    expect(readdirSync(archiveDir)).toEqual([]);
+  });
+
+  it("a platform without process.getuid refuses before creating the archive path", async () => {
+    const agentId = "agent-no-getuid";
+    const entries = await staleEntries(agentId);
+    const original = process.getuid;
+    Object.defineProperty(process, "getuid", { value: undefined, configurable: true, writable: true });
+    let message = "";
+    try {
+      applyKeyPrune(keysDir, entries, "2026-07-19");
+    } catch (error) { message = (error as Error).message; } finally {
+      Object.defineProperty(process, "getuid", { value: original, configurable: true, writable: true });
+    }
+    expect(message).toContain("process.getuid is unavailable");
+    expect(message).toContain("nothing was moved");
+    expect(existsSync(join(keysDir, PRUNED_DIR_NAME))).toBe(false);
+    expect(existsSync(join(keysDir, `${agentId}.key`))).toBe(true);
+  });
+});
+
+// ─── --apply read-backs: chmod that does not take effect (flair#3077) ──────
+
+describe("applyKeyPrune — a chmod that does not take effect is refused (flair#3077)", () => {
+  async function staleEntries(agentId: string) {
+    writeSeedKey(keysDir, agentId);
+    globalThis.fetch = mockRegistrationFetch(new Set());
+    const classified = await classifyKeysDir(keysDir, BASE_URL, noInstanceRead);
+    expect(classified.aborted).toBe(false);
+    return classified.entries;
+  }
+
+  const noopChmod = () => {};
+  const throwingChmod = () => { throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" }); };
+
+  it("a directory chmod that leaves the mode unchanged is refused before anything moves", async () => {
+    const agentId = "agent-dir-chmod-noop";
+    const entries = await staleEntries(agentId);
+    const archiveDir = join(keysDir, PRUNED_DIR_NAME, "2026-07-19");
+    mkdirSync(join(keysDir, PRUNED_DIR_NAME), { recursive: true });
+    chmodSync(join(keysDir, PRUNED_DIR_NAME), 0o700);
+    mkdirSync(archiveDir);
+    chmodSync(archiveDir, 0o755);
+    expect(() => applyKeyPrune(keysDir, entries, "2026-07-19", undefined, noopChmod)).toThrow(
+      `${archiveDir} is mode 0755 after tightening; run \`chmod 700 '${archiveDir}'\` to make it owner-only`,
+    );
+    expect(existsSync(join(keysDir, `${agentId}.key`))).toBe(true);
+    expect(readdirSync(archiveDir)).toEqual([]);
+  });
+
+  it("a directory chmod that throws is refused with the remedy and moves nothing", async () => {
+    const agentId = "agent-dir-chmod-throws";
+    const entries = await staleEntries(agentId);
+    const archiveDir = join(keysDir, PRUNED_DIR_NAME, "2026-07-19");
+    mkdirSync(join(keysDir, PRUNED_DIR_NAME), { recursive: true });
+    chmodSync(join(keysDir, PRUNED_DIR_NAME), 0o700);
+    mkdirSync(archiveDir);
+    chmodSync(archiveDir, 0o755);
+    expect(() => applyKeyPrune(keysDir, entries, "2026-07-19", undefined, throwingChmod)).toThrow(
+      `${archiveDir} is mode 0755; run \`chmod 700 '${archiveDir}'\` to make it owner-only`,
+    );
+    expect(existsSync(join(keysDir, `${agentId}.key`))).toBe(true);
+    expect(readdirSync(archiveDir)).toEqual([]);
+  });
+
+  it("a remedy for a path containing a single quote stays one shell argument", async () => {
+    const agentId = "agent-dir-quoted";
+    const entries = await staleEntries(agentId);
+    const dateStamp = "2026-07-19'quoted";
+    const archiveDir = join(keysDir, PRUNED_DIR_NAME, dateStamp);
+    mkdirSync(join(keysDir, PRUNED_DIR_NAME), { recursive: true });
+    chmodSync(join(keysDir, PRUNED_DIR_NAME), 0o700);
+    mkdirSync(archiveDir);
+    chmodSync(archiveDir, 0o755);
+    let message = "";
+    try {
+      applyKeyPrune(keysDir, entries, dateStamp, undefined, noopChmod);
+    } catch (error) { message = (error as Error).message; }
+    const rendered = message.match(/run `chmod 700 (.*)` to make it owner-only/)?.[1];
+    expect(rendered).toBe(`'${archiveDir.replace(/'/g, `'\\''`)}'`);
+    const parsed = spawnSync("/bin/sh", [], {
+      input: `set -- ${rendered}\nprintf '%s\\n' "$#" "$1"\n`,
+      timeout: 5_000,
+      encoding: "utf8",
+    });
+    expect(parsed.status).toBe(0);
+    expect(parsed.stdout.split("\n").slice(0, 2)).toEqual(["1", archiveDir]);
+  }, 20_000);
+
+  it("a key chmod that leaves the mode unchanged is refused after the move, naming where the key is", async () => {
+    const agentId = "agent-key-chmod-noop";
+    const entries = await staleEntries(agentId);
+    chmodSync(join(keysDir, `${agentId}.key`), 0o644);
+    const archived = join(keysDir, PRUNED_DIR_NAME, "2026-07-19", `${agentId}.key`);
+    expect(() => applyKeyPrune(keysDir, entries, "2026-07-19", undefined, noopChmod)).toThrow(
+      `${archived} is mode 0644 after the move; run \`chmod 600 '${archived}'\``,
+    );
+    expect(existsSync(join(keysDir, `${agentId}.key`))).toBe(false);
+    expect(existsSync(archived)).toBe(true);
+  });
+
+  it("a key chmod that throws is refused with the remedy, naming where the key is", async () => {
+    const agentId = "agent-key-chmod-throws";
+    const entries = await staleEntries(agentId);
+    chmodSync(join(keysDir, `${agentId}.key`), 0o644);
+    const archived = join(keysDir, PRUNED_DIR_NAME, "2026-07-19", `${agentId}.key`);
+    expect(() => applyKeyPrune(keysDir, entries, "2026-07-19", undefined, throwingChmod)).toThrow(
+      `${archived} could not be made owner-only after the move; run \`chmod 600 '${archived}'\``,
+    );
+    expect(existsSync(join(keysDir, `${agentId}.key`))).toBe(false);
+    expect(existsSync(archived)).toBe(true);
   });
 });
 
