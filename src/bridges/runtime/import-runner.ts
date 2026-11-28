@@ -118,9 +118,10 @@ export async function runImport(opts: ImportRunOptions): Promise<ImportRunResult
       });
     }
 
-    // The record's own agentId is what the write is signed as; apply the
-    // shared agent-ID rule before the dry-run split and before the caller
-    // resolves a key path or reads a key.
+    // The resolved id (record's own or command default) is the signing id if
+    // signed; with no key resolved the write is sent unsigned. Apply the shared
+    // agent-ID rule before the dry-run split and before the caller resolves a
+    // key path or reads a key for this record.
     requireAgentId(resolvedAgent);
 
     const durability = (m.durability && VALID_DURABILITY.has(m.durability))

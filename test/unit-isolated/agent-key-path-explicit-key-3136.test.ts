@@ -1,8 +1,10 @@
 /**
- * flair#3136 item 1: a command given an invalid agent id — from `--agent`,
- * `FLAIR_AGENT_ID` or an imported record — together with an explicit `--key`
- * refuses with the shared agent-ID message before the key file is opened or a
- * request is sent. Each case runs the built CLI against a local stub server
+ * flair#3136 item 1: an invalid agent id from `--agent`, `FLAIR_AGENT_ID`
+ * or an imported record is refused before a key read or request for that record.
+ * An empty imported-record agent id uses the existing missing-id refusal;
+ * other invalid ids use the shared agent-ID message.
+ * Records earlier in the import stream may already have been written.
+ * Each case runs the built CLI with an explicit `--key` against a local stub server
  * with a real Ed25519 key file; the child's preload records the
  * readFileSync/openSync path arguments.
  */
@@ -142,7 +144,7 @@ function writeRecordBridge(home: string, records: string[]): void {
   writeFileSync(join(home, "records.jsonl"), records.map((record) => `${record}\n`).join(""));
 }
 
-describe("flair#3136 — an invalid agent id with --key is refused before the key is opened", () => {
+describe("flair#3136 — an invalid agent id with --key is refused before a key read or request for that record", () => {
   for (const command of CASES) {
     test(`${command.name} refuses ${JSON.stringify(BAD_ID)} with --key`, async () => {
       const home = join(scratch, `home-${command.name.replace(/[^a-z]+/gi, "-")}`);

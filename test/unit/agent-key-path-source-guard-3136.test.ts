@@ -1,10 +1,9 @@
 /**
- * flair#3136 item 1: every ID-derived key path in src/ is built by a validated
- * helper in src/lib/key-dir.ts, which applies the shared agent-ID rule before
- * joining. The guard fails on any string literal or template-literal text chunk
- * outside that module that is, or ends with, `.key`, `-priv.key` or `.pub`;
- * string literals inside a template interpolation are scanned too, at any
- * depth. A named allowlist covers non-agent literals.
+ * flair#3136 item 1: regression guard for literal `.key`, `-priv.key` and `.pub`
+ * suffix spellings outside src/lib/key-dir.ts: plain strings, template text and
+ * concatenated suffix literals, including inside `${...}`, with a named allowlist.
+ * It does not detect escaped/cooked spellings such as `"\x2ekey"` or a suffix
+ * split across literals, or prove that no source file assembles an agent key name.
  */
 import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
@@ -282,6 +281,6 @@ test("the helper builds the private and public paths (the guard is not vacuous)"
   expect(helper).toContain("export function keyPathIn(");
 });
 
-test("no src file outside the key-path module assembles an agent key name", () => {
+test("no unallowlisted literal .key, -priv.key or .pub suffix in src outside the key-path module (plain, template text, concatenated, including inside ${...})", () => {
   expect(offenders()).toEqual([]);
 });
