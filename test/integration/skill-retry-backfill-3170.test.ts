@@ -25,7 +25,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper } from "../helpers/harper-lifecycle";
+import { HARPER_START_BUDGET_MS, HARPER_STOP_BUDGET_MS, startHarper, stopHarper } from "../helpers/harper-lifecycle";
 import { componentWithReplayProbe, type ProbeComponent } from "../helpers/component-with-replay-probe";
 import { RaceHarness, newAgent } from "../helpers/embedding-writer-race";
 import { SEED_SKILL_ROW_ID } from "../../resources/seed-ids.js";
@@ -99,6 +99,13 @@ async function waitForLongVector(id: string, timeoutMs = 30_000): Promise<any> {
   return row;
 }
 
+// flair#3179: the beforeAll budget is the explicit sum of its stages: Harper's start
+// budget, the seed request, the boot-cycle poll, and one admin request still in
+// flight at the poll's deadline (each admin request may take up to ADMIN_REQUEST_MS).
+const ADMIN_REQUEST_MS = 90_000;
+const BOOT_CYCLE_WAIT_MS = 120_000;
+const BEFORE_ALL_BUDGET_MS = HARPER_START_BUDGET_MS + ADMIN_REQUEST_MS + BOOT_CYCLE_WAIT_MS + ADMIN_REQUEST_MS;
+
 /** Poll /HealthDetail until the boot migration cycle reports done; returns the last phase read. */
 async function waitForBootCycle(timeoutMs: number): Promise<string> {
   const deadline = Date.now() + timeoutMs;
@@ -131,8 +138,8 @@ beforeAll(async () => {
   await h.seedAgent(writer, "admin");
   // flair#3179: the boot migration cycle can re-embed a row a case has just
   // POSTed, inside that case's race window. Let the cycle finish before any case runs.
-  expect(await waitForBootCycle(120_000), "the boot migration cycle did not reach done").toBe("done");
-}, 240_000);
+  expect(await waitForBootCycle(BOOT_CYCLE_WAIT_MS), "the boot migration cycle did not reach done").toBe("done");
+}, BEFORE_ALL_BUDGET_MS);
 
 afterAll(async () => {
   if (h?.harper) {
