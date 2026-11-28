@@ -15,6 +15,7 @@
 import { Command } from "commander";
 import * as render from "../render.js";
 import { resolveKeyPath, buildEd25519Auth, readSecretFileSecure, requestTarget, requestUrl } from "../lib/auth-resolve.js";
+import { AgentKeyPathRefusal, requireAgentId } from "../lib/key-dir.js";
 import type { BridgeOptionSpec } from "../bridges/types.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { protoSafeRecord } from "../lib/proto-safe-record.js";
@@ -261,6 +262,8 @@ export function register(program: Command): void {
     .option("--api-key-file <path>", "For API bridges with an apiKey option, read the key from a file that has no group/world permissions (chmod 600 recommended); or, if the bridge declares an environment variable, set that instead (e.g. MEM0_API_KEY).")
     .action(async (name: string, srcArg: string | undefined, opts) => {
       const agentId: string | undefined = opts.agent ?? process.env.FLAIR_AGENT_ID;
+      if (opts.agent !== undefined) requireAgentId(opts.agent);
+      else if (agentId) requireAgentId(agentId);
       const cwd: string = opts.cwd ?? srcArg ?? process.cwd();
 
       const { discover } = await import("../bridges/discover.js");
@@ -430,6 +433,9 @@ export function register(program: Command): void {
           });
         }
       } catch (err: any) {
+        // The shared agent-ID refusal prints its own message, as it does when
+        // the flag or environment id is checked above.
+        if (err instanceof AgentKeyPathRefusal) throw err;
         if (err instanceof BridgeRuntimeError) {
           printBridgeError(err, bridgeApiKey);
           process.exit(1);
@@ -457,6 +463,7 @@ export function register(program: Command): void {
         console.error("error: --agent <id> required (or set FLAIR_AGENT_ID)");
         process.exit(1);
       }
+      requireAgentId(agentId);
       const cwd: string = opts.cwd ?? dst;
 
       const { discover } = await import("../bridges/discover.js");

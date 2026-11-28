@@ -7,6 +7,7 @@
  */
 import { existsSync, lstatSync, readdirSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { invalidAgentIdMessage, isValidAgentId } from "./agent-id-rule.js";
 import { resolveHome } from "./home.js";
 
 export type KeyDirEntryKind = "dir" | "other" | "key";
@@ -63,11 +64,52 @@ export function agentKeyLocations(): KeyLocation[] {
   return locations;
 }
 
+/** A refusal for an agent id that cannot name a key file: the id is checked
+ *  before it is joined into a path. Callers map it to their own error style. */
+export class AgentKeyPathRefusal extends Error {
+  readonly code = "invalid_agent_id" as const;
+  /** The CLI prints the message alone and exits 1 when a command lets it propagate. */
+  readonly flairFriendly = true;
+  constructor(message: string) {
+    super(message);
+    this.name = "AgentKeyPathRefusal";
+  }
+}
+
+/** Apply the shared agent-ID rule to an id a command is about to sign as. */
+export function requireAgentId(agentId: string): void {
+  if (!isValidAgentId(agentId)) throw new AgentKeyPathRefusal(invalidAgentIdMessage(agentId));
+}
+
+/**
+ * The private-key path for `agentId`; the shared agent-ID rule runs before
+ * the join.
+ */
+export function agentKeyPath(keysDir: string, agentId: string): string {
+  requireAgentId(agentId);
+  return join(keysDir, `${agentId}.key`);
+}
+
+/** The public-key path for `agentId`; the shared agent-ID rule runs before
+ *  the join. */
+export function agentPubKeyPath(keysDir: string, agentId: string): string {
+  requireAgentId(agentId);
+  return join(keysDir, `${agentId}.pub`);
+}
+
 /** The path signing reads for `agentId` in `location`. */
 export function keyPathIn(location: KeyLocation, agentId: string): string {
+  requireAgentId(agentId);
   return join(location.dir, `${agentId}${location.suffix}`);
 }
 
+
+/** The legacy `~/.tps/secrets/flair/<id>-priv.key` signing key for `agentId`;
+ *  the shared agent-ID rule runs before the join. */
+export function legacyAgentKeyPath(agentId: string): string {
+  requireAgentId(agentId);
+  return join(resolveHome(), ".tps", "secrets", "flair", `${agentId}-priv.key`);
+}
 
 function errorCode(error: unknown): string {
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
@@ -185,7 +227,7 @@ const NODE_KEY_ID_RE = /^flair_[0-9a-f]{8}$/;
 /** Match node-shaped ids without a sibling .pub; file type is unproven. */
 export function isNodeKeyId(id: string, keysDir: string): boolean {
   if (!NODE_KEY_ID_RE.test(id)) return false;
-  return !existsSync(join(keysDir, `${id}.pub`));
+  return !existsSync(agentPubKeyPath(keysDir, id));
 }
 
 /**

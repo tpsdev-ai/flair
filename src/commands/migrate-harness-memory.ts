@@ -14,6 +14,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync } from "no
 
 import { join, resolve, sep } from "node:path";
 import { resolveHome } from "../lib/home.js";
+import { agentKeyPath } from "../lib/key-dir.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 
 export type MigrateHarnessMemoryCli = {
@@ -146,7 +147,15 @@ program
     const target = opts.target;
     const agentId = opts.agent;
     const dryRun = !!opts.dryRun;
-    
+
+    let keyPath: string;
+    try {
+      keyPath = agentKeyPath(join(resolveHome(), ".flair", "keys"), agentId);
+    } catch (err) {
+      console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+
     let memoryDir: string;
     try {
       memoryDir = resolveMemoryDir(target, agentId);
@@ -235,9 +244,6 @@ program
         console.log(`    Writing to Flair...`);
         try {
           const httpUrl = `http://127.0.0.1:${resolveHttpPort({})}`;
-          const agentKeyId = `${agentId}.key`;
-          const keysDir = join(resolveHome(), ".flair", "keys");
-          const keyPath = join(keysDir, agentKeyId);
           
           let authSuccess = false;
           if (existsSync(keyPath)) {
