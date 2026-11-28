@@ -110,8 +110,9 @@ function writeDefaultExport(outputPath: string, content: string, mode: number): 
   try {
     defaultExportWriteOps.write(fd, content);
     defaultExportWriteOps.fsync(fd);
-    defaultExportWriteOps.close(fd);
+    const owned = fd;
     fd = undefined;
+    defaultExportWriteOps.close(owned);
     try {
       defaultExportWriteOps.link(tempPath, outputPath);
     } catch (err) {
@@ -127,7 +128,7 @@ function writeDefaultExport(outputPath: string, content: string, mode: number): 
       try {
         defaultExportWriteOps.close(fd);
       } catch {
-        // The original write, fsync or close failure is what this call reports.
+        // The original write or fsync failure is what this call reports.
       }
     }
     removeExportTemp(tempPath);

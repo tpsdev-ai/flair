@@ -80,7 +80,7 @@ function keyMaterial(home: string): void {
   writeFileSync(join(home, "keys", `${AGENT}.key`), "fixture-key-material\n");
 }
 
-async function expectSeamFailureLeavesNoFile(mode: string, injectedMessage: string): Promise<void> {
+async function expectSeamFailureLeavesNoFile(mode: string, injectedMessage: string): Promise<string> {
   const home = tempDir("flair-3136-write-home-");
   const exportsDir = join(home, ".flair", "exports");
   const seamLog = join(home, "seam.log");
@@ -98,6 +98,7 @@ async function expectSeamFailureLeavesNoFile(mode: string, injectedMessage: stri
   const second = await runCli(exportArgs(home), home);
   expect(second.code, `${second.stdout}${second.stderr}`).toBe(0);
   expect(JSON.parse(readFileSync(defaultPathFor(home), "utf8")).agent.id).toBe(AGENT);
+  return readFileSync(seamLog, "utf8");
 }
 
 beforeAll(() => {
@@ -181,7 +182,8 @@ describe("flair export: the default output is published with a temp file and a h
   }, 120_000);
 
   test("an injected close failure through the module seam reports that failure and leaves no file, and the next run succeeds", async () => {
-    await expectSeamFailureLeavesNoFile("close", "injected export close failure");
+    const seam = await expectSeamFailureLeavesNoFile("close", "injected export close failure");
+    expect(seam.split("\n").filter((line) => /^close \d+$/.test(line))).toHaveLength(1);
   }, 120_000);
 
   test("an injected link failure through the module seam leaves no file and no temp, and the next run succeeds", async () => {
