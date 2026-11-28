@@ -80,7 +80,7 @@ function keyMaterial(home: string): void {
   writeFileSync(join(home, "keys", `${AGENT}.key`), "fixture-key-material\n");
 }
 
-async function expectSeamFailureLeavesNoFile(mode: string): Promise<void> {
+async function expectSeamFailureLeavesNoFile(mode: string, injectedMessage: string): Promise<void> {
   const home = tempDir("flair-3136-write-home-");
   const exportsDir = join(home, ".flair", "exports");
   const seamLog = join(home, "seam.log");
@@ -91,6 +91,7 @@ async function expectSeamFailureLeavesNoFile(mode: string): Promise<void> {
     MOCK_EXPORT_SEAM_LOG: seamLog,
   });
   expect(first.code, `${first.stdout}${first.stderr}`).not.toBe(0);
+  expect(first.stderr).toContain(injectedMessage);
   expect(readdirSync(exportsDir)).toEqual([]);
   expect(readFileSync(seamLog, "utf8")).toMatch(/^close \d+$/m);
 
@@ -172,15 +173,19 @@ describe("flair export: the default output is published with a temp file and a h
   }, 60_000);
 
   test("an injected write failure through the module seam leaves no file and no temp, and the next run succeeds", async () => {
-    await expectSeamFailureLeavesNoFile("write");
+    await expectSeamFailureLeavesNoFile("write", "injected export write failure");
   }, 120_000);
 
   test("an injected fsync failure through the module seam leaves no file and no temp, and the next run succeeds", async () => {
-    await expectSeamFailureLeavesNoFile("fsync");
+    await expectSeamFailureLeavesNoFile("fsync", "injected export fsync failure");
+  }, 120_000);
+
+  test("an injected close failure through the module seam reports that failure and leaves no file, and the next run succeeds", async () => {
+    await expectSeamFailureLeavesNoFile("close", "injected export close failure");
   }, 120_000);
 
   test("an injected link failure through the module seam leaves no file and no temp, and the next run succeeds", async () => {
-    await expectSeamFailureLeavesNoFile("link");
+    await expectSeamFailureLeavesNoFile("link", "injected export link failure");
   }, 120_000);
 
   test("an injected temp-removal failure through the module seam reports the temp path in stderr", async () => {

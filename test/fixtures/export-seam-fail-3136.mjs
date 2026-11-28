@@ -29,6 +29,12 @@ if (mode === "fsync") {
     throw new Error("injected export fsync failure");
   };
 }
+if (mode === "close") {
+  ops.close = (fd) => {
+    record(`close ${fd}`);
+    throw new Error("injected export close failure");
+  };
+}
 if (mode === "link") {
   ops.link = () => {
     throw new Error("injected export link failure");
