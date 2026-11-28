@@ -41,6 +41,13 @@
  * for all of them, which is one more thing to rot. A file that does not carry
  * the monorepo version is a file the release must not touch.
  *
+ * When a file legitimately declares a constant whose name matches the version
+ * pattern (e.g. a minimum server version capability) and whose value happens to
+ * match the target release, it can be listed in NON_RELEASE_VERSION_CONSTANTS
+ * with a documented rationale so it is not treated as a release declaration site.
+ * Listed constants are guarded against staleness: an entry whose identifier no
+ * longer exists in its file fails the check.
+ *
  * Usage:
  *   node scripts/check-version-sync.mjs             verify against root package.json
  *   node scripts/check-version-sync.mjs 0.31.0      verify everything is at 0.31.0
@@ -73,10 +80,14 @@ import {
 // falls back to a recursive walk of the root — every file of the candidate.
 const ARGV = process.argv.slice(2);
 function argValue(name) {
-  const i = ARGV.indexOf(name);
-  return i >= 0 ? ARGV[i + 1] : undefined;
+  for (let i = 0; i < ARGV.length; i++) {
+    if (ARGV[i] === name) return ARGV[i + 1];
+    if (ARGV[i].startsWith(`${name}=`)) return ARGV[i].slice(name.length + 1);
+  }
+  return undefined;
 }
 const ROOT_ARG = argValue("--root") ?? process.env.VERSION_SYNC_ROOT;
+const NON_RELEASE_ARG = argValue("--non-release-constants") ?? process.env.VERSION_SYNC_NON_RELEASE_CONSTANTS;
 const LIST_ONLY = ARGV.includes("--list");
 const REPO_ROOT = ROOT_ARG ? resolve(ROOT_ARG) : join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -125,6 +136,43 @@ const SOURCE_VERSION_FILES = [
 
 const INVENTORY = new Set([...PACKAGE_JSONS, ...SOURCE_VERSION_FILES.map((f) => f.path)]);
 
+// --- Non-release version constants -------------------------------------------
+
+/**
+ * Constants whose names look like version declarations (matching
+ * VERSION_DECLARATION) but are not release version declarations — e.g. a
+ * minimum server version capability or protocol minimum.
+ *
+ * Each entry names:
+ *   - file: repo-relative path (forward slashes)
+ *   - identifier: the exact constant/variable name
+ *   - reason: documented rationale explaining why this is not a release site
+ *
+ * An entry whose identifier is not found in its file fails the check (staleness
+ * guard), so this list cannot drift or accumulate dead entries.
+ */
+export const NON_RELEASE_VERSION_CONSTANTS = [];
+
+export function loadNonReleaseConstants(customArg = NON_RELEASE_ARG) {
+  if (!customArg) {
+    return NON_RELEASE_VERSION_CONSTANTS;
+  }
+  try {
+    const trimmed = customArg.trim();
+    if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+      const parsed = JSON.parse(trimmed);
+      return Array.isArray(parsed) ? parsed : [parsed];
+    }
+    const absPath = resolve(REPO_ROOT, trimmed);
+    const content = readFileSync(absPath, "utf8");
+    const parsed = JSON.parse(content);
+    return Array.isArray(parsed) ? parsed : [parsed];
+  } catch (err) {
+    console.error(`❌ Could not load non-release constants from "${customArg}": ${err.message}`);
+    process.exit(1);
+  }
+}
+
 // --- Discovery scope ---------------------------------------------------------
 
 // Excluded from the scan, with the reason each is not a declaration site:
@@ -147,7 +195,8 @@ const MAX_SCAN_BYTES = 2 * 1024 * 1024;
 /**
  * A version *declaration*: an identifier ending in "version" (case-insensitive,
  * so both `version` and `TOOL_VERSION` match), optionally quoted, then `:` or
- * `=`, then a semver. Capture group 1 is the declared version.
+ * `=`, then a semver. Capture group 1 is the identifier name; capture group 2
+ * is the declared version.
  *
  * This is a fixed literal rather than a pattern built around the version we are
  * looking for. Interpolating the version would mean escaping it, and would
@@ -156,12 +205,25 @@ const MAX_SCAN_BYTES = 2 * 1024 * 1024;
  * and more exact: no escaping, no regex metacharacter surface, and no chance of
  * "0.30.0" matching inside "0.30.01".
  */
-const VERSION_DECLARATION =
-  /(?:^|\W)['"]?[\w$]*version[\w$]*['"]?\s*[:=]\s*['"]?(\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?)(?![\d.])/gi;
+export const VERSION_DECLARATION =
+  /(?:^|\W)['"]?([\w$]*version[\w$]*)['"]?\s*[:=]\s*['"]?(\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?)(?![\d.])/gi;
 
-function declaresVersion(text, expected) {
+export function declaresVersion(path, text, expected, nonReleaseConstants = []) {
+  const normPath = path.replace(/\\/g, "/");
+  const allowed = nonReleaseConstants.filter(
+    (entry) => entry.file.replace(/\\/g, "/") === normPath,
+  );
+
   for (const m of text.matchAll(VERSION_DECLARATION)) {
-    if (m[1] === expected) return true;
+    const identifier = m[1];
+    const declared = m[2];
+    if (declared !== expected) continue;
+
+    // A documented non-release constant in this file is skipped
+    const isAllowed = allowed.some((entry) => entry.identifier === identifier);
+    if (!isAllowed) {
+      return true;
+    }
   }
   return false;
 }
@@ -308,7 +370,23 @@ function write(version) {
   }
 }
 
-function verify(expected) {
+function hasIdentifier(text, identifier) {
+  let index = text.indexOf(identifier);
+  while (index !== -1) {
+    const before = index > 0 ? text[index - 1] : "";
+    const after = index + identifier.length < text.length ? text[index + identifier.length] : "";
+    const isWordChar = (c) =>
+      (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c === "_" || c === "$";
+    if (!isWordChar(before) && !isWordChar(after)) {
+      return true;
+    }
+    index = text.indexOf(identifier, index + 1);
+  }
+  return false;
+}
+
+export function verify(expected, customNonReleaseConstants) {
+  const nonReleaseConstants = customNonReleaseConstants ?? loadNonReleaseConstants();
   const problems = [];
 
   // 1. Inventory: every listed declaration must be at `expected`.
@@ -327,7 +405,27 @@ function verify(expected) {
     }
   }
 
-  // 2. Discovery: nothing off-inventory may declare `expected`.
+  // 2. Non-release constants: staleness guard.
+  // Every entry in nonReleaseConstants must exist in its file; if a constant was
+  // removed, renamed, or its file deleted, fail closed so the list cannot drift.
+  for (const entry of nonReleaseConstants) {
+    const normFile = entry.file.replace(/\\/g, "/");
+    const absPath = join(REPO_ROOT, normFile);
+    const text = readTextOrNull(absPath);
+    if (text === null) {
+      problems.push(
+        `non-release constant "${entry.identifier}" in ${normFile} could not be read or does not exist (${entry.reason})`,
+      );
+      continue;
+    }
+    if (!hasIdentifier(text, entry.identifier)) {
+      problems.push(
+        `stale non-release constant: "${entry.identifier}" was not found in ${normFile} (${entry.reason})`,
+      );
+    }
+  }
+
+  // 3. Discovery: nothing off-inventory may declare `expected`.
   const files = trackedFiles();
   if (files.length === 0) {
     console.error("❌ git ls-files returned nothing — this check cannot run, and must not pass silently.");
@@ -346,7 +444,7 @@ function verify(expected) {
       skipped.push(path);
       continue;
     }
-    if (declaresVersion(text, expected)) hits.push(path);
+    if (declaresVersion(path, text, expected, nonReleaseConstants)) hits.push(path);
   }
 
   // Positive control. The inventory files themselves declare `expected`, so a
@@ -400,31 +498,40 @@ function verify(expected) {
 
 // --- Entry -------------------------------------------------------------------
 
-// Positional args, with `--root <dir>` and `--list` removed.
+// Positional args, with `--root <dir>`, `--non-release-constants <arg>`, and `--list` removed.
 const argv = [];
 for (let i = 0; i < ARGV.length; i++) {
-  if (ARGV[i] === "--root") {
+  if (ARGV[i] === "--root" || ARGV[i] === "--non-release-constants") {
     i++;
+    continue;
+  }
+  if (ARGV[i].startsWith("--root=") || ARGV[i].startsWith("--non-release-constants=")) {
     continue;
   }
   if (ARGV[i] === "--list") continue;
   argv.push(ARGV[i]);
 }
 
-if (LIST_ONLY) {
-  // The inventory, one path per line. Condition 7b uses it as the allowed set
-  // for the release PR's changed files; condition 6 no longer materialises from
-  // it — the whole candidate tree is extracted as data and walked.
-  for (const path of [...PACKAGE_JSONS, ...SOURCE_VERSION_FILES.map((f) => f.path)]) console.log(path);
-  process.exit(0);
-} else if (argv[0] === "--write") {
-  const version = argv[1];
-  if (!version) {
-    console.error("Usage: check-version-sync.mjs --write <version>");
-    process.exit(1);
+const thisFile = fileURLToPath(import.meta.url);
+const invokedAs = process.argv[1] ? resolve(process.argv[1]) : null;
+const isMain = invokedAs !== null && thisFile === invokedAs;
+
+if (isMain) {
+  if (LIST_ONLY) {
+    // The inventory, one path per line. Condition 7b uses it as the allowed set
+    // for the release PR's changed files; condition 6 no longer materialises from
+    // it — the whole candidate tree is extracted as data and walked.
+    for (const path of [...PACKAGE_JSONS, ...SOURCE_VERSION_FILES.map((f) => f.path)]) console.log(path);
+    process.exit(0);
+  } else if (argv[0] === "--write") {
+    const version = argv[1];
+    if (!version) {
+      console.error("Usage: check-version-sync.mjs --write <version>");
+      process.exit(1);
+    }
+    write(version);
+  } else {
+    const expected = argv[0] ?? JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")).version;
+    verify(expected);
   }
-  write(version);
-} else {
-  const expected = argv[0] ?? JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")).version;
-  verify(expected);
 }
