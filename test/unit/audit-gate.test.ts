@@ -1487,7 +1487,8 @@ describe("cumulative allowlist lifetime (#2897)", () => {
       const firstDays = readFixtureHistory(root);
       expect(validateAllowlist({ policy, entries: [renewed] }, new Date("2026-09-21"))).toEqual([]);
       const problems = validateAllowlistHistory({ policy, entries: [renewed] }, firstDays, new Date("2026-09-21"));
-      expect(problems.join("\n")).toContain("first day this advisory appears in parsed allowlist history (2026-09-01)");
+      expect(problems.join("\n")).toContain("the advisory's first history day (2026-09-01)");
+      expect(problems.join("\n")).not.toContain("the earliest day its id appears");
       expect(problems.join("\n")).toContain("lifetime cap:");
       expect(firstDays.get(GHSA.toUpperCase())).toBe("2026-09-01");
       expect(validateAllowlist({ policy, entries: [{ ...renewed, added: firstDays.get(GHSA.toUpperCase()) }] }, new Date("2026-09-21")).join("\n"))
@@ -1573,7 +1574,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
   });
 
   for (const first of ["2026-09-10", "2030-01-01"]) {
-    it(`keeps first introduction ${first} through removal and an earlier-dated reintroduction`, () => {
+    it(`keeps first history day ${first} through removal and an earlier-dated reintroduction`, () => {
       const root = historyRepo([
         { date: `${first}T12:00:00Z`, entries: [entry()] },
         { date: "2026-09-15T12:00:00Z", entries: [] },
@@ -1592,7 +1593,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
     });
   }
 
-  it("reads first appearance from a side-branch commit merged later", () => {
+  it("reads the first history day from a side-branch commit merged later", () => {
     const root = mkdtempSync(join(tmpdir(), "flair-audit-merge-"));
     try {
       gitAt(root, "2026-09-01T12:00:00Z", ["init", "-q", "-b", "main"]);
@@ -1613,7 +1614,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
     }
   });
 
-  it("keeps an introduction day when a descendant has an earlier committer date", () => {
+  it("keeps a first history day when a descendant has an earlier committer date", () => {
     const root = historyRepo([
       { date: "2026-09-10T12:00:00Z", entries: [entry()] },
       { date: "2026-08-01T12:00:00Z", entries: [entry()] },
@@ -1700,11 +1701,11 @@ describe("cumulative allowlist lifetime (#2897)", () => {
     try {
       const firstDays = readFixtureHistory(root);
       expect(firstDays.get(GHSA.toUpperCase())).toBe("2026-09-01");
-      expect(
-        validateAllowlistHistory({ entries: [entry({ added: "2026-09-20" })] }, firstDays, new Date("2026-09-21")).join("\n"),
-      ).toContain(
-        '"added" (2026-09-20) is later than the first day this advisory appears in parsed allowlist history (2026-09-01)',
+      const problems = validateAllowlistHistory({ entries: [entry({ added: "2026-09-20" })] }, firstDays, new Date("2026-09-21"));
+      expect(problems.join("\n")).toContain(
+        '"added" (2026-09-20) is later than the advisory\'s first history day (2026-09-01)',
       );
+      expect(problems.join("\n")).not.toContain("the earliest day its id appears");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1718,13 +1719,13 @@ describe("cumulative allowlist lifetime (#2897)", () => {
     try {
       const firstDays = readFixtureHistory(root);
       expect(firstDays.get(GHSA.toUpperCase())).toBe("2026-09-01");
-      expect(
-        validateAllowlistHistory(
-          { entries: [entry({ package: "pkg-b", sources: ["npm-install"], added: "2026-09-20" })] },
-          firstDays,
-          new Date("2026-09-21"),
-        ).join("\n"),
-      ).toContain("is later than the first day this advisory appears in parsed allowlist history (2026-09-01)");
+      const problems = validateAllowlistHistory(
+        { entries: [entry({ package: "pkg-b", sources: ["npm-install"], added: "2026-09-20" })] },
+        firstDays,
+        new Date("2026-09-21"),
+      );
+      expect(problems.join("\n")).toContain("is later than the advisory's first history day (2026-09-01)");
+      expect(problems.join("\n")).not.toContain("the earliest day its id appears");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1739,9 +1740,9 @@ describe("cumulative allowlist lifetime (#2897)", () => {
     try {
       const firstDays = readFixtureHistory(root);
       expect(firstDays.get(GHSA.toUpperCase())).toBe("2026-09-01");
-      expect(
-        validateAllowlistHistory({ entries: [entry({ added: "2026-09-20" })] }, firstDays, new Date("2026-09-21")).join("\n"),
-      ).toContain("first day this advisory appears in parsed allowlist history (2026-09-01)");
+      const problems = validateAllowlistHistory({ entries: [entry({ added: "2026-09-20" })] }, firstDays, new Date("2026-09-21"));
+      expect(problems.join("\n")).toContain("the advisory's first history day (2026-09-01)");
+      expect(problems.join("\n")).not.toContain("the earliest day its id appears");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1766,7 +1767,7 @@ describe("cumulative allowlist lifetime (#2897)", () => {
       ).toEqual([]);
       expect(
         validateAllowlistHistory({ entries: [entry({ ghsa: NEW_GHSA, added: "2026-09-16" })] }, firstDays, new Date("2026-09-15")).join("\n"),
-      ).toContain("today (2026-09-15), and no parsed snapshot contained this advisory id");
+      ).toContain("today (2026-09-15), because the advisory has no first history day in parsed allowlist history");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
