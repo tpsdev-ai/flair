@@ -50,6 +50,7 @@ import { componentWithoutMigrationBoot, type ComposedComponent } from "../helper
 import { ensureCliBuild, spawnCli } from "../helpers/build-cli-once";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 import { currentSeed, runSkillSeed, SEED_SKILL_ID, skillSeedRestIo } from "../../src/lib/skill-seed.js";
+import { invalidAgentIdMessage } from "../../src/lib/agent-id-rule.js";
 
 const AGENT_A = "r3o-agent-a";
 const AGENT_B = "r3o-agent-b";
@@ -597,20 +598,18 @@ test("keyless single-agent excludes other agents' listed rows from the candidate
   }
 }, 240_000);
 
-test("an agent id with a newline renders as one failure entry line", async () => {
+test("an agent id with a newline is refused before any request", async () => {
   await op({
     operation: "insert",
     database: "flair",
     table: "Memory",
     records: [memoryRow(NEWLINE_ROW, NEWLINE_AGENT, "public")],
   });
-  const { code, stdout, stderr } = await runReembed(["reembed", "--agent", NEWLINE_AGENT], homeNewline, true);
+  const { code, stdout, stderr, fetches } = await runReembed(["reembed", "--agent", NEWLINE_AGENT], homeNewline, true);
   expect(code, stderr.slice(0, 800)).toBe(1);
-  const entry = stdout.split("\n").find((line) => line.includes("row(s) update unconfirmed:"));
-  expect(entry).toBeDefined();
-  expect(entry).toContain("same agent ID");
-  expect(entry).toContain(`--port ${realHttpPort()} --ops-port ${realOpsPort()}`);
-  expect(entry).not.toContain("`flair reembed");
+  expect(stderr).toContain(invalidAgentIdMessage(NEWLINE_AGENT));
+  expect(stdout).not.toContain("row(s) update unconfirmed");
+  expect(fetches).toEqual([]);
 }, 240_000);
 
 test("the seeded rows are current after the runs (the re-embeds the assertions relied on)", async () => {

@@ -501,6 +501,31 @@ describe("wait-for-harper.mjs", () => {
   );
 
   test(
+    "(g2) an inspect that exits with an error is reported as one when the time left is below the per-request cap",
+    async () => {
+      const server = await health(STATUS(200));
+      const box = sandbox({ inspectFails: true });
+      const result = await run(box, [
+        "--container",
+        "harper-flair",
+        "--url",
+        server.url,
+        "--per-request-ms",
+        "10000",
+        "--budget-seconds",
+        "5",
+      ]);
+
+      expect(result.status).toBe(1);
+      expect(result.output).toContain("cannot inspect container 'harper-flair'");
+      expect(result.output).toContain("docker stub: cannot inspect");
+      expect(result.output).not.toContain("Harper was not ready");
+      expect(server.requests()).toBe(0);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  test(
     "(h) the credential is a request header, and its value is absent from the docker children and printed output",
     async () => {
       const server = await health(STATUS(200));
@@ -747,6 +772,34 @@ describe("wait-for-harper.mjs", () => {
       // request reaches the server.
       expect(server.requests()).toBe(1);
       expect(server.authorizations).toHaveLength(0);
+    },
+    CASE_TIMEOUT_MS,
+  );
+
+  test(
+    "(p2) a first inspect killed at a bound that was the time left is a timeout, not an inspect failure",
+    async () => {
+      // The waiter's clock runs at half speed, so when the stalled inspect is
+      // killed at its bound (the time left), the waiter's clock still reads
+      // about half a second before the deadline.
+      const server = await health(STATUS(200));
+      const box = sandbox({ inspectSleep: true });
+      const clock = join(box.root, "half-speed-clock.cjs");
+      writeFileSync(
+        clock,
+        "const real = performance.now.bind(performance);\nconst t0 = real();\nperformance.now = () => t0 + (real() - t0) / 2;\n",
+      );
+      const result = await run(
+        box,
+        ["--container", "harper-flair", ...WAIT_ARGS(server.url), "--budget-seconds", "1"],
+        { NODE_OPTIONS: `--require ${JSON.stringify(clock)}` },
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.output).toContain("Harper was not ready within 1s; last /Health result: no response");
+      expect(result.output).not.toContain("cannot inspect container");
+      // Only the unauthenticated diagnostic request reaches the server.
+      expect(server.requests()).toBe(1);
     },
     CASE_TIMEOUT_MS,
   );

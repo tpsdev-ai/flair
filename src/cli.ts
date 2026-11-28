@@ -148,6 +148,7 @@ import {
   type ResolvedSigningIdentity,
   type SigningIdentitySource,
 } from "./lib/signing-identity.js";
+import { AgentKeyPathRefusal, agentKeyPath, agentPubKeyPath } from "./lib/key-dir.js";
 import { validateSnapshotArchive, extractSnapshotSafely } from "./lib/safe-snapshot-extract.js";
 import { entityFormatHint, parseEntitiesCsv } from "./lib/entity-vocab-cli.js";
 import { escapeXml, unescapeXml } from "./lib/xml-escape.js";
@@ -2618,11 +2619,11 @@ function persistDefaultInstallCoordinates(dataDir: string, port: number, opsPort
 }
 
 function privKeyPath(agentId: string, keysDir: string): string {
-  return join(keysDir, `${agentId}.key`);
+  return agentKeyPath(keysDir, agentId);
 }
 
 function pubKeyPath(agentId: string, keysDir: string): string {
-  return join(keysDir, `${agentId}.pub`);
+  return agentPubKeyPath(keysDir, agentId);
 }
 
 
@@ -3013,7 +3014,7 @@ export interface ProbeSigningIdentity {
 /** `<keysDir>/<id>.key` — the fallback key location for tests and non-standard
  *  key dirs; the standard `resolveKeyPath` lookup is always tried first. */
 function fallbackKeyPath(keysDir: string, agentId: string): string | null {
-  const candidate = join(keysDir, `${agentId}.key`);
+  const candidate = agentKeyPath(keysDir, agentId);
   return existsSync(candidate) ? candidate : null;
 }
 
@@ -3052,7 +3053,7 @@ export async function resolveProbeSigningIdentity(
   } catch { /* keysDir missing */ }
   const candidates = keyFiles
     .map((f) => f.replace(/\.key$/, ""))
-    .filter((id) => !isNodeKeyId(id, keysDir));
+    .filter((id) => isValidAgentId(id) && !isNodeKeyId(id, keysDir));
   if (candidates.length === 0) {
     return { agentId: null, source: "none", detail: "no agent id or key found" };
   }
@@ -3465,10 +3466,16 @@ export async function checkAgentRegistered(
   agentId: string,
   keysDir: string,
 ): Promise<{ state: AgentGateState; detail?: string }> {
-  let keyPath = resolveKeyPath(agentId);
-  if (!keyPath) {
-    const candidate = join(keysDir, `${agentId}.key`);
-    if (existsSync(candidate)) keyPath = candidate;
+  let keyPath: string | null;
+  try {
+    keyPath = resolveKeyPath(agentId);
+    if (!keyPath) {
+      const candidate = agentKeyPath(keysDir, agentId);
+      if (existsSync(candidate)) keyPath = candidate;
+    }
+  } catch (err) {
+    if (err instanceof AgentKeyPathRefusal) return { state: "no-key", detail: err.message };
+    throw err;
   }
   if (!keyPath) {
     return { state: "no-key", detail: `no local key for agent '${agentId}' to sign the check` };

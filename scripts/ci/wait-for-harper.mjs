@@ -13,7 +13,8 @@
 // once more before it reports ready. A dead container detected before the
 // deadline stops polling; the waiter prints the exit code and attempts
 // `docker logs`, reporting a logs error if that fails. An inspect that reports
-// not running after the deadline ends the wait as a timeout.
+// not running after the deadline ends the wait as a timeout, and so does a
+// first inspect killed at a bound that was the time left.
 //
 // Usage:
 //   node wait-for-harper.mjs --container <name> --url <health-url>
@@ -301,11 +302,14 @@ export async function main(options) {
   for (;;) {
     if (remaining() <= 0) break;
 
+    const leftMs = remaining();
     let state;
     try {
-      state = await inspectContainer(container, Math.min(perRequestMs, remaining()), childEnv);
+      state = await inspectContainer(container, Math.min(perRequestMs, leftMs), childEnv);
     } catch (error) {
-      if (remaining() <= 0) break;
+      // Killed at a bound that was the time left: the budget ended, not the
+      // inspect, even when the clock still reads before the deadline.
+      if (remaining() <= 0 || (error?.killed === true && leftMs <= perRequestMs)) break;
       console.error(`wait-for-harper: cannot inspect container '${container}': ${redact(errorText(error), secrets)}`);
       return 1;
     }
