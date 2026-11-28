@@ -377,12 +377,14 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
   const trackKeyFile = (path: string, identity: KeyFileIdentity) => {
     createdKeyFiles.push({ path, dev: identity.dev, ino: identity.ino });
   };
-  // The row belongs to this grant only when the insert's result body names THIS
-  // id in `inserted_hashes` and not in `skipped_hashes`. A 2xx alone does not:
-  // Harper answers 2xx with the id skipped when the row already exists, so a
-  // status read as a create could later delete an Agent this grant did not
-  // create. Until the body confirms it, no delete is safe: an error, a timeout,
-  // a transport failure or an unconfirmed result leaves existence unknown.
+  // The row belongs to this grant only when the insert's result body confirms
+  // THIS id through the one shared rule every verified write uses: a readable
+  // body names it in `inserted_hashes`, does not name it in `skipped_hashes`
+  // and carries no `error`. A 2xx alone does not: Harper answers 2xx with the
+  // id skipped when the row already exists, so a status read as a create could
+  // later delete an Agent this grant did not create. Until the body confirms
+  // it, no delete is safe: an error, a timeout, a transport failure or an
+  // unconfirmed result leaves existence unknown.
   let insertState: "not-sent" | "sent" | "acknowledged" = "not-sent";
   try {
     createAgentKeyFile(privPath, Buffer.from(seed), trackKeyFile);
@@ -421,12 +423,8 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
       const text = await insertRes.text().catch(() => "");
       throw new Error(`Failed to create Agent '${name}' via operations API (${insertRes.status}): ${text}`);
     }
-    const insertBody = (await insertRes.json().catch(() => null)) as
-      | { inserted_hashes?: unknown[]; skipped_hashes?: unknown[] }
-      | null;
-    const inserted = Array.isArray(insertBody?.inserted_hashes) && insertBody.inserted_hashes.map(String).includes(name);
-    const insertSkipped = Array.isArray(insertBody?.skipped_hashes) && insertBody.skipped_hashes.map(String).includes(name);
-    if (!inserted || insertSkipped) {
+    const insertBody = (await insertRes.json().catch(() => null)) as unknown;
+    if (!writeConfirmed(insertBody, "inserted_hashes", name)) {
       throw new Error(
         `Failed to create Agent '${name}' via operations API (${insertRes.status}): the result body did not confirm that this insert created the row`,
       );
@@ -455,7 +453,8 @@ export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps 
     // replaced between that check and the unlink can still be removed; a POSIX
     // unlink by name cannot close that window. A path that no longer names the
     // created file, or whose check or unlink fails with an error other than
-    // ENOENT, is named in the error; a created file moved to another name is
+    // ENOENT, is named in the error; an absent path (ENOENT) is treated as
+    // already gone and not reported; a created file moved to another name is
     // not tracked.
     const cleanupCreatedKeyFiles = (): string[] => {
       const leftBehind: string[] = [];

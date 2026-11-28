@@ -354,7 +354,7 @@ describe("flair#3077 slice C — mcp grant against a real Harper", () => {
     }
 
     expect(thrown).toBeDefined();
-    expect(insertBody?.skipped_hashes).toContain(client);
+    expect(insertBody?.skipped_hashes).toEqual([client]);
     expect(thrown!.message).toContain("outcome is unknown");
     expect(deletes).toHaveLength(0);
     expect(existsSync(join(keysDir, `${client}.key`))).toBe(true);

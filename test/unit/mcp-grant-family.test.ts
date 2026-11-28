@@ -56,17 +56,25 @@ afterEach(() => {
 
 /** Mock ops-API fetch: search_by_value → configurable existing-agent set;
  *  insert → 200 with Harper's `inserted_hashes`/`skipped_hashes` shape unless
- *  failInsert; delete → 200 with `deleted_hashes`/`skipped_hashes` unless
- *  failDelete. Captures every request body for assertions. `committed` is the
- *  set of Agent ids the mock's insert stored, including the failInsertAfterCommit
- *  case where the row is stored but the response is an error. */
+ *  failInsert (500 without storing), failInsertAfterCommit (500 after storing),
+ *  skipInsert (the id in both arrays), insertResultBody (a caller-supplied body)
+ *  or insertResultText (a caller-supplied, possibly unreadable, body);
+ *  delete → 200 with `deleted_hashes`/`skipped_hashes` unless failDelete (500),
+ *  skipDelete (empty `deleted_hashes`), networkErrorOnDelete or a caller-supplied
+ *  deleteResultBody. Captures every request body for assertions. `committed` is
+ *  the set of Agent ids the mock's insert stored, including the
+ *  failInsertAfterCommit case where the row is stored but the response is an
+ *  error. */
 function mockOpsFetch(opts: {
   existingAgentIds?: Set<string>;
   failInsert?: boolean;
   failInsertAfterCommit?: boolean;
   skipInsert?: boolean;
+  insertResultBody?: unknown;
+  insertResultText?: string;
   failDelete?: boolean;
   skipDelete?: boolean;
+  deleteResultBody?: unknown;
   networkErrorOnDelete?: boolean;
 } = {}): { fetchImpl: typeof fetch; calls: any[]; committed: Set<string> } {
   const calls: any[] = [];
@@ -87,8 +95,14 @@ function mockOpsFetch(opts: {
       }
       if (opts.failInsert) return new Response("insert failed", { status: 500 });
       const ids = (body.records ?? []).map((record: { id: string }) => record.id);
+      if (opts.insertResultText !== undefined) return new Response(opts.insertResultText, { status: 200 });
+      if (opts.insertResultBody !== undefined) {
+        return new Response(JSON.stringify(opts.insertResultBody), { status: 200 });
+      }
       if (opts.skipInsert) {
-        return new Response(JSON.stringify({ inserted_hashes: [], skipped_hashes: ids }), { status: 200 });
+        // The id appears in BOTH arrays: only the shared skipped check keeps
+        // this body from counting as this grant's insert.
+        return new Response(JSON.stringify({ inserted_hashes: ids, skipped_hashes: ids }), { status: 200 });
       }
       for (const record of body.records ?? []) committed.add(record.id);
       return new Response(JSON.stringify({ inserted_hashes: ids, skipped_hashes: [] }), { status: 200 });
@@ -101,6 +115,9 @@ function mockOpsFetch(opts: {
     if (body.operation === "delete") {
       if (opts.networkErrorOnDelete) throw new TypeError("fetch failed: connection refused");
       if (opts.failDelete) return new Response("delete failed", { status: 500 });
+      if (opts.deleteResultBody !== undefined) {
+        return new Response(JSON.stringify(opts.deleteResultBody), { status: 200 });
+      }
       if (opts.skipDelete) {
         return new Response(JSON.stringify({ deleted_hashes: [], skipped_hashes: body.ids ?? [] }), { status: 200 });
       }
@@ -719,7 +736,7 @@ describe("grantMcpClient — insert and delete uncertainty (flair#3077)", () => 
     expect(readMcpClientManifest(failingManifest)).toHaveLength(0);
   });
 
-  test("a 2xx insert that Harper reports as skipped keeps both key files, sends no delete and reports the outcome as unknown", async () => {
+  test("a 2xx insert whose body names the id in both `inserted_hashes` and `skipped_hashes` keeps both key files, sends no delete and reports the outcome as unknown", async () => {
     const parentAsFile = join(dir, "manifest-parent-insert-skip");
     writeFileSync(parentAsFile, "occupied");
     const failingManifest = join(parentAsFile, "mcp-clients.json");
@@ -754,6 +771,104 @@ describe("grantMcpClient — insert and delete uncertainty (flair#3077)", () => 
 
     const { fetchImpl, calls } = mockOpsFetch({ skipDelete: true });
     const name = "delete-skipped";
+    let thrown: Error | undefined;
+    try {
+      await grantMcpClient(
+        { name, keysDir, manifestPath: failingManifest, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "s3cret" },
+        { fetchImpl },
+      );
+    } catch (error) { thrown = error as Error; }
+
+    const privPath = join(keysDir, `${name}.key`);
+    const pubPath = join(keysDir, `${name}.pub`);
+    expect(thrown).toBeDefined();
+    expect(thrown!.message).toContain("deletion was not acknowledged");
+    expect(thrown!.message).not.toContain("was deleted");
+    expect(existsSync(privPath)).toBe(true);
+    expect(existsSync(pubPath)).toBe(true);
+    expect(calls.some((c) => c.operation === "delete" && c.ids?.[0] === name)).toBe(true);
+    expect(readMcpClientManifest(failingManifest)).toHaveLength(0);
+  });
+
+  test("a 2xx insert body that names the id and carries an error keeps both key files, sends no delete and reports the outcome as unknown", async () => {
+    const name = "insert-error-with-id";
+    const { fetchImpl, calls } = mockOpsFetch({
+      insertResultBody: { inserted_hashes: [name], skipped_hashes: [], error: "write refused" },
+    });
+    let thrown: Error | undefined;
+    try {
+      await grantMcpClient(
+        { name, keysDir, manifestPath, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "s3cret" },
+        { fetchImpl },
+      );
+    } catch (error) { thrown = error as Error; }
+
+    const privPath = join(keysDir, `${name}.key`);
+    const pubPath = join(keysDir, `${name}.pub`);
+    expect(thrown).toBeDefined();
+    expect(thrown!.message).toContain("outcome is unknown");
+    expect(thrown!.message).toContain(`flair agent remove ${name}`);
+    expect(existsSync(privPath)).toBe(true);
+    expect(existsSync(pubPath)).toBe(true);
+    expect(calls.some((c) => c.operation === "insert")).toBe(true);
+    expect(calls.some((c) => c.operation === "delete")).toBe(false);
+    expect(readMcpClientManifest(manifestPath)).toHaveLength(0);
+  });
+
+  test("a 2xx insert with an unreadable body keeps both key files, sends no delete and reports the outcome as unknown", async () => {
+    const name = "insert-unreadable-body";
+    const { fetchImpl, calls } = mockOpsFetch({ insertResultText: "<html>not json</html>" });
+    let thrown: Error | undefined;
+    try {
+      await grantMcpClient(
+        { name, keysDir, manifestPath, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "s3cret" },
+        { fetchImpl },
+      );
+    } catch (error) { thrown = error as Error; }
+
+    const privPath = join(keysDir, `${name}.key`);
+    const pubPath = join(keysDir, `${name}.pub`);
+    expect(thrown).toBeDefined();
+    expect(thrown!.message).toContain("outcome is unknown");
+    expect(existsSync(privPath)).toBe(true);
+    expect(existsSync(pubPath)).toBe(true);
+    expect(calls.some((c) => c.operation === "insert")).toBe(true);
+    expect(calls.some((c) => c.operation === "delete")).toBe(false);
+    expect(readMcpClientManifest(manifestPath)).toHaveLength(0);
+  });
+
+  test("a 2xx insert body that does not name the id keeps both key files, sends no delete and reports the outcome as unknown", async () => {
+    const name = "insert-other-id";
+    const { fetchImpl, calls } = mockOpsFetch({
+      insertResultBody: { inserted_hashes: ["agent-other"], skipped_hashes: [] },
+    });
+    let thrown: Error | undefined;
+    try {
+      await grantMcpClient(
+        { name, keysDir, manifestPath, issuer: ISSUER, opsPortOrUrl: OPS_PORT, adminUser: "admin", adminPass: "s3cret" },
+        { fetchImpl },
+      );
+    } catch (error) { thrown = error as Error; }
+
+    const privPath = join(keysDir, `${name}.key`);
+    const pubPath = join(keysDir, `${name}.pub`);
+    expect(thrown).toBeDefined();
+    expect(thrown!.message).toContain("outcome is unknown");
+    expect(existsSync(privPath)).toBe(true);
+    expect(existsSync(pubPath)).toBe(true);
+    expect(calls.some((c) => c.operation === "insert")).toBe(true);
+    expect(calls.some((c) => c.operation === "delete")).toBe(false);
+    expect(readMcpClientManifest(manifestPath)).toHaveLength(0);
+  });
+
+  test("a 2xx delete body that names the id and carries an error keeps the keys and reports the deletion as unconfirmed", async () => {
+    const parentAsFile = join(dir, "manifest-parent-delete-error");
+    writeFileSync(parentAsFile, "occupied");
+    const failingManifest = join(parentAsFile, "mcp-clients.json");
+    const name = "delete-error-with-id";
+    const { fetchImpl, calls } = mockOpsFetch({
+      deleteResultBody: { deleted_hashes: [name], skipped_hashes: [], error: "delete conflict" },
+    });
     let thrown: Error | undefined;
     try {
       await grantMcpClient(
