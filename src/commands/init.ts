@@ -2,8 +2,9 @@
  * init.ts — extracted from src/cli.ts (flair#1636, epic #1618).
  *
  * Shared cli-locals stay in cli.ts and are injected via bindCli() before
- * register(); this module never imports src/cli.ts. Top-level imports only
- * (no require(), #1653). Compiled strictly via tsconfig.check.src.json.
+ * register(); this module never imports src/cli.ts at runtime. Top-level
+ * imports only (no require(), #1653). Compiled strictly via
+ * tsconfig.check.src.json.
  */
 import { Command } from "commander";
 import { applyOrReportClaudeMdBootstrap } from "../doctor-client.js";
@@ -35,6 +36,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { ensureAgentKeysDir, readOrCreateAgentKey } from "../lib/agent-key-file.js";
 import { stageRemoteAdminPassword, type RemoteAdminPassStage } from "../lib/remote-admin-pass.js";
+import type { FabricProvisionHooks, ProvisionedFabricPrincipal } from "../cli.js";
 
 import { join, resolve } from "node:path";
 import { localPortState } from "../lib/init-tcp-probe.js";
@@ -66,7 +68,14 @@ export type InitCli = {
   opsNetworkPortValue: (...args: any[]) => any;
   persistDefaultInstallCoordinates: (...args: any[]) => any;
   privKeyPath: (...args: any[]) => any;
-  provisionFabric: (...args: any[]) => any;
+  provisionFabric: (
+    target: string,
+    opsTarget: string,
+    clusterAdminUser: string,
+    clusterAdminPass: string,
+    flairAdminPass: string,
+    hooks?: FabricProvisionHooks,
+  ) => Promise<ProvisionedFabricPrincipal>;
   pubKeyPath: (...args: any[]) => any;
   readyOpsSocketPosture: (...args: any[]) => any;
   reconcileFederationInstanceViaOpsApi: (...args: any[]) => any;
@@ -196,8 +205,21 @@ function privKeyPath(...args: any[]): any {
   return cli.privKeyPath(...args);
 }
 
-function provisionFabric(...args: any[]): any {
-  return cli.provisionFabric(...args);
+/**
+ * Type of this module's wrapper. The type-only test
+ * `test/types/init-provision-fabric-3126.types.ts` asserts its return type is
+ * not `any` (flair#3126).
+ */
+export type InitProvisionFabricFn = typeof provisionFabric;
+function provisionFabric(
+  target: string,
+  opsTarget: string,
+  clusterAdminUser: string,
+  clusterAdminPass: string,
+  flairAdminPass: string,
+  hooks?: FabricProvisionHooks,
+): Promise<ProvisionedFabricPrincipal> {
+  return cli.provisionFabric(target, opsTarget, clusterAdminUser, clusterAdminPass, flairAdminPass, hooks);
 }
 
 function pubKeyPath(...args: any[]): any {
@@ -686,9 +708,8 @@ addAdminPassOptions(
         let saveAttempted = false;
         let saveApplied = false;
         let requestSent = false;
-        let provisioned: RemoteInitPrincipal;
         try {
-          provisioned = await provisionFabric(baseUrl, opsUrl, clusterAdminUser, clusterAdminPass, flairAdminPass, {
+          provisionedPrincipal = await provisionFabric(baseUrl, opsUrl, clusterAdminUser, clusterAdminPass, flairAdminPass, {
             // Before the first cluster write, when this run attempts to set
             // `admin`'s password. A throw here leaves the cluster unchanged.
             beforeAdminPasswordApplied: () => {
@@ -754,12 +775,11 @@ addAdminPassOptions(
           }
           throw err;
         }
-        provisionedPrincipal = provisioned;
         didProvision = true;
-        if (!provisioned.created && existsSync(secretPath)) {
+        if (!provisionedPrincipal.created && existsSync(secretPath)) {
           console.warn(`⚠ ${secretPath} already exists, but this run reused an existing super_user cluster administrator and neither changed nor verified that file. Verify it by authenticating to the instance with the password it holds before relying on it.`);
         }
-        if (provisioned.created) {
+        if (provisionedPrincipal.created) {
           console.log(`Admin password written to ${secretPath}`);
         }
       } else {
@@ -780,15 +800,16 @@ addAdminPassOptions(
           process.exit(1);
         }
         flairAdminPass = opts.adminPass;
+        // flair#1345: only the already-running-instance leg honors --admin-user /
+        // FLAIR_ADMIN_USER; provisioning uses the returned principal.
+        provisionedPrincipal = {
+          username: resolveAdminUser(opts.adminUser),
+          password: opts.adminPass,
+          created: false,
+        };
       }
 
-      // flair#1345: only the already-running-instance leg honors --admin-user /
-      // FLAIR_ADMIN_USER; provisioning uses the returned principal.
-      const principal: RemoteInitPrincipal = provisionedPrincipal ?? {
-        username: resolveAdminUser(opts.adminUser),
-        password: flairAdminPass!,
-        created: false,
-      };
+      const principal: RemoteInitPrincipal = provisionedPrincipal;
       if (!didProvision) refuseOperatorAgentId(agentId, [principal.username]);
       const { instanceId, privPath } = await finishRemoteInit(principal, {
         baseUrl,

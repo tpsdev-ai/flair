@@ -31,6 +31,9 @@
 //      c–e are deliberately looser than a–b: a helper's string is shared by the
 //      commands that call it, and this test does not follow calls. They still
 //      catch a flag that no command in reach declares, which is what #2116's --ops-url was.
+//      c–e follow static imports, re-exports, dynamic imports and require, but not
+//      whole-declaration type forms (`import type …`, `export type …`): TypeScript erases
+//      them, so they create no runtime dependency.
 //
 // What this does NOT check:
 //   - a flag's own declaration (`.option("--x <v>")`);
@@ -477,8 +480,13 @@ function srcFiles(dir: string): string[] {
 function importsOf(file: string, text: string, known: Set<string>): string[] {
   const specs: string[] = [];
   const visit = (n: ts.Node): void => {
-    if ((ts.isImportDeclaration(n) || ts.isExportDeclaration(n)) && n.moduleSpecifier && ts.isStringLiteral(n.moduleSpecifier)) {
-      specs.push(n.moduleSpecifier.text);
+    if (ts.isImportDeclaration(n) && n.moduleSpecifier && ts.isStringLiteral(n.moduleSpecifier)) {
+      // Whole-declaration `import type` / `export type` forms are erased and skipped.
+      // Element-only `import { type X }` / `export { type X }` forms are followed
+      // conservatively, though erased under the current compiler settings.
+      if (!n.importClause?.isTypeOnly) specs.push(n.moduleSpecifier.text);
+    } else if (ts.isExportDeclaration(n) && n.moduleSpecifier && ts.isStringLiteral(n.moduleSpecifier)) {
+      if (!n.isTypeOnly) specs.push(n.moduleSpecifier.text);
     } else if (
       ts.isCallExpression(n)
       && (n.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(n.expression) && n.expression.text === "require"))
@@ -644,6 +652,21 @@ describe("flair#2116 — the rule, on a synthetic tree", () => {
 
   test("template literals are read whole, substitutions included", () => {
     expect(scan("export const t = (x) => `pass --alpha ${x} and --delta`;")).toEqual(["--delta"]);
+  });
+
+  test("whole-declaration type forms are skipped; element-only forms are followed", () => {
+    const dir = "/fixture/tree";
+    const known = new Set([`${dir}/m.ts`]);
+    const deps = (body: string): string[] => importsOf(`${dir}/a.ts`, body, known);
+    expect(deps(`import type { X } from "./m";`)).toEqual([]);
+    expect(deps(`export type { X } from "./m";`)).toEqual([]);
+    expect(deps(`export type * from "./m";`)).toEqual([]);
+    expect(deps(`import { type X, y } from "./m";`)).toEqual([`${dir}/m.ts`]);
+    expect(deps(`import { type X } from "./m";`)).toEqual([`${dir}/m.ts`]);
+    expect(deps(`import { y } from "./m";`)).toEqual([`${dir}/m.ts`]);
+    expect(deps(`export { type X } from "./m";`)).toEqual([`${dir}/m.ts`]);
+    expect(deps(`const m = await import("./m");`)).toEqual([`${dir}/m.ts`]);
+    expect(deps(`const m = require("./m");`)).toEqual([`${dir}/m.ts`]);
   });
 });
 
