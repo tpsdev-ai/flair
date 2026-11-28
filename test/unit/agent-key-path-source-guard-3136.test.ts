@@ -2,12 +2,13 @@
  * flair#3136 item 1: regression guard for literal `.key`, `-priv.key` and `.pub`
  * suffix spellings outside src/lib/key-dir.ts: plain strings, template text and
  * concatenated suffix literals, including inside `${...}`, with a named allowlist.
- * It does not detect escaped/cooked spellings such as `"\x2ekey"` or a suffix
- * split across literals, or prove that no source file assembles an agent key name.
+ * It does not detect a suffix split across literals, or prove that no source
+ * file assembles an agent key name.
  */
 import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
+import ts from "typescript";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const SRC = join(ROOT, "src");
@@ -62,149 +63,56 @@ interface Literal {
   index: number;
 }
 
-function stripComments(source: string): string {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, (comment) => comment.replace(/[^\n]/g, ""))
-    .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
-}
+/** Reports the parse diagnostics of the SourceFile passed to getSyntacticDiagnostics. */
+const PARSE_CHECK = ts.createProgram({ rootNames: [], options: { noLib: true, noResolve: true, types: [] } });
 
-function lineCounter(source: string): (index: number) => number {
-  const starts = [0];
-  for (let i = 0; i < source.length; i++) if (source[i] === "\n") starts.push(i + 1);
-  return (index) => {
-    let low = 0;
-    let high = starts.length - 1;
-    while (low < high) {
-      const middle = (low + high + 1) >> 1;
-      if (starts[middle] <= index) low = middle;
-      else high = middle - 1;
-    }
-    return low + 1;
-  };
-}
-
-/** Each string literal and template-literal text chunk in `source`, with
- *  `${...}` expressions scanned recursively so a literal inside one is found
- *  too. */
-function literals(source: string): Literal[] {
+/** Comments are skipped because the parser classifies them; literals come from
+ *  the AST, so no regex pass reads code as comment text. A source with a parse
+ *  diagnostic fails before its AST is walked: error recovery can leave a literal
+ *  out of the tree. */
+function literals(source: string, fileName: string): Literal[] {
+  const sourceFile = ts.createSourceFile(
+    fileName,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const [diagnostic] = PARSE_CHECK.getSyntacticDiagnostics(sourceFile);
+  if (diagnostic) {
+    const { line, character } = sourceFile.getLineAndCharacterOfPosition(diagnostic.start);
+    const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n");
+    throw new Error(`${fileName}:${line + 1}:${character + 1}: ${message}`);
+  }
   const found: Literal[] = [];
-  const lineAt = lineCounter(source);
-  scan(source, 0, source.length);
+  visit(sourceFile);
   return found;
 
-  function scan(text: string, start: number, end: number): void {
-    let i = start;
-    while (i < end) {
-      const ch = text[i];
-      if (ch === '"' || ch === "'") {
-        const stop = Math.min(skipQuoted(text, i), end);
-        let literalText = "";
-        for (let j = i + 1; j < stop - 1; j++) {
-          if (text[j] === "\\") {
-            literalText += text[j + 1] ?? "";
-            j++;
-            continue;
-          }
-          literalText += text[j];
-        }
-        found.push({ text: literalText, line: lineAt(i), index: i });
-        i = stop;
-        continue;
-      }
-      if (ch === "`") {
-        let j = i + 1;
-        let textStart = i + 1;
-        let chunk = "";
-        while (j < end) {
-          if (text[j] === "\\") {
-            chunk += text[j + 1] ?? "";
-            j += 2;
-            continue;
-          }
-          if (text[j] === "`") break;
-          if (text[j] === "$" && text[j + 1] === "{") {
-            found.push({ text: chunk, line: lineAt(textStart), index: textStart });
-            const close = matchingBrace(text, j + 1);
-            if (close === -1) {
-              j = end;
-              break;
-            }
-            scan(text, j + 2, close);
-            j = close + 1;
-            textStart = j;
-            chunk = "";
-            continue;
-          }
-          chunk += text[j];
-          j++;
-        }
-        found.push({ text: chunk, line: lineAt(textStart), index: textStart });
-        i = j + 1;
-        continue;
-      }
-      i++;
+  function visit(node: ts.Node): void {
+    if (isLiteralToken(node.kind)) {
+      const index = node.getStart(sourceFile) + 1;
+      found.push({
+        text: (node as ts.TemplateLiteralLikeNode).text,
+        index,
+        line: sourceFile.getLineAndCharacterOfPosition(index).line + 1,
+      });
     }
+    node.forEachChild(visit);
   }
 }
 
-/** The index of the `}` that closes the `{` at `openIndex`, or -1. Braces inside
- *  quoted strings and template literals do not count. */
-function matchingBrace(text: string, openIndex: number): number {
-  let depth = 0;
-  let i = openIndex;
-  while (i < text.length) {
-    const ch = text[i];
-    if (ch === '"' || ch === "'") {
-      i = skipQuoted(text, i);
-      continue;
-    }
-    if (ch === "`") {
-      i = skipTemplate(text, i);
-      continue;
-    }
-    if (ch === "{") depth++;
-    else if (ch === "}") {
-      depth--;
-      if (depth === 0) return i;
-    }
-    i++;
-  }
-  return -1;
+function isLiteralToken(kind: ts.SyntaxKind): boolean {
+  return (
+    kind === ts.SyntaxKind.StringLiteral ||
+    kind === ts.SyntaxKind.NoSubstitutionTemplateLiteral ||
+    kind === ts.SyntaxKind.TemplateHead ||
+    kind === ts.SyntaxKind.TemplateMiddle ||
+    kind === ts.SyntaxKind.TemplateTail
+  );
 }
 
-function skipQuoted(text: string, start: number): number {
-  let i = start + 1;
-  while (i < text.length && text[i] !== text[start] && text[i] !== "\n") {
-    if (text[i] === "\\") {
-      i += 2;
-      continue;
-    }
-    i++;
-  }
-  return i + 1;
-}
-
-function skipTemplate(text: string, start: number): number {
-  let i = start + 1;
-  while (i < text.length) {
-    if (text[i] === "\\") {
-      i += 2;
-      continue;
-    }
-    if (text[i] === "`") return i + 1;
-    if (text[i] === "$" && text[i + 1] === "{") {
-      const close = matchingBrace(text, i + 1);
-      if (close === -1) return text.length;
-      i = close + 1;
-      continue;
-    }
-    i++;
-  }
-  return text.length;
-}
-
-function keyLiterals(source: string): Literal[] {
-  return literals(stripComments(source)).filter((literal) =>
+function keyLiterals(source: string, fileName = "fixture.ts"): Literal[] {
+  return literals(source, fileName).filter((literal) =>
     KEY_SUFFIXES.some((suffix) => literal.text.endsWith(suffix)),
   );
 }
@@ -231,12 +139,11 @@ function allowed(file: string, source: string, literal: Literal): boolean {
 
 /** Offenders in one file's source, with `relativeFile` only labelling the hits. */
 function offendersIn(relativeFile: string, source: string): string[] {
-  const stripped = stripComments(source);
-  const lines = stripped.split("\n");
+  const lines = source.split("\n");
   const found: string[] = [];
-  for (const literal of keyLiterals(stripped)) {
+  for (const literal of keyLiterals(source, relativeFile)) {
     const lineText = lines[literal.line - 1]?.trim() ?? "";
-    if (allowed(relativeFile, stripped, literal)) continue;
+    if (allowed(relativeFile, source, literal)) continue;
     found.push(`${relativeFile}:${literal.line}: ${lineText}`);
   }
   return found;
@@ -264,6 +171,44 @@ test("the detector sees string, concatenation and nested template-literal shapes
   }
   expect(keyLiterals('join(dir, `${agentId}.json`)')).toEqual([]);
   expect(keyLiterals('join(dir, agentId + ".pubx")')).toEqual([]);
+});
+
+for (const [kind, sample] of [
+  ["StringLiteral", 'const path = "agent.key";'],
+  ["NoSubstitutionTemplateLiteral", "const path = `agent.key`;"],
+  ["TemplateHead", "const path = `agent.key${suffix}`;"],
+  ["TemplateMiddle", "const path = `${agentId}.key${suffix}`;"],
+  ["TemplateTail", "const path = `${agentId}.key`;"],
+] as const) {
+  test(`a ${kind} ending in .key is flagged`, () => {
+    expect(offendersIn("src/lib/example.ts", sample)).toEqual([`src/lib/example.ts:1: ${sample}`]);
+  });
+}
+
+test("a source with a parse diagnostic fails the guard, naming the file and location", () => {
+  expect(() => offendersIn("src/lib/example.ts", "const x = ;"))
+    .toThrow("src/lib/example.ts:1:11: Expression expected.");
+  // Error recovery reads this unterminated template so that no literal ends in .key.
+  const recovered = "const broken = `unterminated\nconst bad = join(dir, `${agentId}.key`);";
+  expect(() => offendersIn("src/lib/example.ts", recovered))
+    .toThrow("src/lib/example.ts:2:24: ',' expected.");
+  const init = `${readFileSync(join(SRC, "commands", "init.ts"), "utf8")}\nconst x = ;`;
+  expect(() => offendersIn("src/commands/init.ts", init))
+    .toThrow(`src/commands/init.ts:${init.split("\n").length}:11: Expression expected.`);
+});
+
+test("a key-path literal after each comment-opener shape is still flagged", () => {
+  const samples = [
+    '// see assets/*.js\nconst bad = join(dir, `${agentId}.key`);\nconst tail = "*/";',
+    "/* block comment */ const bad = join(dir, `${agentId}.key`);",
+    'const a = "/*"; const bad = join(dir, `${agentId}.key`); const b = "*/";',
+    "const a = `//`; const bad = join(dir, `${agentId}.key`);",
+    'const re = /[/*]/; const bad = join(dir, `${agentId}.key`); const b = "*/";',
+    "const re = /[//]/; const bad = join(dir, `${agentId}.key`);",
+  ];
+  for (const sample of samples) {
+    expect(offendersIn("src/lib/example.ts", sample), sample).toHaveLength(1);
+  }
 });
 
 test("an ID-derived .key join beside an allowlisted expression on the same line still fails", () => {
