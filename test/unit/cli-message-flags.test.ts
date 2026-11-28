@@ -32,7 +32,7 @@
 //      commands that call it, and this test does not follow calls. They still
 //      catch a flag that no command in reach declares, which is what #2116's --ops-url was.
 //      c–e follow static imports, re-exports, dynamic imports and require, but not
-//      type-only declarations (`import type …`, `export type …`): TypeScript erases
+//      whole-declaration type forms (`import type …`, `export type …`): TypeScript erases
 //      them, so they create no runtime dependency.
 //
 // What this does NOT check:
@@ -481,11 +481,11 @@ function importsOf(file: string, text: string, known: Set<string>): string[] {
   const specs: string[] = [];
   const visit = (n: ts.Node): void => {
     if (ts.isImportDeclaration(n) && n.moduleSpecifier && ts.isStringLiteral(n.moduleSpecifier)) {
-      // `import type { X } from "./m"` is erased, so it is not followed (a mixed
-      // `import { type X, y }` or `import { type X }` may be retained, so it is).
+      // Whole-declaration `import type` / `export type` forms are erased and skipped.
+      // Element-only `import { type X }` / `export { type X }` forms are followed
+      // conservatively, though erased under the current compiler settings.
       if (!n.importClause?.isTypeOnly) specs.push(n.moduleSpecifier.text);
     } else if (ts.isExportDeclaration(n) && n.moduleSpecifier && ts.isStringLiteral(n.moduleSpecifier)) {
-      // `export type { X } from "./m"` is erased too; `export { type X }` is not.
       if (!n.isTypeOnly) specs.push(n.moduleSpecifier.text);
     } else if (
       ts.isCallExpression(n)
@@ -654,7 +654,7 @@ describe("flair#2116 — the rule, on a synthetic tree", () => {
     expect(scan("export const t = (x) => `pass --alpha ${x} and --delta`;")).toEqual(["--delta"]);
   });
 
-  test("type-only declarations are not runtime edges; value imports are", () => {
+  test("whole-declaration type forms are skipped; element-only forms are followed", () => {
     const dir = "/fixture/tree";
     const known = new Set([`${dir}/m.ts`]);
     const deps = (body: string): string[] => importsOf(`${dir}/a.ts`, body, known);
